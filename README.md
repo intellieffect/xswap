@@ -136,6 +136,13 @@ This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, sel
 ## Update or uninstall
 
 ```sh
+xswap upgrade                    # Reinstall the latest tag; add --tag vX.Y.Z for a specific release
+xswap upgrade --dry-run          # Print the command without running it
+```
+
+Or run the underlying command directly:
+
+```sh
 uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
 ```
 
