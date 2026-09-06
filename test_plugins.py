@@ -50,6 +50,7 @@ class PluginTests(unittest.TestCase):
  def test_registered_profile_and_both_auto_homes_are_repaired(self):
   manager=Manager(self.base/'store',self.source)
   (self.source/'auth.json').write_text('{"auth_mode":"apikey","OPENAI_API_KEY":"fixture"}')
+  (self.source/'auth.json').chmod(0o600)
   manager.register('main');profile=manager.prepare('second')
   # Reproduce all v0.3.0 legacy homes; auto links chain through the profile.
   import shutil

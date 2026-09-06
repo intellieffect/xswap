@@ -21,8 +21,9 @@ import time
 from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines
 from xswap_live import LiveError
 from xswap_plugins import ensure_plugins
+from xswap_credentials import CredentialError, read_auth
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 class SwapError(Exception):
@@ -72,7 +73,7 @@ def identity(home):
     if not path.exists():
         return "not signed in"
     try:
-        data = json.loads(path.read_text())
+        data = read_auth(home)
         if not isinstance(data, dict):
             return "unreadable auth cache"
         if data.get("auth_mode") == "apikey" or data.get("OPENAI_API_KEY"):
@@ -88,6 +89,8 @@ def identity(home):
         # These are unverified local labels, not evidence that the login is valid.
         label = (claims.get("email") or "ChatGPT") if isinstance(claims, dict) else "ChatGPT"
         return "".join(c for c in str(label) if c.isprintable()) if tokens.get("access_token") else "not signed in"
+    except CredentialError as exc:
+        raise SwapError(str(exc)) from None
     except (ValueError, OSError, IndexError, TypeError):
         return "unreadable auth cache"
 
