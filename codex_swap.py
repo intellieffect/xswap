@@ -657,7 +657,9 @@ def parser():
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
     up.add_argument("--dry-run", action="store_true")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
-    u.add_argument("name")
+    u.add_argument("name", nargs="?")
+    u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now (one-shot; not live switching)")
+    u.add_argument("--model", help="Model hint for --best; never passed to codex")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
     d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
     d.add_argument("name")
@@ -767,11 +769,23 @@ def main(argv=None):
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command in ("use", "switch"):
-            if args.openclaw:
-                manager.sync_openclaw(args.name, select=True)
+            if bool(args.name) == bool(args.best):
+                raise SwapError("Give an account name or --best.")
+            detail = ""
+            if args.best:
+                name, reason = manager.best_account(args.model)
+                if name is None:
+                    raise SwapError("No account with known remaining quota; nothing selected.")
+                parts = [f"{label} {value:g}% left" for label, value in reason["remaining"].items() if value is not None]
+                if parts:
+                    detail = f" ({', '.join(parts)})"
             else:
-                manager.use(args.name)
-            print(f"Selected {args.name}. CLI: xswap · Desktop: xswap app\nRunning sessions and plain codex keep their current account.")
+                name = args.name
+            if args.openclaw:
+                manager.sync_openclaw(name, select=True)
+            else:
+                manager.use(name)
+            print(f"Selected {name}{detail}. CLI: xswap · Desktop: xswap app\nRunning sessions and plain codex keep their current account.")
         elif args.command == "disable":
             manager.set_disabled(args.name, True)
             print(f"Disabled {args.name}. It is skipped by use, --auto pools, and live usage fetches. Restore it: xswap enable {args.name}")
