@@ -24,13 +24,12 @@ If the command isn't found, run `uv tool update-shell` and open a new terminal. 
 ```sh
 codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
-xswap add work              # Sign in to a separate local profile
-xswap use work
+xswap add work --use        # Sign in to a separate local profile and select it
 xswap login work            # Re-authenticate work after its login expires
 xswap                       # Launch the selected account's CLI
 ```
 
-`main` and `work` are example local labels. Each account stores its own credentials and conversations. Credential storage must use Codex's `file` mode; `keyring` and `auto` modes are rejected without changing your configuration.
+`main` and `work` are example local labels. Each account stores its own credentials and conversations. Credential storage must use Codex's `file` mode; `keyring` and `auto` modes are rejected without changing your configuration. The very first account added is selected automatically even without `--use`; `xswap add work` on its own leaves an existing selection unchanged.
 
 ```sh
 xswap list                  # Live quotas, Spark hidden by default

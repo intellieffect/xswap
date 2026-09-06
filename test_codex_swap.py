@@ -179,6 +179,63 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("xswap login main", stderr.getvalue())
 
+    def _write_login(self, command, env):
+        # Stand in for a real `codex login`: succeed and drop a signed-in auth.json.
+        atomic_json(Path(env["CODEX_HOME"]) / "auth.json", self.auth)
+        return 0
+
+    def test_add_use_selects_account(self):
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", side_effect=self._write_login), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(["add", "work", "--use"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account(), ("work", self.manager.root / "profiles" / "work" / "codex"))
+        self.assertIn("Selected work.", out.getvalue())
+
+    def test_add_without_use_leaves_existing_active(self):
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", side_effect=self._write_login), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(["add", "second"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account(), ("main", self.source))
+        self.assertNotIn("Selected", out.getvalue())
+
+    def test_first_add_selects_automatically(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", side_effect=self._write_login), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(["add", "first"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account(), ("first", self.manager.root / "profiles" / "first" / "codex"))
+        self.assertIn("Selected first (first account).", out.getvalue())
+
+    def test_prepare_only_leaves_active_none(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            code = main(["add", "work", "--prepare-only"])
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.manager.read()["active"])
+
+    def test_failed_login_does_not_select(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", return_value=1), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["add", "work"])
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.manager.read()["active"])
+
     def test_bridge_error_does_not_forward_raw_stderr(self):
         self.manager.register("main")
         executable = self.bridge_installation()

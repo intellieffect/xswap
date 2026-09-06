@@ -431,6 +431,7 @@ def parser():
     a = sub.add_parser("add", help="Sign in to an isolated account home")
     a.add_argument("name"); a.add_argument("--device-auth", action="store_true")
     a.add_argument("--prepare-only", action="store_true")
+    a.add_argument("--use", action="store_true", help="Select this account immediately after signing in")
     lg = sub.add_parser("login", help="Re-authenticate a registered account whose login expired")
     lg.add_argument("name"); lg.add_argument("--device-auth", action="store_true")
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
@@ -498,6 +499,13 @@ def main(argv=None):
             if result:
                 return result
             print(f"Saved {args.name}: {identity(home)}. Select it: xswap use {args.name}")
+            # The account must be signed in before it can become active, so this only runs after login succeeds.
+            if args.use:
+                manager.use(args.name)
+                print(f"Selected {args.name}.")
+            elif manager.read()["active"] is None:
+                manager.use(args.name)
+                print(f"Selected {args.name} (first account).")
         elif args.command == "login":
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":

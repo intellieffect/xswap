@@ -19,14 +19,13 @@ xswap --version
 
 ```sh
 xswap register main       # 현재 Codex 로그인 등록
-xswap add work            # 브라우저에서 추가 OpenAI 계정으로 로그인
-xswap use work            # xswap의 기본 계정 선택
+xswap add work --use      # 브라우저에서 추가 OpenAI 계정으로 로그인하고 바로 선택
 xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
 xswap                     # 선택한 계정으로 Codex CLI 실행
 xswap app                 # 선택한 계정의 별도 데스크톱 창 열기
 ```
 
-현재 Codex에 로그인하지 않았다면 먼저 `codex login`을 실행하십시오. `xswap list`로 등록 계정을, `xswap status`로 선택된 계정의 로컬 로그인 상태를 확인할 수 있습니다.
+현재 Codex에 로그인하지 않았다면 먼저 `codex login`을 실행하십시오. `xswap list`로 등록 계정을, `xswap status`로 선택된 계정의 로컬 로그인 상태를 확인할 수 있습니다. **처음 추가하는 계정은 `--use` 없이도 자동으로 선택됩니다.** 이후 `xswap add work`처럼 계정을 추가로 등록할 때는 기존 선택이 그대로 유지됩니다.
 
 ## 잔여 사용량 보기
 
