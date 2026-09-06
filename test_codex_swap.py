@@ -499,9 +499,7 @@ class BestAccountTests(unittest.TestCase):
 
     def test_skips_disabled_accounts(self):
         self.add("second")
-        data = self.manager.read()
-        data["accounts"]["main"]["disabled"] = True
-        atomic_json(self.manager.registry, data)
+        self.manager.set_disabled("main", True)
         fake = self.fake_read_limits({"second": dual_window_raw(remaining5h=10, remaining7d=10)})
         with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
             name, reason = self.manager.best_account()
@@ -554,3 +552,42 @@ class BestAccountTests(unittest.TestCase):
             code = main(["run", "--best", "--account", "main", "--", "resume"])
         self.assertEqual(code, 1)
         self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--auto", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_accounts_without_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--accounts requires --auto", stderr.getvalue())
+
+    def test_dry_run_prints_expected_json_shape(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+        })
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stdout = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(stdout):
+            code = main(["run", "--best", "--dry-run", "--", "exec", "hi"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(set(payload.keys()), {"account", "reason", "CODEX_HOME", "argv"})
+        self.assertEqual(set(payload["reason"].keys()), {"remaining", "candidates"})
+        self.assertEqual(payload["account"], "second")
+        self.assertEqual(payload["reason"]["remaining"], {"5h": 90, "7d": 90})
+        self.assertEqual({c["name"] for c in payload["reason"]["candidates"]}, {"main", "second"})
+        self.assertEqual(payload["CODEX_HOME"], str(self.manager.account("second")[1]))
+        self.assertEqual(payload["argv"], ["/usr/bin/codex", "exec", "hi"])

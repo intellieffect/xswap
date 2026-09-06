@@ -298,10 +298,8 @@ class Manager:
         A one-shot choice for launchers (like `codex exec`) that have no
         `--remote` hook and so cannot be protected by the live auto bridge.
         """
-        data = self.read()
         excluded = set(exclude)
-        candidates = [(n, Path(v["home"])) for n, v in data["accounts"].items()
-                      if not v.get("disabled") and n not in excluded]
+        candidates = [(n, h) for n, h in self.enabled_accounts() if n not in excluded]
         if not candidates:
             return None, {"remaining": {}, "candidates": []}
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(candidates)))) as pool:
@@ -318,7 +316,7 @@ class Manager:
         def rank_key(row):
             known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
             if not known:
-                return (0, float("inf"))
+                return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
             tightest = min(known, key=lambda w: w["remainingPercent"])
             return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
 
@@ -632,6 +630,8 @@ def main(argv=None):
             if getattr(args, "best", False):
                 if args.account or getattr(args, "auto", False):
                     raise SwapError("--best cannot be combined with --account or --auto.")
+                if getattr(args, "accounts", None):
+                    raise SwapError("--accounts requires --auto.")
                 name, reason = manager.best_account(getattr(args, "model", None))
                 if name is None:
                     name, _ = manager.account()
