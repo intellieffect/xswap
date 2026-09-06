@@ -26,7 +26,7 @@ from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 class SwapError(Exception):

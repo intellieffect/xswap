@@ -195,7 +195,7 @@ class Bridge:
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.5.1', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': '0.6.1', 'weeklyRemainingThreshold': self.threshold(),
                 'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
                 'manualRequest': self.manual_request, 'manualState': self.manual_state,
                 'updatedAt': time.time(), **extra})

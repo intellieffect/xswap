@@ -1,5 +1,9 @@
 # 0.4.0 — 2026-09-06
 
+## 0.6.1
+
+- Print a shell-quoted xswap resume command after the CLI closes its temporary bridge. Preserve the original home, account store, current account, and pool; do not reuse the closed Unix socket.
+
 ## 0.6.0
 
 Account lifecycle, quota-aware selection, unattended failover, and operations tooling. No change to existing account, session, or auto-mode behavior unless a new flag is used.
