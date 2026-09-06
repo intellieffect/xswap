@@ -23,7 +23,7 @@ from xswap_live import LiveError
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 
 class SwapError(Exception):
@@ -221,7 +221,7 @@ class Manager:
                 row["status"] = "usage unavailable: cannot start Codex CLI"
         return row
 
-    def show_accounts(self, name=None, offline=False, json_output=False):
+    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False):
         data = self.read()
         if name is not None:
             selected, home = self.account(name)
@@ -242,7 +242,10 @@ class Manager:
             plan = next((bucket["plan"] for bucket in row["buckets"] if bucket["plan"]), None)
             print(f"{'*' if row['active'] else ' '} {row['name']:16} {row['identity']}" + (f" [{plan}]" if plan else ""))
             if row["status"] == "ok":
-                for line in usage_lines(row["buckets"]):
+                buckets = row["buckets"] if include_spark else [
+                    bucket for bucket in row["buckets"]
+                    if "spark" not in (bucket["id"] + " " + bucket["name"]).lower()]
+                for line in usage_lines(buckets):
                     print(f"    {line}")
             elif row["status"] not in ("offline", "not signed in", "unreadable auth cache"):
                 print(f"    {row['status']}")
@@ -397,6 +400,8 @@ def parser():
     listing.add_argument("--offline", action="store_true", help="Show local account labels without fetching usage")
     listing.add_argument("--json", action="store_true", dest="json_output")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
+    listing.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
+    usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("status", help="Show selected account and login status")
@@ -449,10 +454,10 @@ def main(argv=None):
                 return result
             print(f"Saved {args.name}: {identity(home)}. Select it: xswap use {args.name}")
         elif args.command == "list":
-            manager.show_accounts(offline=args.offline, json_output=args.json_output)
+            manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark)
         elif args.command == "usage":
             name, _ = manager.account(args.name)
-            manager.show_accounts(name=name, json_output=args.json_output)
+            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark)
         elif args.command == "status":
             name, home = manager.account()
             print(f"Selected: {name}\nHome: {home}\nLocal label: {identity(home)}", flush=True)

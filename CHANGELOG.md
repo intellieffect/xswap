@@ -1,5 +1,9 @@
 # 0.4.0 — 2026-09-06
 
+## 0.4.3
+
+- Hide Spark quotas in default list/usage text output; use --include-spark to show them. JSON quota data and automatic account selection are unchanged.
+
 ## 0.4.2
 
 Version 0.4.1 was skipped: its tag accidentally points to the unchanged 0.4.0 source. Use 0.4.2 for these fixes.
