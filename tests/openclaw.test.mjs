@@ -17,9 +17,9 @@ function fixture(t) {
   let writes = 0;
   const request = { account: 'main', codexHome, backupRoot: path.join(root, 'backups') };
   const sdk = {
-    resolveOpenAICodexAuthIdentity: () => ({ accountId: 'fake-account', email: 'example@example.invalid' }),
+    resolveOpenAICodexAuthIdentity: ({ accountId }) => ({ accountId: accountId || 'fake-account', email: 'example@example.invalid' }),
     decodeOpenAICodexJwtPayload: () => ({ sub: 'fake-person' }),
-    resolveOpenAICodexAccessTokenExpiry: () => expires,
+    resolveOpenAICodexAccessTokenExpiry: () => expires, // overridden per-token in pool tests
     async updateAuthProfileStoreWithLock(params) {
       const snapshot = structuredClone(params.sharedStoreWrite ? shared : { ...local[params.agentDir], profiles: shared.profiles });
       params.updater(snapshot);
@@ -35,6 +35,14 @@ function fixture(t) {
     loadAuthProfileStoreWithoutExternalProfiles: id => structuredClone({ ...local[id], profiles: shared.profiles }),
   };
   return { request, sdk, agentSdk, auth, writeAuth, expires, root, local, shared: () => shared, writes: () => writes };
+}
+
+function addAccount(root, name) {
+  const codexHome = path.join(root, name);
+  fs.mkdirSync(codexHome);
+  const auth = { auth_mode: 'chatgpt', tokens: { access_token: `${name}-access`, refresh_token: `${name}-refresh`, account_id: `${name}-account` } };
+  fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(auth), { mode: 0o600 });
+  return { name, codexHome };
 }
 
 test('all agents select the shared new profile; unrelated providers and credentials survive', async t => {
@@ -125,3 +133,36 @@ for (const kind of ['readable', 'symlink', 'directory']) {
     assert(!fs.existsSync(f.request.backupRoot));
   });
 }
+
+test('a single-account request without an accounts array still produces a one-element order', async t => {
+  const f = fixture(t); const result = await sync(f.request, f.sdk, f.agentSdk, {});
+  assert.deepEqual(result.profileIds, [result.profileId]);
+  for (const id of result.completed) assert.deepEqual(f.local[id].order.openai, [result.profileId]);
+});
+
+test('pooled accounts: every agent gets every profile id, in the given order, and the previous order is backed up', async t => {
+  const f = fixture(t);
+  const second = addAccount(f.root, 'second');
+  const request = { ...f.request, accounts: [{ name: 'main', codexHome: f.request.codexHome }, { name: 'second', codexHome: second.codexHome }] };
+  const result = await sync(request, f.sdk, f.agentSdk, {});
+  assert.deepEqual(result.completed, ['main', 'worker']);
+  assert.equal(result.profileIds.length, 2);
+  assert.notEqual(result.profileIds[0], result.profileIds[1]);
+  for (const id of result.completed) assert.deepEqual(f.local[id].order.openai, result.profileIds);
+  // Anthropic and other providers' orders are untouched by the pool sync.
+  assert.deepEqual(f.local.main.order.anthropic, ['keep-me']);
+  const agentBackup = JSON.parse(fs.readFileSync(path.join(result.backup, 'agent-0.json'), 'utf8'));
+  assert.deepEqual(agentBackup.previousOrder, ['openai:old']);
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.backup, 'manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.accounts.map(a => a.name), ['main', 'second']);
+});
+
+test('one expired credential in the pool blocks the whole sync before any write', async t => {
+  const f = fixture(t);
+  const second = addAccount(f.root, 'second');
+  f.sdk.resolveOpenAICodexAccessTokenExpiry = token => (token === 'second-access' ? Date.now() - 1 : f.expires);
+  const request = { ...f.request, accounts: [{ name: 'main', codexHome: f.request.codexHome }, { name: 'second', codexHome: second.codexHome }] };
+  await assert.rejects(sync(request, f.sdk, f.agentSdk, {}), /expired/);
+  assert.equal(f.writes(), 0);
+  assert(!fs.existsSync(request.backupRoot));
+});

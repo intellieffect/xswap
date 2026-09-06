@@ -21,7 +21,7 @@ import time
 
 from xswap_usage import UsageError, normalize_limits, read_limits, short_line, usage_lines, window_label
 from xswap_usage import warnings as usage_warnings
-from xswap_live import LiveError, buckets_available
+from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
@@ -94,6 +94,35 @@ def resolve_openclaw_package_root(executable):
                     return directory
             except (OSError, ValueError):
                 pass
+    return None
+
+
+def parse_pool(text):
+    seen = []
+    for part in text.split(","):
+        part = part.strip()
+        if part and part not in seen:
+            seen.append(part)
+    if len(seen) < 2:
+        raise SwapError("--pool needs at least two distinct registered account names.")
+    return seen
+
+
+def chatgpt_org_id(home):
+    """Best-effort, unverified org id from a local credential; None if unreadable/unknown."""
+    try:
+        data = read_auth(home)
+    except CredentialError:
+        return None
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    for key in ("id_token", "access_token"):
+        token = tokens.get(key)
+        if isinstance(token, str) and token:
+            auth = jwt_claims(token).get("https://api.openai.com/auth")
+            if isinstance(auth, dict) and auth.get("chatgpt_account_id"):
+                return auth["chatgpt_account_id"]
     return None
 
 
@@ -471,13 +500,35 @@ class Manager:
         remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
         return winner["name"], {"remaining": remaining, "candidates": summary}
 
-    def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
+    def sync_openclaw(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
         # Directory mappings scope a single launched session; OpenClaw sync mutates
-        # shared agent state, so an omitted name must fall back to the selected
-        # account only, never a directory mapping.
-        name, home = self.account(name, mapped=False)
-        self.require_enabled(name)
-        check_file_store(home)
+        # shared agent state, so an omitted/pooled name must resolve through the
+        # active account only, never a directory mapping.
+        pool = names if isinstance(names, list) else [names]
+        if isinstance(names, list):
+            deduped = []
+            for entry in pool:
+                if entry not in deduped:
+                    deduped.append(entry)
+            if len(deduped) < 2:
+                raise SwapError("--pool needs at least two distinct registered account names.")
+            pool = deduped
+        resolved = []
+        for entry in pool:
+            entry_name, entry_home = self.account(entry, mapped=False)
+            self.require_enabled(entry_name)
+            check_file_store(entry_home)
+            resolved.append((entry_name, entry_home))
+        if len(resolved) > 1 and not allow_mixed:
+            groups = {}
+            for entry_name, entry_home in resolved:
+                org = chatgpt_org_id(entry_home)
+                if org:
+                    groups.setdefault(org, []).append(entry_name)
+            if len(groups) > 1:
+                pretty = ", ".join("[" + ", ".join(names_in_group) + "]" for names_in_group in groups.values())
+                raise SwapError(f"Pooled accounts belong to different ChatGPT organizations: {pretty}. OpenClaw shares one agent's conversation context across whatever it selects from the pool, so mixing organizations mixes their context across accounts. Pass --allow-mixed to override.")
+        name, home = resolved[0]
         executable = shutil.which("openclaw")
         node = shutil.which("node")
         if not executable or not node:
@@ -486,8 +537,10 @@ class Manager:
         if package_root is None:
             raise SwapError("Cannot locate OpenClaw's installed package through its executable. Use the standard npm installation.")
         helper = Path(__file__).resolve().parent / "xswap_bridge" / "openclaw.mjs"
-        request = {"account": name, "codexHome": str(home), "packageRoot": str(package_root),
-                   "agents": agents or [], "dryRun": dry,
+        # Keep the single-account "account"/"codexHome" keys byte-compatible; "accounts" carries the full pool.
+        request = {"account": name, "codexHome": str(home),
+                   "accounts": [{"name": entry_name, "codexHome": str(entry_home)} for entry_name, entry_home in resolved],
+                   "packageRoot": str(package_root), "agents": agents or [], "dryRun": dry,
                    "backupRoot": str(Path(backup_dir).expanduser().resolve() if backup_dir else self.root / "backups" / "openclaw")}
         # Serialize xswap mutations across the bridge + Gateway reload. OpenClaw also locks its own stores.
         with self.locked():
@@ -516,7 +569,9 @@ class Manager:
                 data = self.read()
                 data["active"] = name
                 atomic_json(self.registry, data)
-        print(f"OpenClaw now selects {name} for {len(output['completed'])} agents; Gateway auth reloaded.\nBackup: {output['backup']}")
+        label = ", ".join(entry_name for entry_name, _ in resolved)
+        rotates = " to rotate on its own cooldowns" if len(resolved) > 1 else ""
+        print(f"OpenClaw now selects {label} for {len(output['completed'])} agents{rotates}; Gateway auth reloaded.\nBackup: {output['backup']}")
         return output
 
     def login(self, name, device_auth=False):
@@ -675,8 +730,10 @@ def parser():
     mp.add_argument("path", nargs="?", type=Path)
     um = sub.add_parser("unmap", help="Remove a directory's account mapping")
     um.add_argument("path", nargs="?", type=Path)
-    o = sub.add_parser("openclaw", help="Sync an account to local OpenClaw agents and reload Gateway auth")
+    o = sub.add_parser("openclaw", help="Sync an account (or pool) to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
+    o.add_argument("--pool", help="Comma-separated accounts (>=2) OpenClaw rotates between on its own cooldowns; mutually exclusive with NAME")
+    o.add_argument("--allow-mixed", action="store_true", help="Allow --pool accounts from different ChatGPT organizations")
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
     o.add_argument("--dry-run", action="store_true")
     o.add_argument("--backup-dir", type=Path, help="Directory for small, private auth-state backups")
@@ -850,7 +907,10 @@ def main(argv=None):
                 return manager.launch_auto_app(','.join(settings["accounts"]), args.app, args.dry_run)
             return manager.launch_app(args.name, args.app, args.dry_run)
         elif args.command == "openclaw":
-            manager.sync_openclaw(args.name, args.agents, args.dry_run, args.backup_dir)
+            if args.pool and args.name:
+                raise SwapError("--pool and a positional NAME are mutually exclusive.")
+            names = parse_pool(args.pool) if args.pool else args.name
+            manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
         else:
             rest = getattr(args, "args", [])
             if rest[:1] == ["--"]:
