@@ -582,6 +582,8 @@ def parser():
     policy.add_argument("--weekly-remaining", type=float, required=True)
     rp = sub.add_parser("repair-plugins", help="Materialize legacy shared plugin links without stopping sessions")
     rp.add_argument("--dry-run", action="store_true")
+    dr = sub.add_parser("doctor", help="Diagnose codex install, accounts, plugins, and OpenClaw (read-only, no network)")
+    dr.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
@@ -673,6 +675,9 @@ def main(argv=None):
         elif args.command == "repair-plugins":
             from xswap_plugins import repair
             repair(manager, args.dry_run)
+        elif args.command == "doctor":
+            from xswap_doctor import run, print_report
+            return print_report(run(manager), args.json_output)
         elif args.command == "auto-enable":
             from xswap_cli import enable
             enable(manager, args.accounts, args.wrap_codex)

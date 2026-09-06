@@ -162,6 +162,8 @@ OpenClaw 연결은 실행 시점의 인증을 동기화합니다. 이미 OpenCla
 
 ## 오류가 나면
 
+먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, `codex` 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료, 플러그인 링크, 자동 전환 풀, OpenClaw plugin SDK를 점검합니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
+
 | 상황 | 다음 행동 |
 |---|---|
 | `saved ... Gateway reload failed` | 저장은 됐습니다. 로컬 Gateway를 확인한 뒤 `openclaw secrets reload`를 실행하십시오. `use --openclaw`의 기본 계정 선택은 아직 바뀌지 않았으므로 원래 명령을 다시 실행하십시오. |
