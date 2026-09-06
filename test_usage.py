@@ -230,6 +230,13 @@ for line in sys.stdin:
         fetch.assert_not_called()
         self.assertEqual(output.getvalue(), "*main ?/? · second ?/?\n")
 
+    def test_short_usage_for_a_named_account_shows_it_even_if_disabled(self):
+        manager = self.manager()
+        manager.set_disabled("second", True)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(name="second", short=True)
+        self.assertEqual(output.getvalue(), "second ?/?\n")
+
 
 class ShortLineTests(unittest.TestCase):
     @staticmethod
@@ -252,6 +259,11 @@ class ShortLineTests(unittest.TestCase):
     def test_rounds_to_the_nearest_integer(self):
         rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(76.6, 11.4)]}]
         self.assertEqual(short_line(rows), "main 77/11")
+
+    def test_rounds_half_up_not_to_even(self):
+        # 50.5 rounds up to 51 (not Python's banker's round(), which would give 50).
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(50.5, 76.6)]}]
+        self.assertEqual(short_line(rows), "main 51/77")
 
     def test_unknown_window_is_a_question_mark(self):
         rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(None, None)]}]

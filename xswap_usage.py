@@ -197,7 +197,7 @@ def short_line(rows):
 
     Pure formatting over rows shaped like show_accounts' output (name, active, status,
     buckets); no subprocess, no I/O. p5h/p7d are the codex bucket's primary/secondary
-    window remainingPercent, rounded to an integer; unknown or unavailable is "?".
+    window remainingPercent, rounded half up to an integer; unknown or unavailable is "?".
     """
     parts = []
     for row in rows:
@@ -209,10 +209,10 @@ def short_line(rows):
                 windows = {w["position"]: w for w in bucket.get("windows", [])}
                 window = windows.get("primary")
                 if window and window.get("remainingPercent") is not None:
-                    primary = str(round(window["remainingPercent"]))
+                    primary = str(math.floor(window["remainingPercent"] + 0.5))
                 window = windows.get("secondary")
                 if window and window.get("remainingPercent") is not None:
-                    secondary = str(round(window["remainingPercent"]))
+                    secondary = str(math.floor(window["remainingPercent"] + 0.5))
         parts.append(f"{marker}{row['name']} {primary}/{secondary}")
     return " · ".join(parts)
 

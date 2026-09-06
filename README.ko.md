@@ -63,7 +63,7 @@ xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 �
 
 ### 상태 표시줄(status line)
 
-`xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. `xswap usage <계정명> --short`는 계정 하나에 같은 형식을 씁니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:
+`xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. 비활성화(disabled)된 계정은 `list --short`에서 제외되지만, `xswap usage <계정명> --short`는 비활성화된 계정이라도 지정한 계정을 항상 표시하며, 계정이 하나도 없으면 `list --short`는 빈 줄을 출력합니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:
 
 ```sh
 set -g status-right '#(xswap list --short)'

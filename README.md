@@ -85,7 +85,7 @@ Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does no
 
 ## Status line
 
-`xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). `xswap usage <name> --short` prints the same format for a single account. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
+`xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). Disabled accounts are omitted from `list --short`, but `xswap usage <name> --short` always shows the named account, even if it is disabled; with no accounts, `list --short` prints an empty line. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
 
 ```sh
 set -g status-right '#(xswap list --short)'
