@@ -149,6 +149,18 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "login"])
         self.assertEqual(call.call_args.kwargs["env"]["CODEX_HOME"], str(self.source))
 
+    def test_login_on_managed_profile_home(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        with patch("codex_swap.subprocess.call", return_value=0) as call, \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = self.manager.login("second")
+        self.assertEqual(result, 0)
+        self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "login"])
+        self.assertEqual(call.call_args.kwargs["env"]["CODEX_HOME"], str(second))
+
     def test_login_device_auth_flag_is_forwarded(self):
         self.manager.register("main")
         with patch("codex_swap.subprocess.call", return_value=0) as call, \
