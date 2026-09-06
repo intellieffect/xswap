@@ -248,6 +248,60 @@ class AccountTests(unittest.TestCase):
         self.manager.set_disabled("second", True)
         self.assertEqual([name for name, _ in self.manager.enabled_accounts()], ["main"])
 
+    def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.shutil.which") as which, patch("codex_swap.subprocess.run") as run:
+            with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+                self.manager.sync_openclaw("second", select=True)
+            with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+                self.manager.sync_openclaw("second")
+        which.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(self.manager.account()[0], "main")
+
+
+class MainCLITests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.source = base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token", "refresh_token": "fake-refresh"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.store = base / "store"
+        patcher = patch.dict(os.environ, {"CODEX_SWAP_HOME": str(self.store), "CODEX_HOME": str(self.source)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import codex_swap
+        self.codex_swap = codex_swap
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.codex_swap.main(["register", "main"])
+            second = self.codex_swap.Manager().prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+
+    def test_disable_and_enable_subcommands_wire_through_main(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["disable", "second"]), 0)
+        self.assertIn("Disabled second", out.getvalue())
+        self.assertTrue(self.codex_swap.Manager().read()["accounts"]["second"]["disabled"])
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["enable", "second"]), 0)
+        self.assertIn("Enabled second", out.getvalue())
+        self.assertNotIn("disabled", self.codex_swap.Manager().read()["accounts"]["second"])
+
+    def test_use_on_disabled_account_returns_error_via_main(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.codex_swap.main(["disable", "second"])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
+        self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

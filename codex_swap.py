@@ -172,15 +172,19 @@ class Manager:
     def use(self, name):
         with self.locked():
             name, home = self.account(name)
-            data = self.read()
-            if data["accounts"][name].get("disabled"):
-                raise SwapError(f"Account {name} is disabled. Run: xswap enable {name}")
+            self.require_enabled(name)
             check_file_store(home)
             if identity(home) in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
+            data = self.read()
             data["active"] = name
             atomic_json(self.registry, data)
         return home
+
+    def require_enabled(self, name):
+        data = self.read()
+        if data["accounts"][name].get("disabled"):
+            raise SwapError(f"Account {name} is disabled. Run: xswap enable {name}")
 
     def enabled_accounts(self):
         data = self.read()
@@ -188,9 +192,8 @@ class Manager:
 
     def set_disabled(self, name, disabled):
         with self.locked():
+            name, _ = self.account(name)
             data = self.read()
-            if name not in data["accounts"]:
-                raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
             if disabled:
                 data["accounts"][name]["disabled"] = True
             else:
@@ -243,11 +246,12 @@ class Manager:
 
     def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False):
         data = self.read()
+        enabled_names = {n for n, _ in self.enabled_accounts()}
         if name is not None:
             selected, home = self.account(name)
-            accounts = [(selected, home, data["accounts"][selected].get("disabled", False))]
+            accounts = [(selected, home, selected not in enabled_names)]
         else:
-            accounts = [(key, Path(value["home"]), value.get("disabled", False)) for key, value in data["accounts"].items()]
+            accounts = [(key, Path(value["home"]), key not in enabled_names) for key, value in data["accounts"].items()]
         # Every server has its own account home; no global authentication switch is needed.
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
             rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2]), accounts))
@@ -273,6 +277,7 @@ class Manager:
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
         name, home = self.account(name)
+        self.require_enabled(name)
         check_file_store(home)
         executable = shutil.which("openclaw")
         node = shutil.which("node")

@@ -122,7 +122,7 @@ OpenClaw 연결은 다음을 수행합니다.
 | `xswap disable work` | 계정을 삭제하지 않고 선택 대상에서 제외 |
 | `xswap enable work` | 제외된 계정을 다시 선택 대상으로 복원 |
 
-`xswap disable`로 제외된 계정은 `use`, `--auto`/`auto-enable` 계정 풀, `list`의 실시간 사용량 조회에서 모두 빠지며, 목록에는 `(disabled)`로 표시됩니다.
+`xswap disable`로 제외된 계정은 `use`, `--auto`/`auto-enable` 계정 풀, `openclaw`, `list`의 실시간 사용량 조회에서 모두 빠지며 목록에는 `(disabled)`로 표시됩니다. 다만 `xswap run --account NAME`·`xswap app NAME`처럼 계정을 명시적으로 지정한 단일 실행은 막지 않습니다.
 
 ## 지원 범위와 동작 원리
 
