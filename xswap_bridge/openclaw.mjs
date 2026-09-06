@@ -77,9 +77,24 @@ function preferredCredential(source, existing) {
   return source;
 }
 
+function resolveAccounts(request) {
+  if (Array.isArray(request.accounts) && request.accounts.length) return request.accounts;
+  return [{ name: request.account, codexHome: request.codexHome }];
+}
+
+function backupSlug(profileId) {
+  return profileId.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
 export async function sync(request, sdk, agentSdk, config) {
-  const auth = readAuth(request.codexHome);
-  const { profileId, credential } = sourceCredential(auth, sdk);
+  const accounts = resolveAccounts(request);
+  // Source and validate every credential before any write: one bad account fails the whole pool.
+  const sources = accounts.map(account => {
+    const auth = readAuth(account.codexHome);
+    const { profileId, credential } = sourceCredential(auth, sdk);
+    return { name: account.name, profileId, credential };
+  });
+  const profileIds = sources.map(source => source.profileId);
   assert(config.gateway?.mode !== 'remote', 'Remote Gateways are not supported. Run xswap on the Gateway machine.');
   const available = agentSdk.listAgentIds(config);
   const ids = request.agents?.length ? [...new Set(request.agents)] : available;
@@ -87,24 +102,34 @@ export async function sync(request, sdk, agentSdk, config) {
   for (const id of ids) assert(available.includes(id), `Unknown OpenClaw agent: ${id}`);
   const targets = ids.map(id => ({ id, agentDir: agentSdk.resolveAgentDir(config, id) }));
   // Dry-run performs no auth-store read/write, backup, or Gateway operation.
-  const result = { account: request.account, profileId, agents: ids, completed: [], dryRun: !!request.dryRun, backup: null };
+  const result = { account: request.account ?? sources[0]?.name, profileId: profileIds[0], profileIds,
+    agents: ids, completed: [], dryRun: !!request.dryRun, backup: null };
   if (request.dryRun) return result;
 
   secureDirectory(request.backupRoot);
   const backup = path.join(request.backupRoot, new Date().toISOString().replaceAll(':', '-') + '-' + randomUUID().slice(0, 8));
   secureDirectory(backup);
   result.backup = backup;
-  writeBackup(path.join(backup, 'manifest.json'), { version: 1, profileId, targets });
+  writeBackup(path.join(backup, 'manifest.json'), { version: 1, profileIds, targets,
+    accounts: sources.map(source => ({ name: source.name, profileId: source.profileId })) });
   try {
     // OpenClaw owns the shared credential location; orders remain agent-scoped.
     const written = await sdk.updateAuthProfileStoreWithLock({
       agentDir: targets[0].agentDir, sharedStoreWrite: true,
       saveOptions: { filterExternalAuthProfiles: false, syncExternalCli: false },
       updater(store) {
-        const existing = store.profiles[profileId];
-        const selected = preferredCredential(credential, existing);
-        writeBackup(path.join(backup, 'credential.json'), { profileId, previous: existing ?? null });
-        store.profiles[profileId] = selected;
+        // Resolve every pooled credential against the current store BEFORE mutating any of
+        // them: a divergence/type-mismatch on credential N must never leave credential N-1
+        // written. This does not rely on the SDK discarding a partially mutated snapshot on
+        // throw -- it never mutates `store` until every selection above has already succeeded.
+        const selections = sources.map(source => {
+          const existing = store.profiles[source.profileId] ?? null;
+          return { source, existing, selected: preferredCredential(source.credential, existing) };
+        });
+        for (const { source, existing, selected } of selections) {
+          writeBackup(path.join(backup, `credential-${backupSlug(source.profileId)}.json`), { profileId: source.profileId, previous: existing });
+          store.profiles[source.profileId] = selected;
+        }
         return true;
       },
     });
@@ -112,27 +137,35 @@ export async function sync(request, sdk, agentSdk, config) {
     for (let index = 0; index < targets.length; index++) {
       const { id, agentDir } = targets[index];
       const visible = agentSdk.loadAuthProfileStoreWithoutExternalProfiles(agentDir);
-      assert(visible.profiles[profileId], `Credential is not visible to ${id}.`);
+      for (const profileId of profileIds) assert(visible.profiles[profileId], `Credential is not visible to ${id}.`);
       const updated = await sdk.updateAuthProfileStoreWithLock({
         agentDir,
-        saveOptions: { preserveOrderProfileIds: [profileId], syncExternalCli: false },
+        // Given order, as-is: OpenClaw rotates the pool itself via its own cooldowns.
+        saveOptions: { preserveOrderProfileIds: profileIds, syncExternalCli: false },
         updater(store) {
           writeBackup(path.join(backup, `agent-${index}.json`), {
             agentId: id, agentDir, previousOrder: store.order?.openai ?? null,
           });
-          store.order = { ...store.order, openai: [profileId] };
+          store.order = { ...store.order, openai: [...profileIds] };
           return true;
         },
       });
       assert(updated !== null, `Auth order write failed for ${id}.`);
       const verified = agentSdk.loadAuthProfileStoreWithoutExternalProfiles(agentDir);
-      assert(verified.order?.openai?.length === 1 && verified.order.openai[0] === profileId, `Auth order verification failed for ${id}.`);
+      assert(JSON.stringify(verified.order?.openai) === JSON.stringify(profileIds), `Auth order verification failed for ${id}.`);
       result.completed.push(id);
     }
     return result;
   } catch (error) {
-    // Preserve honest partial state and a recovery point instead of undoing a concurrent token refresh.
+    // Preserve honest partial state and a recovery point instead of undoing a concurrent token
+    // refresh: the backup directory is never deleted on failure. Instead, mark it FAILED so a
+    // partial backup (some credential-*.json/agent-*.json files, but not a completed sync) is
+    // never mistaken for a clean recovery point.
     const detail = error instanceof BridgeError ? error.message : 'SDK or backup write failed; check storage permissions and free space, then retry.';
+    try {
+      const marker = path.join(backup, 'FAILED');
+      if (!fs.existsSync(marker)) writeBackup(marker, { reason: detail, completed: result.completed });
+    } catch { /* best effort; the thrown BridgeError below already reports the failure */ }
     throw new BridgeError(`OpenClaw sync incomplete (${result.completed.length}/${ids.length} agents). Backups: ${backup}. ${detail}`);
   }
 }

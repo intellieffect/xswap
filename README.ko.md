@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
 xswap --version
 ```
 
@@ -41,7 +41,11 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 
 각 한도에 `77% left`처럼 **남은 비율**을 표시하고, 초기화 시각(로컬 시간대)과 남은 시간을 함께 보여줍니다. Codex 기본 한도를 먼저, 모델별 추가 한도를 별도 줄에 표시합니다. `5h`·`7d` 등의 주기는 서버가 제공한 실제 기간이며, 없는 한도를 임의로 만들어 표시하지 않습니다. `credits`는 서버가 제공한 별도 크레딧 잔액이며 구독 잔여 비율과 다릅니다.
 
-조회는 공식 Codex App Server의 `account/rateLimits/read`를 사용합니다. 모델 대화나 테스트 턴을 생성하지 않으며, 기본 계정을 전환하지 않습니다. Codex가 필요에 따라 정상 인증 갱신을 수행할 수 있습니다. 계정당 최대 12초를 기다리고 최대 4개 계정을 병렬 조회합니다. 조회 실패·미로그인·API 키 계정은 구분하며, 알 수 없는 값을 `100%`로 표시하지 않습니다. 결과는 매번 조회하고 캐시하지 않습니다.
+조회는 공식 Codex App Server의 `account/rateLimits/read`를 사용합니다. 모델 대화나 테스트 턴을 생성하지 않으며, 기본 계정을 전환하지 않습니다. Codex가 필요에 따라 정상 인증 갱신을 수행할 수 있습니다. 계정당 최대 12초를 기다리고 최대 4개 계정을 병렬 조회합니다. 조회 실패·미로그인·API 키 계정은 구분하며, 알 수 없는 값을 `100%`로 표시하지 않습니다. 기본값은 매번 실시간 조회이며 캐시하지 않습니다(아래 「캐시된 조회」 참고).
+
+### 캐시된 조회
+
+`xswap list`·`xswap usage`·`xswap run --best`·`xswap use --best`는 매번 계정당 `codex app-server`를 새로 띄웁니다. 상태표시줄이나 크론처럼 자주 조회하는 호출자를 위해 `--cached SECONDS`를 붙이면 그만큼 신선한 기존 결과를 재사용하고 새로 띄우지 않습니다 — `--cached`를 주지 않으면 기존과 동일하게 항상 실시간 조회입니다. 조회가 성공하면 결과는 항상 `~/.local/share/codex-swap/usage-cache.json`(권한 `0600`)에 계정 이름별로 저장되며, 화면에 보이는 것과 동일한 화이트리스트 필드 — 잔여 비율·초기화 시각·플랜 종류·크레딧, 그리고 이메일일 수도 있는 로컬 계정 라벨 — 만 담고 원본 서버 응답이나 토큰은 담지 않습니다. 저장된 라벨이 현재 로그인 라벨과 다르면(같은 이름으로 재로그인한 경우) 캐시를 재사용하지 않고 새로 조회합니다. `--offline`과 `--cached`는 동시에 쓸 수 없고, `run`·`use`에서는 `--best`와 함께여야 합니다.
 
 ### 잔여량 알림
 
@@ -80,7 +84,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -121,18 +125,21 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 xswap openclaw work --dry-run       # 적용할 계정·에이전트 확인
 xswap openclaw work                 # 로컬 OpenClaw 전체 에이전트에 적용
 xswap use main --openclaw           # CLI·앱 기본 계정과 OpenClaw를 함께 전환
+xswap openclaw --pool main,work     # OpenClaw가 두 계정을 스스로 순환하도록 등록
 ```
 
 `xswap openclaw`는 이름을 생략하면 현재 선택 계정을 사용합니다. 특정 에이전트만 바꾸려면 `xswap openclaw work --agent main --agent devagent`처럼 지정하십시오. 이 명령 자체는 xswap의 기본 계정을 바꾸지 않습니다.
 
+`--pool a,b,c`는 등록된 이름 2개 이상을 쉼표로 지정하며, 위치 인자 NAME과는 함께 쓸 수 없습니다. 나열한 순서 그대로 각 에이전트의 OpenAI 인증 순서에 전부 등록하면, 이후 OpenClaw가 자신의 쿨다운 로직(`resolveAuthProfileOrder`·`isProfileInCooldown`·`markAuthProfileFailure`/`markAuthProfileCooldown`)으로 그 안에서 스스로 순환합니다. 즉 한 계정이 한도에 걸려도 사람이 `xswap openclaw other`를 실행할 때까지 기다릴 필요가 없습니다. 풀에 묶인 에이전트는 그 순간 선택된 계정이 무엇이든 동일한 대화·작업 맥락을 공유하므로, 서로 다른 ChatGPT 조직(계정)을 섞으면 그 조직들의 맥락이 한 대화 안에서 뒤섞입니다 — `sync_openclaw`는 풀에 속한 계정들의 조직이 갈리면 기본적으로 중단하며, 의도한 것이면 `--allow-mixed`로 넘길 수 있습니다. 계정의 조직 자체를 확인할 수 없는 경우(인증 파일을 읽을 수 없거나 해독 가능한 클레임이 없는 경우)도 실제로 조직이 다를 때와 동일하게 중단합니다 — 확인 불가를 일치로 간주하지 않습니다.
+
 OpenClaw 연결은 다음을 수행합니다.
 
-1. 선택 계정의 ChatGPT OAuth 인증을 확인합니다.
+1. 선택 계정(들)의 ChatGPT OAuth 인증을 확인합니다. `--pool`이면 계정 간 조직 일치 여부도 함께 확인합니다.
 2. 변경 대상 인증·우선순위만 작은 0600 파일로 백업합니다.
 3. OpenClaw의 공개 SDK와 잠금·트랜잭션을 통해 인증을 등록하고 대상 에이전트의 OpenAI 인증 선택을 변경합니다.
 4. `openclaw secrets reload`로 실행 중인 Gateway 인증 상태를 재적용합니다.
 
-원래 인증 프로필은 보존합니다. 선택된 에이전트의 OpenAI 인증 순서는 해당 계정 하나로 지정하므로 다른 계정으로 자동 순환하지 않습니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
+원래 인증 프로필은 보존합니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
 
 백업 경로를 바꾸려면 `xswap openclaw work --backup-dir /path/to/private-backups`를 사용하십시오. 전체 미디어·대화 DB를 백업하지 않습니다.
 

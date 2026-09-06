@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
 xswap --version
 ```
 
@@ -93,6 +93,10 @@ Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does no
 ```sh
 set -g status-right '#(xswap list --short)'
 ```
+
+### Cached lookups
+
+`xswap list`, `xswap usage`, `xswap run --best`, and `xswap use --best` fetch live quota by default, spawning one `codex app-server` per account; add `--cached SECONDS` to reuse a still-fresh result instead, which matters for status-line and cron callers that check quota often. The default remains uncached unless `--cached` is passed. A successful fetch is always saved to `~/.local/share/codex-swap/usage-cache.json` (mode `0600`), keyed by account name, holding the same whitelisted fields shown on screen for that account — remaining percentages, reset times, plan type, credits, and the local account label (which can be an email address) — never raw server responses or tokens. A cache entry is only reused while its saved label still matches the account's current login; a re-login under the same name is treated as a miss. `--cached` cannot be combined with `--offline`, and on `run`/`use` it requires `--best`.
 
 ## Automatic switching
 
@@ -183,9 +187,12 @@ Requires a local running OpenClaw Gateway, `openclaw`, and `node` in PATH. Teste
 ```sh
 xswap openclaw work --dry-run
 xswap openclaw work
+xswap openclaw --pool main,work
 ```
 
 This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, selects them for the requested local agents, saves private recovery backups, and reloads Gateway auth. It is not automatic synchronization and does not submit a verification prompt. API-key profiles and remote Gateways are unsupported. Partial updates are reported with backup information; do not publish those backups.
+
+`--pool a,b,c` (two or more distinct registered names; mutually exclusive with a positional NAME) copies every listed account's credentials into OpenClaw and sets each target agent's OpenAI auth order to the given pool, in that order. OpenClaw then rotates within that order on its own cooldowns (`resolveAuthProfileOrder`, `isProfileInCooldown`, `markAuthProfileFailure`/`markAuthProfileCooldown`) — no human has to run `xswap openclaw other` to bring a rate-limited bot back. Because a pooled agent shares one conversation/task context across whichever account it is currently using, pooling only makes sense for accounts that may see each other's context; sync refuses to pool accounts from different ChatGPT organizations unless you pass `--allow-mixed`. If an account's organization can't even be determined (unreadable credential, no decodable claim), the pool is refused the same way an actual mismatch would be refused — an unknown organization is never treated as a match.
 
 ## Update or uninstall
 
@@ -197,7 +204,7 @@ xswap upgrade --dry-run          # Print the command without running it
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
 ```
 
 Before uninstalling, restore the optional wrapper:

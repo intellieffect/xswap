@@ -168,17 +168,23 @@ def reset_label(timestamp, now):
     return f"resets {clock} (in {duration})"
 
 
+def is_ok(status):
+    """True for a successful quota fetch, whether live or served from the local cache."""
+    return status in ("ok", "ok (cached)")
+
+
 def warnings(rows, threshold, now=None):
     """Pure evaluation for `list --warn`: which codex windows are below threshold.
 
-    Only non-disabled rows (``row.get("disabled")`` falsy) with ``status == "ok"``
-    are considered. A window only warns when its ``remainingPercent`` is a known
-    number below ``threshold``; unknown values never trigger a warning.
+    Only non-disabled rows (``row.get("disabled")`` falsy) with a successful status
+    (``is_ok``: live or cached) are considered. A window only warns when its
+    ``remainingPercent`` is a known number below ``threshold``; unknown values never
+    trigger a warning.
     """
     now = time.time() if now is None else now
     lines = []
     for row in rows:
-        if row.get("disabled") or row.get("status") != "ok":
+        if row.get("disabled") or not is_ok(row.get("status")):
             continue
         for bucket in row.get("buckets", []):
             if bucket.get("id") != "codex":
@@ -203,7 +209,7 @@ def short_line(rows):
     for row in rows:
         marker = "*" if row.get("active") else ""
         primary = secondary = "?"
-        if row.get("status") == "ok":
+        if is_ok(row.get("status")):
             bucket = next((b for b in row.get("buckets", []) if (b.get("id") or "").lower() == "codex"), None)
             if bucket:
                 windows = {w["position"]: w for w in bucket.get("windows", [])}
