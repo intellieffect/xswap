@@ -84,6 +84,19 @@ def check_file_store(home):
         raise SwapError(f"{home}: credential storage is {store!r}; this version supports file storage only. No credentials changed.")
 
 
+def resolve_openclaw_package_root(executable):
+    """Walk up from the openclaw executable to its package.json (name: "openclaw")."""
+    for directory in Path(executable).resolve().parents:
+        package = directory / "package.json"
+        if package.is_file():
+            try:
+                if json.loads(package.read_text()).get("name") == "openclaw":
+                    return directory
+            except (OSError, ValueError):
+                pass
+    return None
+
+
 def identity(home):
     path = home / "auth.json"
     if not path.exists():
@@ -407,16 +420,7 @@ class Manager:
         node = shutil.which("node")
         if not executable or not node:
             raise SwapError("OpenClaw sync requires openclaw and node in PATH.")
-        package_root = None
-        for directory in Path(executable).resolve().parents:
-            package = directory / "package.json"
-            if package.is_file():
-                try:
-                    if json.loads(package.read_text()).get("name") == "openclaw":
-                        package_root = directory
-                        break
-                except (OSError, ValueError):
-                    pass
+        package_root = resolve_openclaw_package_root(executable)
         if package_root is None:
             raise SwapError("Cannot locate OpenClaw's installed package through its executable. Use the standard npm installation.")
         helper = Path(__file__).resolve().parent / "xswap_bridge" / "openclaw.mjs"
@@ -582,6 +586,8 @@ def parser():
     policy.add_argument("--weekly-remaining", type=float, required=True)
     rp = sub.add_parser("repair-plugins", help="Materialize legacy shared plugin links without stopping sessions")
     rp.add_argument("--dry-run", action="store_true")
+    dr = sub.add_parser("doctor", help="Diagnose codex install, accounts, plugins, and OpenClaw (read-only, no network)")
+    dr.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
@@ -673,6 +679,9 @@ def main(argv=None):
         elif args.command == "repair-plugins":
             from xswap_plugins import repair
             repair(manager, args.dry_run)
+        elif args.command == "doctor":
+            from xswap_doctor import run, print_report
+            return print_report(run(manager), args.json_output)
         elif args.command == "auto-enable":
             from xswap_cli import enable
             enable(manager, args.accounts, args.wrap_codex)

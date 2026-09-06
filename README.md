@@ -188,6 +188,14 @@ uv tool uninstall intellieffect-xswap
 
 Account data is intentionally retained. These commands do not revoke credentials, undo an OpenClaw sync, or close running sessions.
 
+## Troubleshooting
+
+If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, the optional `codex` wrapper, credential storage mode, each registered account's login and token expiry, plugin links, the automatic-switching pool, and OpenClaw's plugin SDK. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
+
+```sh
+xswap doctor
+```
+
 ## Contributing and support
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integration checks. Report reproducible bugs through [GitHub Issues](https://github.com/intellieffect/xswap/issues); report vulnerabilities privately through [Security Advisories](https://github.com/intellieffect/xswap/security/advisories/new).
