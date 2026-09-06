@@ -181,6 +181,22 @@ class Manager:
             atomic_json(self.registry, data)
         return home
 
+    def select_if_unset(self, name):
+        # Mirrors use(): the None check, the signed-in check, and the write share one lock
+        # so a concurrent add/use cannot race between "no active account" and setting one.
+        with self.locked():
+            name, home = self.account(name)
+            self.require_enabled(name)
+            check_file_store(home)
+            if identity(home) in ("not signed in", "unreadable auth cache"):
+                raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
+            data = self.read()
+            if data["active"] is not None:
+                return False
+            data["active"] = name
+            atomic_json(self.registry, data)
+        return True
+
     def require_enabled(self, name):
         data = self.read()
         if data["accounts"][name].get("disabled"):
@@ -431,6 +447,7 @@ def parser():
     a = sub.add_parser("add", help="Sign in to an isolated account home")
     a.add_argument("name"); a.add_argument("--device-auth", action="store_true")
     a.add_argument("--prepare-only", action="store_true")
+    a.add_argument("--use", action="store_true", help="Select this account immediately after signing in")
     lg = sub.add_parser("login", help="Re-authenticate a registered account whose login expired")
     lg.add_argument("name"); lg.add_argument("--device-auth", action="store_true")
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
@@ -497,7 +514,16 @@ def main(argv=None):
             result = subprocess.call(command, env=manager.env(home))
             if result:
                 return result
-            print(f"Saved {args.name}: {identity(home)}. Select it: xswap use {args.name}")
+            label = identity(home)
+            if label in ("not signed in", "unreadable auth cache"):
+                raise SwapError(f"codex login exited successfully, but {args.name} has no readable login at {home}. The sign-in may have been cancelled; run xswap add {args.name} again.")
+            print(f"Saved {args.name}: {label}. Select it: xswap use {args.name}")
+            # The account must be signed in before it can become active, so this only runs after login succeeds.
+            if args.use:
+                manager.use(args.name)
+                print(f"Selected {args.name}.")
+            elif manager.select_if_unset(args.name):
+                print(f"Selected {args.name} (first account).")
         elif args.command == "login":
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":
