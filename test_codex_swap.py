@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, SwapError, atomic_json, main
+from xswap_live import AccountPool, LiveError
 
 
 class AccountTests(unittest.TestCase):
@@ -185,6 +186,122 @@ class AccountTests(unittest.TestCase):
             with self.assertRaises(SwapError) as raised:
                 self.manager.sync_openclaw()
         self.assertNotIn("fake-secret-token", str(raised.exception))
+
+    def test_disable_marks_registry_and_list_shows_it(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.assertTrue(json.loads(self.manager.registry.read_text())["accounts"]["second"]["disabled"])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.manager.show_accounts(offline=True)
+        self.assertIn("second", out.getvalue())
+        self.assertIn("비활성화 (disabled)", out.getvalue())
+
+    def test_disable_refuses_unknown_account(self):
+        with self.assertRaises(SwapError):
+            self.manager.set_disabled("ghost", True)
+
+    def test_use_refuses_disabled_account(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+            self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_account_pool_refuses_disabled_account(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with self.assertRaises(LiveError):
+            AccountPool(self.manager, ["main", "second"], "codex")
+
+    def test_enable_restores_selection_and_pool_eligibility(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.manager.set_disabled("second", False)
+        self.assertNotIn("disabled", json.loads(self.manager.registry.read_text())["accounts"]["second"])
+        self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "second")
+        pool = AccountPool(self.manager, ["main", "second"], "codex")
+        self.assertEqual(pool.names, ["main", "second"])
+
+    def test_json_output_reports_disabled_field(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.manager.show_accounts(offline=True, json_output=True)
+        rows = {row["name"]: row for row in json.loads(out.getvalue())}
+        self.assertTrue(rows["second"]["disabled"])
+        self.assertFalse(rows["main"]["disabled"])
+
+    def test_enabled_accounts_excludes_disabled(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.assertEqual([name for name, _ in self.manager.enabled_accounts()], ["main"])
+
+    def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.shutil.which") as which, patch("codex_swap.subprocess.run") as run:
+            with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+                self.manager.sync_openclaw("second", select=True)
+            with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+                self.manager.sync_openclaw("second")
+        which.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(self.manager.account()[0], "main")
+
+
+class MainCLITests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.source = base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token", "refresh_token": "fake-refresh"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.store = base / "store"
+        patcher = patch.dict(os.environ, {"CODEX_SWAP_HOME": str(self.store), "CODEX_HOME": str(self.source)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import codex_swap
+        self.codex_swap = codex_swap
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.codex_swap.main(["register", "main"])
+            second = self.codex_swap.Manager().prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+
+    def test_disable_and_enable_subcommands_wire_through_main(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["disable", "second"]), 0)
+        self.assertIn("Disabled second", out.getvalue())
+        self.assertTrue(self.codex_swap.Manager().read()["accounts"]["second"]["disabled"])
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["enable", "second"]), 0)
+        self.assertIn("Enabled second", out.getvalue())
+        self.assertNotIn("disabled", self.codex_swap.Manager().read()["accounts"]["second"])
+
+    def test_use_on_disabled_account_returns_error_via_main(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.codex_swap.main(["disable", "second"])
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
+        self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
 
 
 if __name__ == "__main__":

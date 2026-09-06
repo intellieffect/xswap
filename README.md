@@ -38,9 +38,11 @@ xswap list --include-spark  # Also display Spark quotas
 xswap usage work
 xswap list --offline        # Local labels only
 xswap app work              # Separate macOS desktop profile
+xswap disable work          # Hold an account out of selection without deleting it
+xswap enable work           # Restore it
 ```
 
-Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly.
+Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly. A disabled account is skipped by `list`'s live usage fetch, `use`, `--auto`/`auto-enable` pools, and `openclaw`, until re-enabled; it does not stop an explicit single-account launch like `xswap run --account NAME` or `xswap app NAME`.
 
 ## Automatic switching
 
@@ -81,6 +83,8 @@ xswap auto-disable                       # Restore the original codex symlink an
 ```
 
 Disabling defaults does not terminate running sessions. Fixed-account commands (`xswap run --account main -- ...`, `xswap app main`) remain available.
+
+Each auto CLI run leaves a small record under `auto/cli-runs/`. As a side effect, `auto-status` prunes non-running records older than 7 days on every call, and `--prune` removes all non-running records immediately; either way, a record younger than 60 seconds is never removed, since it may still be between creation and its bridge taking its lock.
 
 ### Compatibility and limits
 

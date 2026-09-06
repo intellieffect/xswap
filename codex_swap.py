@@ -172,6 +172,7 @@ class Manager:
     def use(self, name):
         with self.locked():
             name, home = self.account(name)
+            self.require_enabled(name)
             check_file_store(home)
             if identity(home) in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
@@ -179,6 +180,25 @@ class Manager:
             data["active"] = name
             atomic_json(self.registry, data)
         return home
+
+    def require_enabled(self, name):
+        data = self.read()
+        if data["accounts"][name].get("disabled"):
+            raise SwapError(f"Account {name} is disabled. Run: xswap enable {name}")
+
+    def enabled_accounts(self):
+        data = self.read()
+        return [(name, Path(value["home"])) for name, value in data["accounts"].items() if not value.get("disabled")]
+
+    def set_disabled(self, name, disabled):
+        with self.locked():
+            name, _ = self.account(name)
+            data = self.read()
+            if disabled:
+                data["accounts"][name]["disabled"] = True
+            else:
+                data["accounts"][name].pop("disabled", None)
+            atomic_json(self.registry, data)
 
     def env(self, home):
         env = os.environ.copy()
@@ -204,10 +224,12 @@ class Manager:
             return real
         return executable
 
-    def account_usage(self, name, home, offline=False):
+    def account_usage(self, name, home, offline=False, disabled=False):
         label = identity(home)
-        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "fetchedAt": None}
-        if label in ("not signed in", "unreadable auth cache"):
+        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "fetchedAt": None, "disabled": disabled}
+        if disabled:
+            row["status"] = "disabled"
+        elif label in ("not signed in", "unreadable auth cache"):
             row["status"] = label
         elif label == "API key":
             row["status"] = "API key: subscription quota not available"
@@ -224,14 +246,15 @@ class Manager:
 
     def account_rows(self, name=None, offline=False):
         data = self.read()
+        enabled_names = {n for n, _ in self.enabled_accounts()}
         if name is not None:
             selected, home = self.account(name)
-            accounts = [(selected, home)]
+            accounts = [(selected, home, selected not in enabled_names)]
         else:
-            accounts = [(key, Path(value["home"])) for key, value in data["accounts"].items()]
+            accounts = [(key, Path(value["home"]), key not in enabled_names) for key, value in data["accounts"].items()]
         # Every server has its own account home; no global authentication switch is needed.
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
-            rows = list(pool.map(lambda item: self.account_usage(*item, offline=offline), accounts))
+            rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2]), accounts))
         for row in rows:
             row["active"] = row["name"] == data["active"]
         return rows
@@ -247,6 +270,7 @@ class Manager:
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
         name, home = self.account(name)
+        self.require_enabled(name)
         check_file_store(home)
         executable = shutil.which("openclaw")
         node = shutil.which("node")
@@ -415,7 +439,8 @@ def parser():
     sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
     sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
     sub.add_parser("status", help="Show selected account and login status")
-    sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
+    st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
+    st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
     ae.add_argument("--accounts", required=True)
     ae.add_argument("--wrap-codex", action="store_true", help="Also wrap the user-owned codex symlink, with rollback metadata")
@@ -430,6 +455,10 @@ def parser():
     u = sub.add_parser("use", help="Select the default account for xswap and xswap app")
     u.add_argument("name")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
+    d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
+    d.add_argument("name")
+    en = sub.add_parser("enable", help="Restore a disabled account to selection")
+    en.add_argument("name")
     o = sub.add_parser("openclaw", help="Sync an account to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
@@ -497,7 +526,7 @@ def main(argv=None):
             disable(manager)
         elif args.command == "auto-status":
             from xswap_cli import show_status
-            show_status(manager)
+            show_status(manager, args.prune)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command == "use":
@@ -506,6 +535,12 @@ def main(argv=None):
             else:
                 manager.use(args.name)
             print(f"Selected {args.name}. CLI: xswap · Desktop: xswap app\nRunning sessions and plain codex keep their current account.")
+        elif args.command == "disable":
+            manager.set_disabled(args.name, True)
+            print(f"Disabled {args.name}. It is skipped by use, --auto pools, and live usage fetches. Restore it: xswap enable {args.name}")
+        elif args.command == "enable":
+            manager.set_disabled(args.name, False)
+            print(f"Enabled {args.name}. Select it: xswap use {args.name}")
         elif args.command == "app":
             if args.auto:
                 if args.name:

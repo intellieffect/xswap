@@ -20,7 +20,7 @@ def summary(row, now=None):
     left = window['remainingPercent'] if window else None
     used = 100 - left if left is not None else None
     status = row['status']
-    note = ('로그인 필요' if status == 'not signed in' else
+    note = ('비활성화 (disabled)' if status == 'disabled' else '로그인 필요' if status == 'not signed in' else
             '오프라인' if status == 'offline' else
             '조회 불가' if status != 'ok' else '주간 사용량 미제공')
     bar = ''
@@ -85,7 +85,7 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
 
 def dashboard(manager):
     from xswap_cli import status_data
-    state = status_data(manager)
+    state = status_data(manager, cleanup=False)
     rows = manager.account_rows()
     return {'accounts': [summary(row) for row in sorted(rows, key=lambda r: not r['active'])],
             'policy': policy_label(state),
