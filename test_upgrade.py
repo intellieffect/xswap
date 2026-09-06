@@ -128,3 +128,15 @@ class VersionSingleSourceTests(unittest.TestCase):
         with pyproject.open("rb") as stream:
             declared = tomllib.load(stream)["project"]["version"]
         self.assertEqual(codex_swap.__version__, declared)
+
+
+class PackagedModulesTests(unittest.TestCase):
+    def test_every_top_level_module_is_in_py_modules(self):
+        # uv/pip install only the modules listed in pyproject's py-modules; a new
+        # xswap_*.py that is not listed imports fine from a checkout but raises
+        # ModuleNotFoundError from an installed wheel.
+        root = pathlib.Path(__file__).parent
+        with (root / "pyproject.toml").open("rb") as stream:
+            listed = set(tomllib.load(stream)["tool"]["setuptools"]["py-modules"])
+        present = {p.stem for p in root.glob("*.py") if not p.name.startswith("test_")}
+        self.assertEqual(sorted(present - listed), [])
