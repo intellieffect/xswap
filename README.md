@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.1'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.2'
 xswap --version
 ```
 
@@ -134,7 +134,7 @@ This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, sel
 ## Update or uninstall
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.1'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.2'
 ```
 
 Before uninstalling, restore the optional wrapper:
