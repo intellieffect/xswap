@@ -153,18 +153,70 @@ class Manager:
             return {"version": 1, "active": None, "accounts": {}}
         try:
             data = json.loads(self.registry.read_text())
-            if data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+            if (data.get("version") != 1 or not isinstance(data.get("accounts"), dict) or
+                    ("mappings" in data and not isinstance(data["mappings"], dict))):
                 raise ValueError()
             return data
         except (ValueError, OSError):
             raise SwapError("Invalid account registry; refusing to overwrite it.") from None
 
-    def account(self, name=None):
+    def account(self, name=None, mapped=True):
         data = self.read()
-        name = name or data["active"]
+        name = name or (self.default_account() if mapped else data["active"])
         if name not in data["accounts"]:
             raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
         return name, Path(data["accounts"][name]["home"])
+
+    def _best_mapping(self, data, cwd=None):
+        target_parts = Path(cwd or os.getcwd()).resolve().parts
+        best = None  # (depth, path, name)
+        for raw_path, name in data.get("mappings", {}).items():
+            parts = Path(raw_path).parts
+            if len(parts) <= len(target_parts) and tuple(parts) == target_parts[:len(parts)]:
+                if best is None or len(parts) > best[0]:
+                    best = (len(parts), raw_path, name)
+        return best
+
+    def resolve_default(self, cwd=None):
+        """Return (name, mapping_path) for the implicit-selection account, computing the
+        directory-mapping lookup exactly once. mapping_path is None when the active
+        account (not a mapping) decided the result."""
+        data = self.read()
+        best = self._best_mapping(data, cwd)
+        if best and best[2] in data["accounts"]:
+            return best[2], best[1]
+        return data["active"], None
+
+    def default_account(self, cwd=None):
+        return self.resolve_default(cwd)[0]
+
+    def mapped_source(self, cwd=None):
+        """Return the mapping path that decided default_account(cwd), or None."""
+        return self.resolve_default(cwd)[1]
+
+    def map_dir(self, name, path=None):
+        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+        with self.locked():
+            name, _ = self.account(name)
+            data = self.read()
+            data.setdefault("mappings", {})[resolved] = name
+            atomic_json(self.registry, data)
+        return resolved, name
+
+    def unmap_dir(self, path=None):
+        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+        with self.locked():
+            data = self.read()
+            mappings = data.get("mappings", {})
+            if resolved not in mappings:
+                raise SwapError(f"No mapping for {resolved}.")
+            del mappings[resolved]
+            data["mappings"] = mappings
+            atomic_json(self.registry, data)
+        return resolved
+
+    def list_mappings(self):
+        return dict(self.read().get("mappings", {}))
 
     def register(self, name, home=None):
         validate_name(name)
@@ -413,7 +465,10 @@ class Manager:
         return winner["name"], {"remaining": remaining, "candidates": summary}
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
-        name, home = self.account(name)
+        # Directory mappings scope a single launched session; OpenClaw sync mutates
+        # shared agent state, so an omitted name must fall back to the selected
+        # account only, never a directory mapping.
+        name, home = self.account(name, mapped=False)
         self.require_enabled(name)
         check_file_store(home)
         executable = shutil.which("openclaw")
@@ -603,6 +658,11 @@ def parser():
     rm.add_argument("name")
     rm.add_argument("--purge", action="store_true", help="Also delete the managed profile directory (a registered home is never deleted)")
     rm.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    mp = sub.add_parser("map", help="Map a directory to a default account, or list existing mappings")
+    mp.add_argument("name", nargs="?")
+    mp.add_argument("path", nargs="?", type=Path)
+    um = sub.add_parser("unmap", help="Remove a directory's account mapping")
+    um.add_argument("path", nargs="?", type=Path)
     o = sub.add_parser("openclaw", help="Sync an account to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
@@ -670,8 +730,12 @@ def main(argv=None):
             from xswap_menubar import launch
             return launch()
         elif args.command == "status":
-            name, home = manager.account()
-            print(f"Selected: {name}\nHome: {home}\nLocal label: {identity(home)}", flush=True)
+            default_name, mapped = manager.resolve_default()
+            name, home = manager.account(default_name)
+            lines = [f"Selected: {name}", f"Home: {home}", f"Local label: {identity(home)}"]
+            if mapped:
+                lines.append(f"Mapped by: {mapped}")
+            print("\n".join(lines), flush=True)
             return manager.launch_cli(name, ["login", "status"])
         elif args.command == "auto-policy":
             from xswap_cli import set_policy
@@ -725,6 +789,20 @@ def main(argv=None):
                 print(f"Removed {name}. Deleted the managed profile at {target}.")
             else:
                 print(f"Removed {name} from xswap. Files kept at {result['kept']}.")
+        elif args.command == "map":
+            if args.name is None:
+                mappings = manager.list_mappings()
+                if not mappings:
+                    print("No directory mappings.")
+                else:
+                    for path, mapped_name in sorted(mappings.items()):
+                        print(f"{path} → {mapped_name}")
+            else:
+                path, name = manager.map_dir(args.name, args.path)
+                print(f"Mapped {path} to {name}.")
+        elif args.command == "unmap":
+            path = manager.unmap_dir(args.path)
+            print(f"Unmapped {path}.")
         elif args.command == "app":
             if args.auto:
                 if args.name:
