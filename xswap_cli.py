@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -64,7 +65,31 @@ class WebSocketBridge(Bridge):
     def __init__(self, *args, socket, **kwargs):
         self.socket = socket
         self.outbox = asyncio.Queue(maxsize=4096)
+        self.resume_thread = None
+        self.thread_requests = set()
         super().__init__(*args, emit=self.outbox.put_nowait, **kwargs)
+
+    async def on_client(self, message):
+        method = message.get('method')
+        if method in ('thread/start', 'thread/resume', 'thread/fork') and 'id' in message:
+            self.thread_requests.add(message['id'])
+        if method == 'turn/start':
+            self.remember_thread((message.get('params') or {}).get('threadId'))
+        await super().on_client(message)
+
+    def remember_thread(self, value):
+        try:
+            self.resume_thread = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    async def on_server(self, message):
+        key = message.get('id')
+        if key in self.thread_requests and 'method' not in message:
+            self.thread_requests.discard(key)
+            if 'error' not in message:
+                self.remember_thread(((message.get('result') or {}).get('thread') or {}).get('id'))
+        await super().on_server(message)
 
     async def client_reader(self):
         async def receive():
@@ -90,10 +115,11 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
     """One TUI and one child server. No TCP listener and no TUI restart."""
     from websockets.asyncio.server import unix_serve
     connected = False
+    active_bridge = None
     client_ready = asyncio.Event()
 
     async def handle(socket):
-        nonlocal connected
+        nonlocal connected, active_bridge
         if connected:
             await socket.close(1008, 'one client per CLI session')
             return
@@ -143,6 +169,23 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 await cli.wait()
             listener.close()
             await listener.wait_closed()
+            command = reconnect_command(pool, env, active_bridge)
+            if command:
+                print('xswap: the temporary connection above is closed. '
+                      'Resume this conversation with a new bridge:', file=sys.stderr)
+                print(command, file=sys.stderr)
+
+
+def reconnect_command(pool, env, bridge):
+    """Only emit a known conversation and shell-quoted, non-secret metadata."""
+    thread = getattr(bridge, 'resume_thread', None)
+    manager = getattr(pool, 'manager', None)
+    if not thread or not manager or not env.get('CODEX_HOME'):
+        return None
+    names = list(dict.fromkeys([bridge.current, *pool.names]))
+    return shlex.join(['env', 'CODEX_SWAP_HOME=' + str(manager.root),
+        'CODEX_HOME=' + env['CODEX_HOME'], 'xswap', 'run', '--auto',
+        '--accounts', ','.join(names), '--', 'resume', thread])
 
 
 def resume_home(manager, args, default):
