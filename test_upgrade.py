@@ -85,6 +85,16 @@ class UpgradeTests(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("uv tool install", out.getvalue())
 
+    def test_dry_run_without_uv_returns_zero(self):
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("xswap_upgrade.shutil.which", return_value=None), \
+             patch("xswap_upgrade.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            result = upgrade("0.4.2", dry=True)
+        self.assertEqual(result, 0)
+        run.assert_not_called()
+        self.assertIn("git+https://github.com/intellieffect/xswap.git@v0.5.0", out.getvalue())
+
     def test_requested_tag_missing_raises(self):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 4, 2), "v0.4.2")]):
             with self.assertRaises(UpgradeError):

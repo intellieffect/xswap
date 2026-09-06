@@ -13,7 +13,8 @@ class UpgradeError(Exception):
     pass
 
 
-def list_tags(run=subprocess.run):
+def list_tags(run=None):
+    run = run or subprocess.run
     try:
         result = run(["git", "ls-remote", "--tags", "--refs", REPO], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as exc:
@@ -52,12 +53,12 @@ def upgrade(current_version, tag=None, dry=False):
         print(f"already up to date (v{current_version})")
         return 0
     command = install_command(chosen)
-    if shutil.which("uv") is None:
-        print(" ".join(command))
-        return 1
     if dry:
         print(" ".join(command))
         return 0
+    if shutil.which("uv") is None:
+        print(" ".join(command))
+        return 1
     result = subprocess.run(command)
     executable = shutil.which("xswap")
     if executable:
