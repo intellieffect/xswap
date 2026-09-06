@@ -19,6 +19,10 @@ xswap --version
 
 If the command isn't found, run `uv tool update-shell` and open a new terminal. The package name is `intellieffect-xswap`; this release is installed from GitHub, not PyPI.
 
+## Shell completion
+
+zsh: `xswap completion zsh > "${fpath[1]}/_xswap"`, or add `eval "$(xswap completion zsh)"` to `.zshrc`. Bash: add `eval "$(xswap completion bash)"` to `.bashrc`. Subcommands, options, and account names (read locally via `xswap list --offline`, no network) all complete.
+
 ## Quick start
 
 ```sh
