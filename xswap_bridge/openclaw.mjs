@@ -28,6 +28,22 @@ function writeBackup(file, data) {
   }
 }
 
+function readAuth(home) {
+  let fd;
+  try {
+    fd = fs.openSync(path.join(home, 'auth.json'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    assert(stat.isFile() && stat.uid === process.getuid() && (stat.mode & 0o077) === 0,
+      'Unsafe auth.json: require a user-owned regular file with mode 0600 (0400 also accepted), no symlink.');
+    return JSON.parse(fs.readFileSync(fd, 'utf8'));
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    throw new BridgeError('Cannot safely read auth.json; require a user-owned regular file, no symlink, and mode 0600.');
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 function sourceCredential(auth, sdk) {
   const tokens = auth.tokens;
   assert(auth.auth_mode === 'chatgpt' && tokens?.access_token && tokens?.refresh_token,
@@ -62,7 +78,7 @@ function preferredCredential(source, existing) {
 }
 
 export async function sync(request, sdk, agentSdk, config) {
-  const auth = JSON.parse(fs.readFileSync(path.join(request.codexHome, 'auth.json'), 'utf8'));
+  const auth = readAuth(request.codexHome);
   const { profileId, credential } = sourceCredential(auth, sdk);
   assert(config.gateway?.mode !== 'remote', 'Remote Gateways are not supported. Run xswap on the Gateway machine.');
   const available = agentSdk.listAgentIds(config);

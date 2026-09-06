@@ -25,3 +25,9 @@ If a credential is exposed, revoke or rotate it through its provider before atte
 ## Safe diagnostics
 
 Share the xswap and Codex versions, OS/Python version, the command with generic account labels, and a redacted error. `xswap auto-status` distinguishes saved settings from runtime support, but its account labels/PIDs still require review. Do not disable sandboxing or expand trusted paths just to make a report reproducible.
+
+## Credential file checks
+
+Before registration, automatic credential refresh, and OpenClaw sync, xswap requires `auth.json` to be a regular file owned by the current OS user with no group/other permission bits. Mode `0600` or read-only `0400` is accepted. Final-component symlinks, directories, and FIFOs are rejected. Validation and reading use the same open file descriptor. xswap does not silently chmod or replace source credentials.
+
+If rejected, inspect the selected Codex home's `auth.json` locally. For a regular file you own, remove unintended sharing/ACLs and set `chmod 600 /path/to/codex-home/auth.json`, then retry. For a link, sign in to a dedicated home with a regular credential file. Do not post its contents. POSIX mode checks do not audit ACLs, ancestor-directory access, root, or other processes running as the same OS user; protect the home and backups too.

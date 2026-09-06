@@ -11,7 +11,7 @@ function fixture(t) {
   const codexHome = path.join(root, 'codex'); fs.mkdirSync(codexHome);
   const expires = Date.now() + 3600_000;
   const auth = { auth_mode: 'chatgpt', tokens: { access_token: 'fake-access', refresh_token: 'fake-refresh', account_id: 'fake-account' } };
-  const writeAuth = () => fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(auth)); writeAuth();
+  const writeAuth = () => fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(auth), { mode: 0o600 }); writeAuth();
   let shared = { profiles: { 'openai:old': { provider: 'openai', type: 'oauth', access: 'old-token' } } };
   const local = { main: { order: { openai: ['openai:old'], anthropic: ['keep-me'] } }, worker: {} };
   let writes = 0;
@@ -113,3 +113,15 @@ test('an unavailable backup location blocks credential writes', async t => {
   await assert.rejects(sync(f.request, f.sdk, f.agentSdk, {}));
   assert.equal(f.writes(), 0);
 });
+
+for (const kind of ['readable', 'symlink', 'directory']) {
+  test(`unsafe auth ${kind} is rejected before OpenClaw writes`, async t => {
+    const f = fixture(t); const file = path.join(f.request.codexHome, 'auth.json');
+    if (kind === 'readable') fs.chmodSync(file, 0o644);
+    else if (kind === 'symlink') { fs.renameSync(file, file + '.real'); fs.symlinkSync(file + '.real', file); }
+    else { fs.unlinkSync(file); fs.mkdirSync(file); }
+    await assert.rejects(sync(f.request, f.sdk, f.agentSdk, {}), /auth.json/);
+    assert.equal(f.writes(), 0);
+    assert(!fs.existsSync(f.request.backupRoot));
+  });
+}

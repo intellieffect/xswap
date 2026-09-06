@@ -19,6 +19,7 @@ import time
 import uuid
 
 from xswap_usage import normalize_limits, read_limits
+from xswap_credentials import CredentialError, read_auth
 
 
 class LiveError(Exception):
@@ -37,10 +38,7 @@ def jwt_claims(token):
 def load_credentials(home):
     """Read the original credential store; never write or return raw errors."""
     try:
-        path = home / 'auth.json'
-        if path.stat().st_uid != os.getuid():
-            raise LiveError('credential file belongs to another user')
-        data = json.loads(path.read_text())
+        data = read_auth(home)
         tokens = data.get('tokens') or {}
         token = tokens.get('access_token')
         account = tokens.get('account_id')
@@ -56,6 +54,8 @@ def load_credentials(home):
             raise LiveError('ChatGPT access token needs refresh or sign-in')
         return {'accessToken': token, 'chatgptAccountId': account,
                 'chatgptPlanType': auth.get('chatgpt_plan_type')}
+    except CredentialError as exc:
+        raise LiveError(str(exc)) from None
     except (OSError, ValueError, TypeError, AttributeError):
         raise LiveError('cannot read ChatGPT credentials') from None
 
@@ -125,6 +125,11 @@ class AccountPool:
 
     def prepare(self, name):
         home = self.homes[name]
+        # Reject unsafe files before the official CLI can read/refresh them.
+        try:
+            read_auth(home)
+        except CredentialError as exc:
+            raise LiveError(str(exc)) from None
         # The official CLI refreshes its own source credentials if required.
         raw = read_limits(self.codex, self.manager.env(home), timeout=8)
         return load_credentials(home), raw
@@ -175,7 +180,7 @@ class Bridge:
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.4.0', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': '0.4.1', 'weeklyRemainingThreshold': self.threshold(),
                 'updatedAt': time.time(), **extra})
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
 

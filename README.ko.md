@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.1'
 xswap --version
 ```
 
@@ -44,7 +44,7 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 기존 버전 업데이트:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.1'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)

@@ -1,5 +1,10 @@
 # 0.4.0 — 2026-09-06
 
+## 0.4.1
+
+- Reject unsafe credential ownership, permission modes, symlinks and non-regular files before registration, automatic refresh, and OpenClaw sync. Read validated descriptors without modifying source files.
+- Pin the security scanner digest and pip-audit dependency hashes.
+
 - Prepare the public open-source release with MIT licensing, English/Korean documentation, HTTPS installation, and contribution/security guidance.
 - Replace personal account labels in examples with generic labels and document what diagnostics can expose.
 - Harden CI action references and add dependency/security maintenance configuration.
