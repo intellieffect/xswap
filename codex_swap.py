@@ -153,15 +153,16 @@ class Manager:
             return {"version": 1, "active": None, "accounts": {}}
         try:
             data = json.loads(self.registry.read_text())
-            if data.get("version") != 1 or not isinstance(data.get("accounts"), dict):
+            if (data.get("version") != 1 or not isinstance(data.get("accounts"), dict) or
+                    ("mappings" in data and not isinstance(data["mappings"], dict))):
                 raise ValueError()
             return data
         except (ValueError, OSError):
             raise SwapError("Invalid account registry; refusing to overwrite it.") from None
 
-    def account(self, name=None):
+    def account(self, name=None, mapped=True):
         data = self.read()
-        name = name or self.default_account()
+        name = name or (self.default_account() if mapped else data["active"])
         if name not in data["accounts"]:
             raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
         return name, Path(data["accounts"][name]["home"])
@@ -176,18 +177,22 @@ class Manager:
                     best = (len(parts), raw_path, name)
         return best
 
-    def default_account(self, cwd=None):
+    def resolve_default(self, cwd=None):
+        """Return (name, mapping_path) for the implicit-selection account, computing the
+        directory-mapping lookup exactly once. mapping_path is None when the active
+        account (not a mapping) decided the result."""
         data = self.read()
         best = self._best_mapping(data, cwd)
         if best and best[2] in data["accounts"]:
-            return best[2]
-        return data["active"]
+            return best[2], best[1]
+        return data["active"], None
+
+    def default_account(self, cwd=None):
+        return self.resolve_default(cwd)[0]
 
     def mapped_source(self, cwd=None):
         """Return the mapping path that decided default_account(cwd), or None."""
-        data = self.read()
-        best = self._best_mapping(data, cwd)
-        return best[1] if best and best[2] in data["accounts"] else None
+        return self.resolve_default(cwd)[1]
 
     def map_dir(self, name, path=None):
         resolved = str(Path(path or os.getcwd()).expanduser().resolve())
@@ -460,7 +465,10 @@ class Manager:
         return winner["name"], {"remaining": remaining, "candidates": summary}
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
-        name, home = self.account(name)
+        # Directory mappings scope a single launched session; OpenClaw sync mutates
+        # shared agent state, so an omitted name must fall back to the selected
+        # account only, never a directory mapping.
+        name, home = self.account(name, mapped=False)
         self.require_enabled(name)
         check_file_store(home)
         executable = shutil.which("openclaw")
@@ -722,9 +730,9 @@ def main(argv=None):
             from xswap_menubar import launch
             return launch()
         elif args.command == "status":
-            name, home = manager.account()
+            default_name, mapped = manager.resolve_default()
+            name, home = manager.account(default_name)
             lines = [f"Selected: {name}", f"Home: {home}", f"Local label: {identity(home)}"]
-            mapped = manager.mapped_source()
             if mapped:
                 lines.append(f"Mapped by: {mapped}")
             print("\n".join(lines), flush=True)

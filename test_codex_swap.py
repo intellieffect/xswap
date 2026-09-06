@@ -525,6 +525,36 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(main(["map"]), 0)
         self.assertIn(f"{target} → main", out.getvalue())
 
+    def test_read_rejects_non_dict_mappings(self):
+        self.manager.registry.write_text(json.dumps(
+            {"version": 1, "active": None, "accounts": {}, "mappings": "not-a-dict"}))
+        with self.assertRaises(SwapError):
+            self.manager.read()
+
+    def test_openclaw_never_follows_directory_mapping(self):
+        # Directory mappings scope a single launched session (xswap / app / status /
+        # usage). OpenClaw sync mutates shared local agent state, so an omitted name
+        # must resolve through the active account only, never a mapping.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        mapped_dir = self.base / "work-repo"
+        mapped_dir.mkdir()
+        self.manager.map_dir("second", mapped_dir)
+        # If sync_openclaw wrongly followed the mapping to "second", disabling it
+        # would surface "second is disabled" before any subprocess call. Since the
+        # active account is "main" (not disabled), it should instead reach the
+        # openclaw/node PATH check.
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)), \
+             patch("codex_swap.shutil.which", return_value=None):
+            with self.assertRaisesRegex(SwapError, "OpenClaw sync requires openclaw and node in PATH."):
+                self.manager.sync_openclaw()
+        # The bare account() resolution (used by xswap/app/status/usage), by contrast,
+        # does follow the same mapping.
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)):
+            self.assertEqual(self.manager.account(None)[0], "second")
+
     def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
         self.manager.register("main")
         second = self.manager.prepare("second")

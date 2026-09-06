@@ -154,7 +154,7 @@ Codex 인증 저장은 `file` 방식만 지원합니다. `keyring`/`auto`는 변
 
 OpenClaw 연결은 **ChatGPT OAuth + 로컬 Gateway** 전용입니다. API 키 인증이나 원격 Gateway를 이 명령으로 교체하지 않습니다. OpenClaw 2026.8.1에서 실제 검증했으며, 공개 SDK가 없는 버전에서는 중단합니다. Gateway가 실행 중이어야 인증 재적용까지 완료됩니다.
 
-`xswap use`는 이후 **xswap으로 실행하는** CLI와 앱에 적용됩니다. 일반 `codex` 명령과 이미 열린 앱·CLI 세션에는 소급 적용되지 않습니다. `--openclaw`를 붙이지 않으면 OpenClaw는 변경하지 않습니다. 명시적으로 계정을 고정한 기존 OpenClaw 세션이나 진행 중인 작업은 기존 인증을 유지할 수 있습니다. 계정을 명시하지 않은 `xswap`·`xswap app`·`xswap status`·`xswap usage`는 가장 깊이 일치하는 `xswap map` 디렉터리 매핑을 우선 따르며, 매핑이 없을 때만 `xswap use`로 선택한 계정으로 돌아갑니다(우선순위: 명시적 계정 > 디렉터리 매핑 > 선택된 계정).
+`xswap use`는 이후 **xswap으로 실행하는** CLI와 앱에 적용됩니다. 일반 `codex` 명령과 이미 열린 앱·CLI 세션에는 소급 적용되지 않습니다. `--openclaw`를 붙이지 않으면 OpenClaw는 변경하지 않습니다. 명시적으로 계정을 고정한 기존 OpenClaw 세션이나 진행 중인 작업은 기존 인증을 유지할 수 있습니다. 계정을 명시하지 않았을 때 정확히 다음 명령만 디렉터리 매핑을 따릅니다: 계정 없는 `xswap`·`--account` 없는 `xswap run`·`xswap app`·`xswap status`·`xswap usage`(가장 깊이 일치하는 매핑 우선, 매핑이 없을 때만 `xswap use`로 선택한 계정으로 돌아감. 우선순위: 명시적 계정 > 디렉터리 매핑 > 선택된 계정). `xswap openclaw`는 이름을 생략해도 디렉터리 매핑을 절대 따르지 않고 항상 `xswap use`로 선택한 계정을 사용합니다 — 하나의 실행 세션이 아니라 로컬 OpenClaw 에이전트 전체의 공유 인증 상태를 바꾸기 때문입니다. 비활성화(`disable`)된 계정에 매핑돼 있어도 해당 매핑은 그대로 적용되어 실행되며, 이는 `disable`이 `use`·`--auto`/`auto-enable` 풀·`openclaw`·실시간 사용량 조회에만 영향을 준다는 기존 규칙과 일치합니다.
 
 현재 계정을 등록할 때는 기존 `CODEX_HOME`을 참조합니다. 추가 계정은 독립된 인증·대화·DB를 사용하며, `config.toml`, `AGENTS.md`, `skills`, `rules`는 원래 홈을 공유합니다. `plugins`는 각 홈에 독립된 코드 캐시를 생성하고 이후에는 해당 홈의 플러그인 관리자가 갱신합니다. 다른 홈의 플러그인 변경을 자동 덮어쓰지 않습니다. **계정 분리는 파일·도구 접근 권한을 격리하는 보안 샌드박스가 아닙니다.**
 
