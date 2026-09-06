@@ -43,6 +43,14 @@ xswap enable work           # Restore it
 
 Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly. A disabled account is skipped by `list`'s live usage fetch, `use`, `--auto`/`auto-enable` pools, and `openclaw`, until re-enabled; it does not stop an explicit single-account launch like `xswap run --account NAME` or `xswap app NAME`.
 
+### Pick the account with the most quota
+
+```sh
+xswap run --best -- exec "summarize this repo"
+```
+
+`codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot protect them. `--best` checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
+
 ## Automatic switching
 
 Start with an explicit pool of at least two signed-in accounts:

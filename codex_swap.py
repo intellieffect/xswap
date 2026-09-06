@@ -18,8 +18,8 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines
-from xswap_live import LiveError
+from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines, window_label
+from xswap_live import LiveError, buckets_available
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
@@ -94,6 +94,14 @@ def identity(home):
         raise SwapError(str(exc)) from None
     except (ValueError, OSError, IndexError, TypeError):
         return "unreadable auth cache"
+
+
+def codex_windows(buckets):
+    return [window for bucket in buckets if bucket["id"] == "codex" for window in bucket["windows"]]
+
+
+def window_percent(buckets, minutes):
+    return next((w["remainingPercent"] for w in codex_windows(buckets) if w["windowMinutes"] == minutes), None)
 
 
 class Manager:
@@ -283,6 +291,40 @@ class Manager:
         from xswap_display import render
         from xswap_cli import read_settings
         print(render(rows, read_settings(self), include_spark, details))
+
+    def best_account(self, model=None, exclude=()):
+        """Pick the signed-in account with the most codex headroom right now.
+
+        A one-shot choice for launchers (like `codex exec`) that have no
+        `--remote` hook and so cannot be protected by the live auto bridge.
+        """
+        data = self.read()
+        excluded = set(exclude)
+        candidates = [(n, Path(v["home"])) for n, v in data["accounts"].items()
+                      if not v.get("disabled") and n not in excluded]
+        if not candidates:
+            return None, {"remaining": {}, "candidates": []}
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(candidates)))) as pool:
+            rows = list(pool.map(lambda item: self.account_usage(*item), candidates))
+        summary, ranked = [], []
+        for row in rows:
+            summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
+                             "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
+            if row["status"] == "ok" and buckets_available(row["buckets"], model) is True:
+                ranked.append(row)
+        if not ranked:
+            return None, {"remaining": {}, "candidates": summary}
+
+        def rank_key(row):
+            known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
+            if not known:
+                return (0, float("inf"))
+            tightest = min(known, key=lambda w: w["remainingPercent"])
+            return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
+
+        winner = min(ranked, key=rank_key)
+        remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
+        return winner["name"], {"remaining": remaining, "candidates": summary}
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
         name, home = self.account(name)
@@ -485,6 +527,8 @@ def parser():
     r.add_argument("--account"); r.add_argument("--dry-run", action="store_true")
     r.add_argument("--auto", action="store_true", help="Keep the interactive CLI session alive across quota account switches")
     r.add_argument("--accounts", help="Explicit automatic fallback order")
+    r.add_argument("--best", action="store_true", help="Launch with the account with the most remaining quota right now (one-shot; not live switching)")
+    r.add_argument("--model", help="Model hint for --best; never passed to codex")
     r.add_argument("args", nargs=argparse.REMAINDER)
     a = sub.add_parser("app", help="Open an account-specific desktop instance")
     a.add_argument("name", nargs="?"); a.add_argument("--app"); a.add_argument("--dry-run", action="store_true")
@@ -585,6 +629,19 @@ def main(argv=None):
             rest = getattr(args, "args", [])
             if rest[:1] == ["--"]:
                 rest = rest[1:]
+            if getattr(args, "best", False):
+                if args.account or getattr(args, "auto", False):
+                    raise SwapError("--best cannot be combined with --account or --auto.")
+                name, reason = manager.best_account(getattr(args, "model", None))
+                if name is None:
+                    name, _ = manager.account()
+                    print(f"xswap: no account with known remaining quota; using {name}", file=sys.stderr)
+                if args.dry_run:
+                    _, home = manager.account(name)
+                    print(json.dumps({"account": name, "reason": reason, "CODEX_HOME": str(home),
+                                      "argv": [manager.codex(), *rest]}, indent=2))
+                    return 0
+                return manager.launch_cli(name, rest, False)
             if getattr(args, "auto", False):
                 if args.account or not args.accounts:
                     raise SwapError("Use --auto --accounts first,second without --account.")
