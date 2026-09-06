@@ -68,7 +68,10 @@ class InitTests(unittest.TestCase):
     def test_register_yes_flag_defaults_to_main_without_prompting(self):
         self.sign_in()
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), patch.object(Manager, "codex", return_value="/usr/bin/codex"):
+        # doctor's own "codex binary" check depends on what's installed on the machine
+        # running the tests; init's exit code just needs to match doctor's, not be 0.
+        with contextlib.redirect_stdout(out), patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("xswap_doctor.check_codex_binary", return_value={"name": "codex binary", "status": "OK", "detail": "fixture"}):
             code = run_init(self.manager, init_args(yes=True))
         self.assertEqual(code, 0)
         self.assertIn("main", self.manager.read()["accounts"])
@@ -187,7 +190,8 @@ class InitTests(unittest.TestCase):
         self.sign_in()
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
         out = io.StringIO()
-        with patch.dict(os.environ, env), patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(out):
+        with patch.dict(os.environ, env), patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(out), \
+             patch("xswap_doctor.check_codex_binary", return_value={"name": "codex binary", "status": "OK", "detail": "fixture"}):
             code = main(["init", "--yes"])
         self.assertEqual(code, 0)
         self.assertIn("main", self.manager.read()["accounts"])
