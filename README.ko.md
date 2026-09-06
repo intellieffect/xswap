@@ -140,8 +140,11 @@ OpenClaw 연결은 다음을 수행합니다.
 | `xswap login work` | 등록된 계정을 재인증(로그인 만료 시) |
 | `xswap disable work` | 계정을 삭제하지 않고 선택 대상에서 제외 |
 | `xswap enable work` | 제외된 계정을 다시 선택 대상으로 복원 |
+| `xswap remove work` | 계정을 xswap에서 제거 |
 
 `xswap disable`로 제외된 계정은 `use`, `--auto`/`auto-enable` 계정 풀, `openclaw`, `list`의 실시간 사용량 조회에서 모두 빠지며 목록에는 `(disabled)`로 표시됩니다. 다만 `xswap run --account NAME`·`xswap app NAME`처럼 계정을 명시적으로 지정한 단일 실행은 막지 않습니다.
+
+`xswap remove`는 계정의 레지스트리 항목만 지우고 파일은 기본적으로 남겨두며, `--purge`를 추가하면 관리형 프로필 디렉터리까지 삭제합니다(등록된 홈, 즉 사용자의 `~/.codex`는 어떤 플래그를 줘도 삭제하지 않습니다). 활성화된 `--auto`/`auto-enable` 풀에 속했거나 실행 중인 자동 세션이 사용 중인 계정은 거부하며, `--yes` 없이는 확인을 묻습니다.
 
 ## 지원 범위와 동작 원리
 
