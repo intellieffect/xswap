@@ -964,3 +964,22 @@ class UseBestTests(unittest.TestCase):
             code = main(["use", "--best", "--openclaw"])
         self.assertEqual(code, 0)
         sync_openclaw.assert_called_once_with("second", select=True)
+
+    def test_use_model_without_best_fails(self):
+        self.add("second")
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use", "second", "--model", "gpt-5"])
+        self.assertEqual(code, 1)
+        self.assertIn("--model requires --best.", err.getvalue())
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_use_best_omits_parenthetical_when_remaining_is_unknown(self):
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch.object(Manager, "best_account", return_value=("main", {"remaining": {"5h": None, "7d": None}, "candidates": []})), \
+             contextlib.redirect_stdout(out):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 0)
+        self.assertIn("Selected main. CLI: xswap · Desktop: xswap app", out.getvalue())
+        self.assertNotIn("(", out.getvalue())

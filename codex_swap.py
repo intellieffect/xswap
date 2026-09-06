@@ -771,6 +771,8 @@ def main(argv=None):
         elif args.command in ("use", "switch"):
             if bool(args.name) == bool(args.best):
                 raise SwapError("Give an account name or --best.")
+            if args.model and not args.best:
+                raise SwapError("--model requires --best.")
             detail = ""
             if args.best:
                 name, reason = manager.best_account(args.model)
