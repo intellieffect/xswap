@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3
+
+- `xswap --version` reported 0.6.1 on the 0.6.2 release because the version string is kept in both `pyproject.toml` and `codex_swap.__version__` and only one was bumped. Both now read 0.6.3, and a unit test fails whenever the two drift. `xswap upgrade` compares `__version__` with the newest tag, so a stale string could also make it skip a real update.
+
 ## 0.6.2
 
 - `xswap list --short` / `usage --short` place windows by duration (`windowMinutes`), not by `primary`/`secondary` position. Live servers can report only a seven-day window and still call it `primary`; that value now lands in the `7d` slot instead of the `5h` slot. Position remains the fallback when the duration is absent.
