@@ -111,9 +111,12 @@ class AccountPool:
             raise LiveError('provide at least two distinct accounts with --accounts first,second')
         self.manager, self.codex = manager, codex
         self.homes = {}
+        data = manager.read()
         for name in names:
             validate_name(name)
             _, home = manager.account(name)
+            if data["accounts"].get(name, {}).get("disabled"):
+                raise LiveError(f'account {name} is disabled; run: xswap enable {name}')
             check_file_store(home)
             self.homes[name] = home
         self.names = names

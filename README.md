@@ -38,9 +38,11 @@ xswap list --include-spark  # Also display Spark quotas
 xswap usage work
 xswap list --offline        # Local labels only
 xswap app work              # Separate macOS desktop profile
+xswap disable work          # Hold an account out of selection without deleting it
+xswap enable work           # Restore it
 ```
 
-Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly.
+Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly. A disabled account is skipped by `list`'s live usage fetch, `use`, and `--auto`/`auto-enable` pools until re-enabled.
 
 ## Automatic switching
 

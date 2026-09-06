@@ -119,6 +119,10 @@ OpenClaw 연결은 다음을 수행합니다.
 | `xswap add work --device-auth` | Codex의 기기 코드 로그인 사용 |
 | `xswap app work --dry-run` | 앱 실행 경로와 환경변수 확인 |
 | `xswap login work` | 등록된 계정을 재인증(로그인 만료 시) |
+| `xswap disable work` | 계정을 삭제하지 않고 선택 대상에서 제외 |
+| `xswap enable work` | 제외된 계정을 다시 선택 대상으로 복원 |
+
+`xswap disable`로 제외된 계정은 `use`, `--auto`/`auto-enable` 계정 풀, `list`의 실시간 사용량 조회에서 모두 빠지며, 목록에는 `(disabled)`로 표시됩니다.
 
 ## 지원 범위와 동작 원리
 

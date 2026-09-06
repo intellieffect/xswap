@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, SwapError, atomic_json, main
+from xswap_live import AccountPool, LiveError
 
 
 class AccountTests(unittest.TestCase):
@@ -185,6 +186,67 @@ class AccountTests(unittest.TestCase):
             with self.assertRaises(SwapError) as raised:
                 self.manager.sync_openclaw()
         self.assertNotIn("fake-secret-token", str(raised.exception))
+
+    def test_disable_marks_registry_and_list_shows_it(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.assertTrue(json.loads(self.manager.registry.read_text())["accounts"]["second"]["disabled"])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.manager.show_accounts(offline=True)
+        self.assertIn("second           ChatGPT (disabled)", out.getvalue())
+
+    def test_disable_refuses_unknown_account(self):
+        with self.assertRaises(SwapError):
+            self.manager.set_disabled("ghost", True)
+
+    def test_use_refuses_disabled_account(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with self.assertRaisesRegex(SwapError, "second is disabled. Run: xswap enable second"):
+            self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_account_pool_refuses_disabled_account(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with self.assertRaises(LiveError):
+            AccountPool(self.manager, ["main", "second"], "codex")
+
+    def test_enable_restores_selection_and_pool_eligibility(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.manager.set_disabled("second", False)
+        self.assertNotIn("disabled", json.loads(self.manager.registry.read_text())["accounts"]["second"])
+        self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "second")
+        pool = AccountPool(self.manager, ["main", "second"], "codex")
+        self.assertEqual(pool.names, ["main", "second"])
+
+    def test_json_output_reports_disabled_field(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.manager.show_accounts(offline=True, json_output=True)
+        rows = {row["name"]: row for row in json.loads(out.getvalue())}
+        self.assertTrue(rows["second"]["disabled"])
+        self.assertFalse(rows["main"]["disabled"])
+
+    def test_enabled_accounts_excludes_disabled(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        self.assertEqual([name for name, _ in self.manager.enabled_accounts()], ["main"])
 
 
 if __name__ == "__main__":
