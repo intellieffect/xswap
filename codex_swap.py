@@ -292,7 +292,8 @@ class Manager:
                 resolved = target.resolve()
                 if (resolved != target or resolved.is_symlink() or not resolved.is_dir()
                         or resolved.stat().st_uid != os.getuid()):
-                    raise SwapError(f"Refusing to purge {name}: unexpected profile directory at {target}.")
+                    raise SwapError(f"{name} was already removed from the registry. Refusing to purge an unexpected "
+                                     f"profile directory: its files were left untouched at {target}.")
                 shutil.rmtree(resolved)
                 purged = True
                 kept = None
@@ -701,6 +702,8 @@ def main(argv=None):
             entry = manager.read()["accounts"][name]
             target = manager.root / "profiles" / name
             will_purge = args.purge and entry.get("managed")
+            if args.purge and not entry.get("managed"):
+                print(f"--purge is ignored for {name}: it is a registered home, not a managed profile.")
             if not args.yes:
                 if not sys.stdin.isatty():
                     raise SwapError("Confirm with --yes.")
