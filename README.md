@@ -54,6 +54,16 @@ xswap run --best -- exec "summarize this repo"
 
 `codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot protect them. `--best` checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
 
+### Directory mappings
+
+```sh
+xswap map work ~/code/company   # Default to work whenever the cwd is inside ~/code/company
+xswap map                       # List current mappings
+xswap unmap ~/code/company      # Remove a mapping
+```
+
+The deepest matching directory wins. A mapping only applies where no account is named explicitly: precedence is explicit name (`--account`, a positional `NAME`) > directory mapping > the account selected with `xswap use`. This affects bare `xswap`, `xswap app`, `xswap status`, and `xswap usage`.
+
 ## Alerts
 
 ```sh

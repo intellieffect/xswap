@@ -438,6 +438,93 @@ class AccountTests(unittest.TestCase):
         self.assertNotIn("second", self.manager.read()["accounts"])
         self.assertTrue(external.exists())
 
+    def test_map_deepest_prefix_wins(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        parent = self.base / "code"
+        child = parent / "project"
+        child.mkdir(parents=True)
+        self.manager.map_dir("main", parent)
+        self.manager.map_dir("second", child)
+        self.assertEqual(self.manager.default_account(child), "second")
+        self.assertEqual(self.manager.default_account(parent), "main")
+
+    def test_map_sibling_name_prefix_does_not_match(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        base_dir = self.base / "a" / "b"
+        sibling = self.base / "a" / "bc"
+        base_dir.mkdir(parents=True)
+        sibling.mkdir(parents=True)
+        self.manager.map_dir("second", base_dir)
+        self.assertEqual(self.manager.default_account(sibling), "main")
+
+    def test_map_unmapped_cwd_falls_back_to_active(self):
+        self.manager.register("main")
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        self.assertEqual(self.manager.default_account(elsewhere), "main")
+
+    def test_map_explicit_name_overrides_mapping(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        mapped = self.base / "mapped"
+        mapped.mkdir()
+        self.manager.map_dir("second", mapped)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped)):
+            self.assertEqual(self.manager.account("main")[0], "main")
+
+    def test_map_unknown_account_raises(self):
+        self.manager.register("main")
+        with self.assertRaises(SwapError):
+            self.manager.map_dir("ghost", self.base)
+
+    def test_unmap_missing_raises(self):
+        self.manager.register("main")
+        with self.assertRaises(SwapError):
+            self.manager.unmap_dir(self.base / "never-mapped")
+
+    def test_map_removed_account_falls_back_to_active(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        mapped = self.base / "mapped"
+        mapped.mkdir()
+        self.manager.map_dir("second", mapped)
+        with self.manager.locked():
+            data = self.manager.read()
+            del data["accounts"]["second"]
+            atomic_json(self.manager.registry, data)
+        self.assertEqual(self.manager.default_account(mapped), "main")
+
+    def test_map_cli_wiring(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        target = self.base / "cli-mapped"
+        target.mkdir()
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            code = main(["map", "second", str(target)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.default_account(target), "second")
+
+    def test_map_listing_output(self):
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["map"]), 0)
+        self.assertIn("No directory mappings.", out.getvalue())
+        target = self.base / "listed"
+        target.mkdir()
+        self.manager.map_dir("main", target)
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["map"]), 0)
+        self.assertIn(f"{target} → main", out.getvalue())
+
     def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
         self.manager.register("main")
         second = self.manager.prepare("second")

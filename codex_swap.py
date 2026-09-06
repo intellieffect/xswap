@@ -161,10 +161,57 @@ class Manager:
 
     def account(self, name=None):
         data = self.read()
-        name = name or data["active"]
+        name = name or self.default_account()
         if name not in data["accounts"]:
             raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
         return name, Path(data["accounts"][name]["home"])
+
+    def _best_mapping(self, data, cwd=None):
+        target_parts = Path(cwd or os.getcwd()).resolve().parts
+        best = None  # (depth, path, name)
+        for raw_path, name in data.get("mappings", {}).items():
+            parts = Path(raw_path).parts
+            if len(parts) <= len(target_parts) and tuple(parts) == target_parts[:len(parts)]:
+                if best is None or len(parts) > best[0]:
+                    best = (len(parts), raw_path, name)
+        return best
+
+    def default_account(self, cwd=None):
+        data = self.read()
+        best = self._best_mapping(data, cwd)
+        if best and best[2] in data["accounts"]:
+            return best[2]
+        return data["active"]
+
+    def mapped_source(self, cwd=None):
+        """Return the mapping path that decided default_account(cwd), or None."""
+        data = self.read()
+        best = self._best_mapping(data, cwd)
+        return best[1] if best and best[2] in data["accounts"] else None
+
+    def map_dir(self, name, path=None):
+        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+        with self.locked():
+            name, _ = self.account(name)
+            data = self.read()
+            data.setdefault("mappings", {})[resolved] = name
+            atomic_json(self.registry, data)
+        return resolved, name
+
+    def unmap_dir(self, path=None):
+        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+        with self.locked():
+            data = self.read()
+            mappings = data.get("mappings", {})
+            if resolved not in mappings:
+                raise SwapError(f"No mapping for {resolved}.")
+            del mappings[resolved]
+            data["mappings"] = mappings
+            atomic_json(self.registry, data)
+        return resolved
+
+    def list_mappings(self):
+        return dict(self.read().get("mappings", {}))
 
     def register(self, name, home=None):
         validate_name(name)
@@ -603,6 +650,11 @@ def parser():
     rm.add_argument("name")
     rm.add_argument("--purge", action="store_true", help="Also delete the managed profile directory (a registered home is never deleted)")
     rm.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    mp = sub.add_parser("map", help="Map a directory to a default account, or list existing mappings")
+    mp.add_argument("name", nargs="?")
+    mp.add_argument("path", nargs="?", type=Path)
+    um = sub.add_parser("unmap", help="Remove a directory's account mapping")
+    um.add_argument("path", nargs="?", type=Path)
     o = sub.add_parser("openclaw", help="Sync an account to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
@@ -671,7 +723,11 @@ def main(argv=None):
             return launch()
         elif args.command == "status":
             name, home = manager.account()
-            print(f"Selected: {name}\nHome: {home}\nLocal label: {identity(home)}", flush=True)
+            lines = [f"Selected: {name}", f"Home: {home}", f"Local label: {identity(home)}"]
+            mapped = manager.mapped_source()
+            if mapped:
+                lines.append(f"Mapped by: {mapped}")
+            print("\n".join(lines), flush=True)
             return manager.launch_cli(name, ["login", "status"])
         elif args.command == "auto-policy":
             from xswap_cli import set_policy
@@ -725,6 +781,20 @@ def main(argv=None):
                 print(f"Removed {name}. Deleted the managed profile at {target}.")
             else:
                 print(f"Removed {name} from xswap. Files kept at {result['kept']}.")
+        elif args.command == "map":
+            if args.name is None:
+                mappings = manager.list_mappings()
+                if not mappings:
+                    print("No directory mappings.")
+                else:
+                    for path, mapped_name in sorted(mappings.items()):
+                        print(f"{path} → {mapped_name}")
+            else:
+                path, name = manager.map_dir(args.name, args.path)
+                print(f"Mapped {path} to {name}.")
+        elif args.command == "unmap":
+            path = manager.unmap_dir(args.path)
+            print(f"Unmapped {path}.")
         elif args.command == "app":
             if args.auto:
                 if args.name:
