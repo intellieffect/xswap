@@ -25,6 +25,7 @@ These require your own installed Codex binary. They use a local fixture backend 
 uv run python tests/live_codex_smoke.py
 uv run python tests/live_cli_smoke.py
 XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
+XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
 ```
 
 `XSWAP_SMOKE_CODEX=/absolute/path/to/codex` selects a binary. The CLI smoke test requires a PTY. macOS browser-runtime checks additionally require the locally installed app and browser plugin:
@@ -32,6 +33,7 @@ XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
 ```sh
 uv run python tests/plugin_runtime_smoke.py
 XSWAP_TEST_BROWSER=1 XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
+XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
 ```
 
 These setup checks do not validate a live browser backend or page navigation. Tests must never redistribute provider binaries/plugins or use actual credentials as fixtures.

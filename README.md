@@ -251,3 +251,7 @@ The command reports `applied`, `pending`, `unsupported`, `failed`, and `unconfir
 Explicit `codex resume UUID` / `fork UUID` in automatic mode now locates that conversation in the current runtime, the original Codex home, or a registered account home. It reuses the owning home without copying the conversation and keeps the authentication bridge. The picker, named sessions, and `--last` remain scoped to the automatic runtime. Ambiguous duplicate UUIDs outside that runtime require choosing the original home explicitly.
 
 When an auto-mode CLI exits, use the final xswap resume command printed below Codex’s temporary remote reconnect address. It starts a new bridge and preserves the account pool, current account, and original session home; the old Unix socket is closed.
+
+Earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
+
+The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After upgrading, restart existing CLI sessions once to load the updated bridge.

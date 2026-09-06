@@ -2,7 +2,7 @@
 import os
 import sys
 import time
-from xswap_usage import is_ok, reset_label, usage_lines
+from xswap_usage import is_ok, reset_credit_lines, reset_label, usage_lines
 
 
 def weekly(row):
@@ -74,6 +74,8 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
             text = f'\033[{code}m{text}\033[0m'
         lines.append('  ' + text)
         if item['reset']: lines.append('  ' + item['reset'])
+        if is_ok(row['status']):
+            lines.extend('  ' + line for line in reset_credit_lines(row.get('resetCredits')))
         if details:
             lines.append('  ' + row['identity'])
             buckets = [b for b in row['buckets'] if include_spark or 'spark' not in (b['id'] + b['name']).lower()]

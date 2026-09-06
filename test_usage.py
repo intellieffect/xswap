@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, SwapError, atomic_json, main
-from xswap_usage import UsageError, is_ok, normalize_limits, read_limits, reset_label, short_line, usage_lines, warnings
+from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, reset_credit_lines, reset_label, short_line, usage_lines, warnings
 
 
 def response():
@@ -103,6 +103,50 @@ for line in sys.stdin:
         for value in [True, float('nan'), -1, "50"]:
             buckets = normalize_limits({"rateLimits": {"primary": {"usedPercent": value}}})
             self.assertIsNone(buckets[0]["windows"][0]["remainingPercent"])
+
+    def test_reset_count_is_authoritative_and_details_are_redacted(self):
+        payload = {"rateLimitResetCredits": {"availableCount": 3, "credits": [
+            {"id": "private-id", "status": "available", "expiresAt": 2000000000},
+            {"status": "consumed", "expiresAt": 2000000000}]}}
+        result = normalize_reset_credits(payload)
+        lines = reset_credit_lines(result)
+        self.assertEqual(lines[0], "codex reset credits: 3 available")
+        self.assertEqual(len(lines), 2)
+        self.assertIn("expires", lines[1])
+        self.assertNotIn("private-id", json.dumps(result))
+
+    def test_reset_missing_zero_and_count_only_are_distinct(self):
+        for value in [None, {}, {"availableCount": True}, {"availableCount": -1}]:
+            self.assertEqual(reset_credit_lines(normalize_reset_credits(
+                {"rateLimitResetCredits": value}))[0], "codex reset credits: unknown")
+        for count in [0, 2]:
+            for details in [None, []]:
+                result = normalize_reset_credits({"rateLimitResetCredits": {
+                    "availableCount": count, "credits": details}})
+                self.assertEqual(reset_credit_lines(result), [f"codex reset credits: {count} available"])
+
+    def test_reset_credits_survive_cache(self):
+        manager = self.manager()
+        payload = response()
+        payload["rateLimitResetCredits"] = {"availableCount": 2, "credits": None}
+        with patch("codex_swap.read_limits", return_value=payload) as fetch, patch.object(manager, "codex", return_value="codex"):
+            first = manager.account_rows()
+            cached = manager.account_rows(max_age=60)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(first[0]["resetCredits"], cached[0]["resetCredits"])
+        self.assertEqual(cached[0]["resetCredits"]["availableCount"], 2)
+
+    def test_list_and_json_include_reset_credits(self):
+        manager = self.manager()
+        payload = response()
+        payload["rateLimitResetCredits"] = {"availableCount": 2, "credits": None}
+        with patch("codex_swap.read_limits", return_value=payload), patch.object(manager, "codex", return_value="codex"):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                manager.show_accounts()
+            self.assertIn("codex reset credits: 2 available", output.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                manager.show_accounts(json_output=True)
+            self.assertEqual(json.loads(output.getvalue())[0]["resetCredits"]["availableCount"], 2)
 
     def manager(self):
         home = self.root / "home"
@@ -307,7 +351,7 @@ for line in sys.stdin:
         self.assertNotIn("do-not-display", raw)
         self.assertNotIn("fake-token", raw)
         entry = json.loads(raw)["main"]
-        self.assertEqual(set(entry), {"buckets", "fetchedAt", "identity"})
+        self.assertEqual(set(entry), {"buckets", "fetchedAt", "identity", "resetCredits"})
 
     def test_json_row_reports_cached_field_both_ways(self):
         manager = self.manager()

@@ -141,6 +141,41 @@ def normalize_limits(response):
     return buckets
 
 
+def normalize_reset_credits(response):
+    """Keep reset availability separate from quota buckets and purchased credits."""
+    source = response.get("rateLimitResetCredits")
+    if not isinstance(source, dict):
+        return None
+    count = source.get("availableCount")
+    count = count if type(count) is int and count >= 0 else None
+    details = source.get("credits")
+    credits = None
+    if isinstance(details, list):
+        credits = []
+        for row in details:
+            if not isinstance(row, dict):
+                continue
+            expiry = row.get("expiresAt")
+            credits.append({"status": clean(row["status"]) if row.get("status") else None,
+                            "expiresAt": expiry if number(expiry) and expiry > 0 else None})
+    return {"availableCount": count, "credits": credits}
+
+
+def reset_credit_lines(credits):
+    count = credits.get("availableCount") if credits else None
+    lines = [f"codex reset credits: {count} available" if count is not None
+             else "codex reset credits: unknown"]
+    for row in (credits.get("credits") or []) if credits else []:
+        if row["status"] != "available" or row["expiresAt"] is None:
+            continue
+        try:
+            expiry = datetime.fromtimestamp(row["expiresAt"]).astimezone().strftime("%m/%d %H:%M %Z")
+        except (ValueError, OverflowError, OSError):
+            continue
+        lines.append(f"  reset credit expires {expiry}")
+    return lines
+
+
 def window_label(window):
     minutes = window["windowMinutes"]
     if minutes is None:

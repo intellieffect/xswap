@@ -65,9 +65,54 @@ class WebSocketBridge(Bridge):
     def __init__(self, *args, socket, **kwargs):
         self.socket = socket
         self.outbox = asyncio.Queue(maxsize=4096)
+        self.ready = asyncio.Event()
+        self.initialize_result = None
         self.resume_thread = None
         self.thread_requests = set()
         super().__init__(*args, emit=self.outbox.put_nowait, **kwargs)
+        self.picker_prefix = self.request_prefix + 'picker-'
+
+    async def rpc(self, method, params, timeout=20):
+        result = await super().rpc(method, params, timeout)
+        if method == 'initialize':
+            self.initialize_result = result
+        return result
+
+    async def picker_client(self, socket):
+        """A picker borrows the initialized server, with isolated request IDs.
+
+        It may browse sessions but cannot start turns or change authentication.
+        Closing a picker never closes the main TUI or its child server.
+        """
+        allowed = {'thread/list', 'thread/read', 'thread/loaded/list',
+                   'config/read', 'configRequirements/read', 'account/read',
+                   'account/rateLimits/read', 'model/list'}
+        initialized = False
+        async for text in socket:
+            message = json.loads(text)
+            method = message.get('method')
+            if 'id' not in message:
+                continue
+            reply = {'id': message['id']}
+            if method == 'initialize' and not initialized:
+                await asyncio.wait_for(self.ready.wait(), 20)
+                reply['result'] = self.initialize_result
+                initialized = True
+            elif not initialized or method not in allowed or self.stopping:
+                reply['error'] = {'code': -32600, 'message': 'xswap: picker connection supports session browsing only'}
+            else:
+                # Use the bridge namespace so identical main/picker IDs cannot collide.
+                self.counter += 1
+                key = self.picker_prefix + str(self.counter)
+                future = asyncio.get_running_loop().create_future()
+                self.requests[key] = future
+                try:
+                    await self.send({**message, 'id': key})
+                    result = await asyncio.wait_for(future, 20)
+                    reply.update({k: result[k] for k in ('result', 'error') if k in result})
+                finally:
+                    self.requests.pop(key, None)
+            await socket.send(json.dumps(reply, separators=(',', ':')))
 
     async def on_client(self, message):
         method = message.get('method')
@@ -76,6 +121,8 @@ class WebSocketBridge(Bridge):
         if method == 'turn/start':
             self.remember_thread((message.get('params') or {}).get('threadId'))
         await super().on_client(message)
+        if method == 'initialize':
+            self.ready.set()
 
     def remember_thread(self, value):
         try:
@@ -85,6 +132,9 @@ class WebSocketBridge(Bridge):
 
     async def on_server(self, message):
         key = message.get('id')
+        if (isinstance(key, str) and key.startswith(self.picker_prefix)
+                and 'method' not in message and key not in self.requests):
+            return  # A timed-out picker response must never reach the main TUI.
         if key in self.thread_requests and 'method' not in message:
             self.thread_requests.discard(key)
             if 'error' not in message:
@@ -114,6 +164,7 @@ class WebSocketBridge(Bridge):
 async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_class=WebSocketBridge):
     """One TUI and one child server. No TCP listener and no TUI restart."""
     from websockets.asyncio.server import unix_serve
+    from websockets.exceptions import ConnectionClosed
     connected = False
     active_bridge = None
     client_ready = asyncio.Event()
@@ -121,7 +172,12 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
     async def handle(socket):
         nonlocal connected, active_bridge
         if connected:
-            await socket.close(1008, 'one client per CLI session')
+            try:
+                await active_bridge.picker_client(socket)
+            except ConnectionClosed:
+                pass
+            except (ValueError, asyncio.TimeoutError, LiveError):
+                await socket.close(1008, 'picker connection failed')
             return
         connected = True
         active_bridge = bridge_class(pool, [real, 'app-server', '--stdio', *server_overrides(args)],

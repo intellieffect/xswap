@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, is_ok, normalize_limits, read_limits, short_line, usage_lines, window_label
+from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, usage_lines, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
@@ -462,7 +462,7 @@ class Manager:
             return None
         if time.time() - fetched_at > max_age:
             return None
-        return {"buckets": buckets, "fetchedAt": fetched_at}
+        return {"buckets": buckets, "fetchedAt": fetched_at, "resetCredits": entry.get("resetCredits")}
 
     def _forget_usage(self, name):
         """Drop a removed account's cache entry (label may be an email). Caller holds the lock."""
@@ -473,7 +473,7 @@ class Manager:
         if isinstance(data, dict) and data.pop(name, None) is not None:
             atomic_json(self.usage_cache_path(), data)
 
-    def remember_usage(self, name, buckets, fetched_at, label):
+    def remember_usage(self, name, buckets, fetched_at, label, reset_credits=None):
         """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
         with self.locked():
             try:
@@ -482,12 +482,12 @@ class Manager:
                     data = {}
             except (OSError, ValueError):
                 data = {}
-            data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label}
+            data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label, "resetCredits": reset_credits}
             atomic_json(self.usage_cache_path(), data)
 
     def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
         label = identity(home)
-        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "fetchedAt": None, "disabled": disabled, "cached": False}
+        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
         if disabled:
             row["status"] = "disabled"
         elif label in ("not signed in", "unreadable auth cache"):
@@ -497,14 +497,15 @@ class Manager:
         elif not offline:
             cached = self.cached_usage(name, label, max_age)
             if cached is not None:
-                row.update(status="ok (cached)", buckets=cached["buckets"], fetchedAt=cached["fetchedAt"], cached=True)
+                row.update(status="ok (cached)", buckets=cached["buckets"], fetchedAt=cached["fetchedAt"], resetCredits=cached["resetCredits"], cached=True)
             else:
                 try:
                     check_file_store(home)
                     response = read_limits(self.codex(), self.env(home))
                     buckets, fetched_at = normalize_limits(response), time.time()
-                    row.update(status="ok", buckets=buckets, fetchedAt=fetched_at)
-                    self.remember_usage(name, buckets, fetched_at, label)
+                    row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
+                               resetCredits=normalize_reset_credits(response))
+                    self.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
                 except (UsageError, SwapError) as error:
                     row["status"] = f"usage unavailable: {error}"
                 except OSError:
