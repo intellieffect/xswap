@@ -46,6 +46,13 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 기존 버전 업데이트:
 
 ```sh
+xswap upgrade                    # 최신 태그로 재설치, 특정 버전은 --tag vX.Y.Z
+xswap upgrade --dry-run          # 실행 없이 명령만 출력
+```
+
+또는 아래 명령을 직접 실행:
+
+```sh
 uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
 ```
 

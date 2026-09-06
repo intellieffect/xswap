@@ -22,6 +22,7 @@ from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines
 from xswap_live import LiveError
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
+from xswap_upgrade import UpgradeError, upgrade
 
 __version__ = "0.4.3"
 
@@ -425,6 +426,9 @@ def parser():
     rp = sub.add_parser("repair-plugins", help="Materialize legacy shared plugin links without stopping sessions")
     rp.add_argument("--dry-run", action="store_true")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
+    up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
+    up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
+    up.add_argument("--dry-run", action="store_true")
     u = sub.add_parser("use", help="Select the default account for xswap and xswap app")
     u.add_argument("name")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
@@ -490,6 +494,8 @@ def main(argv=None):
         elif args.command == "auto-status":
             from xswap_cli import show_status
             show_status(manager)
+        elif args.command == "upgrade":
+            return upgrade(__version__, args.tag, args.dry_run)
         elif args.command == "use":
             if args.openclaw:
                 manager.sync_openclaw(args.name, select=True)
@@ -523,7 +529,7 @@ def main(argv=None):
                 raise SwapError("--accounts requires --auto.")
             return manager.launch_cli(getattr(args, "account", None), rest, getattr(args, "dry_run", False))
         return 0
-    except (SwapError, LiveError, OSError) as exc:
+    except (SwapError, LiveError, UpgradeError, OSError) as exc:
         print(f"xswap: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
