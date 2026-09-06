@@ -1,4 +1,8 @@
-# 0.4.0 — 2026-09-06
+# Changelog
+
+## 0.6.2
+
+- `xswap list --short` / `usage --short` place windows by duration (`windowMinutes`), not by `primary`/`secondary` position. Live servers can report only a seven-day window and still call it `primary`; that value now lands in the `7d` slot instead of the `5h` slot. Position remains the fallback when the duration is absent.
 
 ## 0.6.1
 
