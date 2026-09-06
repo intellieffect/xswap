@@ -66,7 +66,10 @@ def main():
      atomic_json(home/'switch.json', {'instance':state['bridgeInstance'],'id':'fixture-manual-switch','account':'second'})
      stage=12
     elif stage==12 and json.loads(home.joinpath('status.json').read_text()).get('manualState')=='applied':
-     manual_done=True;stage=1
+     # Login acknowledgement precedes the TUI processing its account update.
+     manual_done=True;stage=13;sent_at=time.monotonic()
+    elif stage==13 and time.monotonic()-sent_at>4:
+     stage=1
     elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_PICKER')=='1' and not picker_done:
      time.sleep(1);os.write(master,b'/resume');time.sleep(.3);os.write(master,b'\r');stage=10;picker_opened_at=time.monotonic()
     elif stage==10 and b'Resume a previous session' in output and time.monotonic()-picker_opened_at>3:
