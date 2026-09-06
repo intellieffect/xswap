@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 xswap --version
 ```
 
@@ -26,6 +26,7 @@ codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
 xswap add work --use        # Sign in to a separate local profile and select it
 xswap login work            # Re-authenticate work after its login expires
+xswap use --best            # Select whichever signed-in account has the most quota right now
 xswap                       # Launch the selected account's CLI
 ```
 
@@ -39,9 +40,63 @@ xswap list --offline        # Local labels only
 xswap app work              # Separate macOS desktop profile
 xswap disable work          # Hold an account out of selection without deleting it
 xswap enable work           # Restore it
+xswap remove work           # Drop an account from xswap
 ```
 
 Quota checks use Codex App Server, do not submit a model prompt, and may refresh the selected login through the official CLI. `xswap list --json` includes account labels and quota metadata: redact it before posting publicly. A disabled account is skipped by `list`'s live usage fetch, `use`, `--auto`/`auto-enable` pools, and `openclaw`, until re-enabled; it does not stop an explicit single-account launch like `xswap run --account NAME` or `xswap app NAME`.
+
+`xswap remove` drops an account's registry entry but keeps its files by default; add `--purge` to also delete a managed profile's directory (a registered home, i.e. your own `~/.codex`, is never deleted regardless of flags). It refuses an account that is in an enabled `--auto`/`auto-enable` pool or in use by a running auto session; without `--yes` it asks for confirmation.
+
+### Pick the account with the most quota
+
+```sh
+xswap run --best -- exec "summarize this repo"
+```
+
+`codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot protect them. `--best` checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
+
+To persist that choice as the default for later `xswap` and `xswap app` launches instead of a single run, use `xswap use --best` (also `--model` and `--openclaw`). It fails instead of keeping the current selection if no account has known remaining quota.
+
+### Directory mappings
+
+```sh
+xswap map work ~/code/company   # Default to work whenever the cwd is inside ~/code/company
+xswap map                       # List current mappings
+xswap unmap ~/code/company      # Remove a mapping
+```
+
+The deepest matching directory wins. A mapping only applies where no account is named explicitly: precedence is explicit name (`--account`, a positional `NAME`) > directory mapping > the account selected with `xswap use`. Exactly these follow a mapping when no name is given: bare `xswap`, `xswap run` without `--account`, `xswap app`, `xswap status`, and `xswap usage`. `xswap openclaw` (name omitted) never follows a directory mapping — it always uses the account selected with `xswap use`, since it changes shared local OpenClaw agent state rather than a single launched session. A mapping to a disabled account still resolves and launches, consistent with `disable` only affecting `use`, `--auto`/`auto-enable` pools, `openclaw`, and live usage fetches.
+
+## Alerts
+
+```sh
+xswap list --warn 15   # Warn on any codex window with less than 15% remaining
+```
+
+`--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`.
+
+This is meant to be polled from `launchd` or `cron`, not run interactively. `launchd`'s `PATH` does not include `/opt/homebrew/bin`, so point a wrapper script at absolute paths:
+
+```sh
+#!/bin/sh
+# /Users/you/.local/bin/xswap-quota-check
+/Users/you/.local/bin/xswap list --warn 15 \
+  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+```
+
+Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does not schedule anything on its own.
+
+## Status line
+
+`xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). Disabled accounts are omitted from `list --short`, but `xswap usage <name> --short` always shows the named account, even if it is disabled; with no accounts, `list --short` prints an empty line. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
+
+```sh
+set -g status-right '#(xswap list --short)'
+```
+
+### Cached lookups
+
+`xswap list`, `xswap usage`, `xswap run --best`, and `xswap use --best` fetch live quota by default, spawning one `codex app-server` per account; add `--cached SECONDS` to reuse a still-fresh result instead, which matters for status-line and cron callers that check quota often. The default remains uncached unless `--cached` is passed. A successful fetch is always saved to `~/.local/share/codex-swap/usage-cache.json` (mode `0600`), keyed by account name, holding the same whitelisted fields shown on screen for that account — remaining percentages, reset times, plan type, credits, and the local account label (which can be an email address) — never raw server responses or tokens. A cache entry is only reused while its saved label still matches the account's current login; a re-login under the same name is treated as a miss. `--cached` cannot be combined with `--offline`, and on `run`/`use` it requires `--best`.
 
 ## Automatic switching
 
@@ -132,9 +187,12 @@ Requires a local running OpenClaw Gateway, `openclaw`, and `node` in PATH. Teste
 ```sh
 xswap openclaw work --dry-run
 xswap openclaw work
+xswap openclaw --pool main,work
 ```
 
 This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, selects them for the requested local agents, saves private recovery backups, and reloads Gateway auth. It is not automatic synchronization and does not submit a verification prompt. API-key profiles and remote Gateways are unsupported. Partial updates are reported with backup information; do not publish those backups.
+
+`--pool a,b,c` (two or more distinct registered names; mutually exclusive with a positional NAME) copies every listed account's credentials into OpenClaw and sets each target agent's OpenAI auth order to the given pool, in that order. OpenClaw then rotates within that order on its own cooldowns (`resolveAuthProfileOrder`, `isProfileInCooldown`, `markAuthProfileFailure`/`markAuthProfileCooldown`) — no human has to run `xswap openclaw other` to bring a rate-limited bot back. Because a pooled agent shares one conversation/task context across whichever account it is currently using, pooling only makes sense for accounts that may see each other's context; sync refuses to pool accounts from different ChatGPT organizations unless you pass `--allow-mixed`. If an account's organization can't even be determined (unreadable credential, no decodable claim), the pool is refused the same way an actual mismatch would be refused — an unknown organization is never treated as a match.
 
 ## Update or uninstall
 
@@ -146,7 +204,7 @@ xswap upgrade --dry-run          # Print the command without running it
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 ```
 
 Before uninstalling, restore the optional wrapper:
@@ -157,6 +215,14 @@ uv tool uninstall intellieffect-xswap
 ```
 
 Account data is intentionally retained. These commands do not revoke credentials, undo an OpenClaw sync, or close running sessions.
+
+## Troubleshooting
+
+If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, the optional `codex` wrapper, credential storage mode, each registered account's login and token expiry, plugin links, the automatic-switching pool, and OpenClaw's plugin SDK. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
+
+```sh
+xswap doctor
+```
 
 ## Contributing and support
 
@@ -170,4 +236,18 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integrat
 
 On macOS, run `xswap menubar` to compile and open `~/Applications/Xswap.app` using Apple Command Line Tools (`xcode-select --install` if missing). It shows the selected default account's weekly usage, all accounts, actual running bridge accounts, and the automatic-switch policy. It refreshes every five minutes and offers Refresh/Quit. Selection is not proof of a running session's account. Failed refreshes retain explicitly marked stale data. No login startup is configured. Quit the menu app before rebuilding after an upgrade, then run `xswap menubar` again. The app is built locally, not a notarized binary distribution.
 
-`xswap switch NAME` is an alias for `xswap use NAME`: it selects the default for new launches, not a live switch of existing sessions.
+`xswap switch NAME` (alias: `xswap use NAME`) now selects the default and sends a manual account change to **all running compatible auto-mode CLI/desktop bridges**. Idle bridges apply it immediately; busy bridges wait for all active turns to finish. The server process and conversation stay alive. The chosen registered account can be outside the automatic pool; the configured fallback pool and quota policy remain in effect for later turns.
+
+```sh
+xswap switch work
+xswap auto-status                    # manualState: pending / applying / applied / failed
+xswap switch work --default-only      # Only change the default for future launches
+```
+
+The command reports `applied`, `pending`, `unsupported`, `failed`, and `unconfirmed` counts. Only an acknowledged successful login counts as applied. Pending requests may take longer than the command's two-second acknowledgement window; check `auto-status`. Failure or unconfirmed delivery returns exit code 1; the saved default remains changed. Repeated requests to a busy bridge replace its pending selection with the latest one.
+
+**Existing older bridges and ordinary account-specific CLI/app sessions cannot receive this update.** Open an auto-mode session once with the updated installation. Compatibility is advertised as `manualSwitchVersion: 1`; installing files does not modify running Python processes. No processes are killed, no conversation is restarted, and account credential files are not copied. Requests contain account names and per-process IDs only, in private local files. Authentication uses the existing [OpenAI App Server external-token login](https://learn.chatgpt.com/docs/app-server#3c-log-in-with-externally-managed-chatgpt-tokens-chatgptauthtokens).
+
+Explicit `codex resume UUID` / `fork UUID` in automatic mode now locates that conversation in the current runtime, the original Codex home, or a registered account home. It reuses the owning home without copying the conversation and keeps the authentication bridge. The picker, named sessions, and `--last` remain scoped to the automatic runtime. Ambiguous duplicate UUIDs outside that runtime require choosing the original home explicitly.
+
+When an auto-mode CLI exits, use the final xswap resume command printed below Codex’s temporary remote reconnect address. It starts a new bridge and preserves the account pool, current account, and original session home; the old Unix socket is closed.

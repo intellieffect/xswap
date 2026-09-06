@@ -1,4 +1,39 @@
-# 0.4.0 — 2026-09-06
+# Changelog
+
+## 0.6.3
+
+- `xswap --version` reported 0.6.1 on the 0.6.2 release because the version string is kept in both `pyproject.toml` and `codex_swap.__version__` and only one was bumped. Both now read 0.6.3, and a unit test fails whenever the two drift. `xswap upgrade` compares `__version__` with the newest tag, so a stale string could also make it skip a real update.
+
+## 0.6.2
+
+- `xswap list --short` / `usage --short` place windows by duration (`windowMinutes`), not by `primary`/`secondary` position. Live servers can report only a seven-day window and still call it `primary`; that value now lands in the `7d` slot instead of the `5h` slot. Position remains the fallback when the duration is absent.
+
+## 0.6.1
+
+- Print a shell-quoted xswap resume command after the CLI closes its temporary bridge. Preserve the original home, account store, current account, and pool; do not reuse the closed Unix socket.
+
+## 0.6.0
+
+Account lifecycle, quota-aware selection, unattended failover, and operations tooling. No change to existing account, session, or auto-mode behavior unless a new flag is used.
+
+- `xswap login NAME [--device-auth]` re-authenticates a registered account in place; `add` now points to it instead of refusing (#5).
+- `xswap remove NAME [--purge] [--yes]` drops an account from the registry; managed profile files are kept unless `--purge`, registered homes are never deleted, pooled or running auto-mode accounts are refused; the account's usage-cache entry is dropped too (#16).
+- `xswap disable NAME` / `enable NAME` hold an account out of `use`, `--auto` pools, `openclaw`, and live usage fetches without deleting it (#8).
+- `xswap add NAME --use` selects the account right after login; the first account added is selected automatically (#11).
+- `xswap run --best [--model M] -- ...` launches the account with the most remaining quota, chosen once before launch; covers `codex exec`, which the live bridge cannot (#14, #19).
+- `xswap use --best [--model M] [--openclaw]` (also `switch --best`) selects that account as the default and fails instead of keeping the current selection when no quota is known (#20).
+- `xswap openclaw --pool a,b,c [--allow-mixed]` records every pooled account and passes the full order to OpenClaw so it rotates on its own cooldowns; accounts from different ChatGPT organizations, or whose organization cannot be verified, are refused unless `--allow-mixed`; the single-account path is unchanged (#10).
+- `xswap list --short` prints a one-line `name 5h/7d` summary for status lines; `xswap list --warn PCT` exits 3 when any window is below the threshold; `--cached SECONDS` reuses a private 0600 cache of whitelisted quota fields for `list`, `usage`, `run --best`, and `use --best` (default remains uncached) (#13, #15, #21).
+- `xswap map NAME [PATH]` / `unmap` choose a default account per directory for bare `xswap`, `run`, `app`, `status`, and `usage`; `openclaw` never follows a mapping (#17).
+- `xswap doctor [--json]` reports codex, credential store, per-account token expiry and plugin state, auto-mode pool, and OpenClaw SDK availability read-only; disabled accounts never fail the run (#18).
+- `xswap upgrade [--tag]` reinstalls the latest release tag with uv (#6).
+- `xswap auto-status [--prune]` removes CLI run records that are not running and older than 7 days (or any not running with `--prune`); records younger than 60 seconds are never removed (#7).
+
+## 0.5.1
+
+- Resume/fork explicit session UUIDs from their original Codex home while retaining the automatic authentication bridge; preserve the original conversation instead of copying it.
+
+- Deliver `switch` / `use` selections to running compatible bridges, defer changes while turns are active, and report acknowledgements. Keep the same server and thread; add `--default-only` for selection without delivery.
 
 ## 0.5.0
 

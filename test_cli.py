@@ -113,3 +113,37 @@ class CliTests(TestCase):
   self.assertTrue(target.exists())
   self.assertTrue(link.is_symlink())
   self.assertEqual(json.loads(out.getvalue())['pruned'],0)
+
+class ResumeHomeTests(TestCase):
+ setUp=test_codex_swap.AccountTests.setUp
+ session_id='00000000-0000-4000-8000-000000000001'
+ def setUp(self):
+  test_codex_swap.AccountTests.setUp(self)
+  home_patch=patch('xswap_cli.Path.home',return_value=self.base/'user')
+  home_patch.start();self.addCleanup(home_patch.stop)
+ def saved(self,home):
+  path=home/'sessions'/'2026'/'09'/'06'
+  path.mkdir(parents=True,exist_ok=True)
+  (path/f'rollout-2026-09-06T00-00-00-{self.session_id}.jsonl').write_text('{}\n')
+ def test_explicit_resume_uses_original_home_without_copying(self):
+  from xswap_cli import resume_home
+  self.saved(self.source)
+  runtime=self.manager.root/'auto'/'cli-codex'
+  self.assertEqual(resume_home(self.manager,['resume',self.session_id],runtime),self.source)
+  self.assertFalse(runtime.exists())
+ def test_runtime_copy_takes_precedence(self):
+  from xswap_cli import resume_home
+  runtime=self.manager.root/'auto'/'cli-codex'
+  self.saved(self.source);self.saved(runtime)
+  self.assertEqual(resume_home(self.manager,['-m','example','resume','--all',self.session_id],runtime),runtime)
+ def test_picker_last_and_prompts_keep_runtime(self):
+  from xswap_cli import resume_home
+  self.saved(self.source)
+  runtime=self.manager.root/'auto'/'cli-codex'
+  for args in ([],['resume'],['resume','--last'],['hello',self.session_id],['resume','named-session']):
+   self.assertEqual(resume_home(self.manager,args,runtime),runtime)
+ def test_registered_profile_fork(self):
+  from xswap_cli import resume_home
+  home=self.manager.prepare('other');self.saved(home)
+  runtime=self.manager.root/'auto'/'cli-codex'
+  self.assertEqual(resume_home(self.manager,['fork',self.session_id],runtime),home)

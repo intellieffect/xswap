@@ -1,8 +1,11 @@
+import base64
 import contextlib
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -272,6 +275,29 @@ class AccountTests(unittest.TestCase):
                 self.manager.sync_openclaw()
         self.assertNotIn("fake-secret-token", str(raised.exception))
 
+    def test_pool_request_carries_every_account_and_keeps_single_path_keys(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        executable = self.bridge_installation()
+        result = {"completed": ["main", "worker"], "backup": "/example/backup", "profileIds": ["p-main", "p-second"], "profileId": "p-main"}
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        # This fixture's tokens are opaque (not JWT-shaped), so the organization is genuinely
+        # undeterminable; --allow-mixed sidesteps that guard since this test is about request shape.
+        with patch("codex_swap.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses) as run, contextlib.redirect_stdout(io.StringIO()):
+            self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
+        request = json.loads(run.call_args_list[0].kwargs["input"])
+        # Single-account callers still see "account"/"codexHome" for the first pool member.
+        self.assertEqual(request["account"], "main")
+        self.assertEqual(request["codexHome"], str(self.source))
+        self.assertEqual([a["name"] for a in request["accounts"]], ["main", "second"])
+        self.assertEqual([a["codexHome"] for a in request["accounts"]], [str(self.source), str(second)])
+
+    def test_pool_of_fewer_than_two_distinct_names_is_rejected(self):
+        self.manager.register("main")
+        with self.assertRaisesRegex(SwapError, "at least two"):
+            self.manager.sync_openclaw(["main", "main"])
+
     def test_disable_marks_registry_and_list_shows_it(self):
         self.manager.register("main")
         second = self.manager.prepare("second")
@@ -334,6 +360,257 @@ class AccountTests(unittest.TestCase):
         self.manager.set_disabled("second", True)
         self.assertEqual([name for name, _ in self.manager.enabled_accounts()], ["main"])
 
+    def test_remove_managed_without_purge_keeps_directory(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        result = self.manager.remove("second")
+        self.assertEqual(result, {"removed": "second", "purged": False, "kept": str(second)})
+        self.assertTrue(second.exists())
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_drops_the_usage_cache_entry(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_usage("main", [], 1.0, "label-main")
+        self.manager.remember_usage("second", [], 1.0, "label-second")
+        self.manager.remove("second")
+        cache = json.loads(self.manager.usage_cache_path().read_text())
+        self.assertNotIn("second", cache)
+        self.assertIn("main", cache)
+
+    def test_remove_managed_with_purge_deletes_directory(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        self.assertTrue(profile_dir.exists())
+        result = self.manager.remove("second", purge=True)
+        self.assertEqual(result, {"removed": "second", "purged": True, "kept": None})
+        self.assertFalse(profile_dir.exists())
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_registered_account_with_purge_leaves_source_home_untouched(self):
+        self.manager.register("main")
+        before = self.source.joinpath("auth.json").read_bytes()
+        result = self.manager.remove("main", purge=True)
+        self.assertEqual(result, {"removed": "main", "purged": False, "kept": str(self.source)})
+        self.assertTrue(self.source.exists())
+        self.assertEqual(self.source.joinpath("auth.json").read_bytes(), before)
+
+    def test_remove_active_account_clears_active(self):
+        self.manager.register("main")
+        self.assertEqual(self.manager.read()["active"], "main")
+        self.manager.remove("main")
+        self.assertIsNone(self.manager.read()["active"])
+
+    def test_remove_refuses_account_in_enabled_auto_pool(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "second"]})
+        with self.assertRaisesRegex(SwapError, "second is in the automatic switching pool"):
+            self.manager.remove("second")
+        self.assertIn("second", self.manager.read()["accounts"])
+
+    def test_remove_unknown_account_refuses(self):
+        with self.assertRaises(SwapError):
+            self.manager.remove("ghost")
+
+    def test_remove_purge_also_deletes_desktop_sibling(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        desktop_dir = profile_dir / "desktop"
+        desktop_dir.mkdir(parents=True)
+        (desktop_dir / "Cookies").write_text("fixture")
+        result = self.manager.remove("second", purge=True)
+        self.assertTrue(result["purged"])
+        self.assertFalse(desktop_dir.exists())
+        self.assertFalse(profile_dir.exists())
+
+    def test_remove_refuses_account_used_by_running_auto_session(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "second"}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with self.assertRaisesRegex(SwapError, "second is used by a running auto session"):
+                self.manager.remove("second")
+        finally:
+            os.close(fd)
+        self.assertIn("second", self.manager.read()["accounts"])
+
+    def test_remove_ignores_other_accounts_running_auto_session(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "main"}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.manager.remove("second")
+        finally:
+            os.close(fd)
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_purge_safety_failure_reports_registry_already_removed(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        shutil.rmtree(profile_dir)
+        external = self.base / "external-second"
+        external.mkdir()
+        profile_dir.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(SwapError, "second was already removed from the registry.*left untouched"):
+            self.manager.remove("second", purge=True)
+        self.assertNotIn("second", self.manager.read()["accounts"])
+        self.assertTrue(external.exists())
+
+    def test_map_deepest_prefix_wins(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        parent = self.base / "code"
+        child = parent / "project"
+        child.mkdir(parents=True)
+        self.manager.map_dir("main", parent)
+        self.manager.map_dir("second", child)
+        self.assertEqual(self.manager.default_account(child), "second")
+        self.assertEqual(self.manager.default_account(parent), "main")
+
+    def test_map_sibling_name_prefix_does_not_match(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        base_dir = self.base / "a" / "b"
+        sibling = self.base / "a" / "bc"
+        base_dir.mkdir(parents=True)
+        sibling.mkdir(parents=True)
+        self.manager.map_dir("second", base_dir)
+        self.assertEqual(self.manager.default_account(sibling), "main")
+
+    def test_map_unmapped_cwd_falls_back_to_active(self):
+        self.manager.register("main")
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        self.assertEqual(self.manager.default_account(elsewhere), "main")
+
+    def test_map_explicit_name_overrides_mapping(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        mapped = self.base / "mapped"
+        mapped.mkdir()
+        self.manager.map_dir("second", mapped)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped)):
+            self.assertEqual(self.manager.account("main")[0], "main")
+
+    def test_map_unknown_account_raises(self):
+        self.manager.register("main")
+        with self.assertRaises(SwapError):
+            self.manager.map_dir("ghost", self.base)
+
+    def test_unmap_missing_raises(self):
+        self.manager.register("main")
+        with self.assertRaises(SwapError):
+            self.manager.unmap_dir(self.base / "never-mapped")
+
+    def test_map_removed_account_falls_back_to_active(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        mapped = self.base / "mapped"
+        mapped.mkdir()
+        self.manager.map_dir("second", mapped)
+        with self.manager.locked():
+            data = self.manager.read()
+            del data["accounts"]["second"]
+            atomic_json(self.manager.registry, data)
+        self.assertEqual(self.manager.default_account(mapped), "main")
+
+    def test_map_cli_wiring(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.account("second")[1] / "auth.json", self.auth)
+        target = self.base / "cli-mapped"
+        target.mkdir()
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
+            code = main(["map", "second", str(target)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.default_account(target), "second")
+
+    def test_map_listing_output(self):
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["map"]), 0)
+        self.assertIn("No directory mappings.", out.getvalue())
+        target = self.base / "listed"
+        target.mkdir()
+        self.manager.map_dir("main", target)
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["map"]), 0)
+        self.assertIn(f"{target} → main", out.getvalue())
+
+    def test_read_rejects_non_dict_mappings(self):
+        self.manager.registry.write_text(json.dumps(
+            {"version": 1, "active": None, "accounts": {}, "mappings": "not-a-dict"}))
+        with self.assertRaises(SwapError):
+            self.manager.read()
+
+    def test_openclaw_never_follows_directory_mapping(self):
+        # Directory mappings scope a single launched session (xswap / app / status /
+        # usage). OpenClaw sync mutates shared local agent state, so an omitted name
+        # must resolve through the active account only, never a mapping.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        mapped_dir = self.base / "work-repo"
+        mapped_dir.mkdir()
+        self.manager.map_dir("second", mapped_dir)
+        # If sync_openclaw wrongly followed the mapping to "second", disabling it
+        # would surface "second is disabled" before any subprocess call. Since the
+        # active account is "main" (not disabled), it should instead reach the
+        # openclaw/node PATH check.
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)), \
+             patch("codex_swap.shutil.which", return_value=None):
+            with self.assertRaisesRegex(SwapError, "OpenClaw sync requires openclaw and node in PATH."):
+                self.manager.sync_openclaw()
+        # The bare account() resolution (used by xswap/app/status/usage), by contrast,
+        # does follow the same mapping.
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)):
+            self.assertEqual(self.manager.account(None)[0], "second")
+
+    def test_pool_openclaw_never_follows_directory_mapping_either(self):
+        # Same guarantee as test_openclaw_never_follows_directory_mapping, exercised
+        # through the pool-aware signature: an omitted name (sync_openclaw(None)) must
+        # still resolve the active account, not a directory mapping. --pool members are
+        # always explicit names (never None), so they were never at risk of following a
+        # mapping in the first place -- this only confirms the single/omitted-name path
+        # still holds under the pool-capable sync_openclaw(names=...) signature.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        mapped_dir = self.base / "work-repo"
+        mapped_dir.mkdir()
+        self.manager.map_dir("second", mapped_dir)
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)), \
+             patch("codex_swap.shutil.which", return_value=None):
+            with self.assertRaisesRegex(SwapError, "OpenClaw sync requires openclaw and node in PATH."):
+                self.manager.sync_openclaw(None)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)):
+            self.assertEqual(self.manager.account(None)[0], "second")
+
     def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
         self.manager.register("main")
         second = self.manager.prepare("second")
@@ -388,6 +665,262 @@ class MainCLITests(unittest.TestCase):
             self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
         self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
 
+    def test_remove_subcommand_wires_through_main_with_yes(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second", "--yes"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_without_yes_in_non_tty_returns_error(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=False), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 1)
+        self.assertIn("Confirm with --yes", err.getvalue())
+        self.assertIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_accepts_lowercase_y(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+             patch("builtins.input", return_value="y"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_accepts_uppercase_y(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+             patch("builtins.input", return_value="Y"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_rejects_non_y_answers(self):
+        for answer in ("n", "yes", ""):
+            with self.subTest(answer=answer):
+                with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+                     patch("builtins.input", return_value=answer), \
+                     contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(self.codex_swap.main(["remove", "second"]), 1)
+                self.assertIn("Aborted", out.getvalue())
+                self.assertIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_purge_on_registered_home_prints_ignored_note(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "main", "--purge", "--yes"]), 0)
+        self.assertIn("--purge is ignored for main", out.getvalue())
+        self.assertTrue(self.source.exists())
+
+
+class ParsePoolTests(unittest.TestCase):
+    def test_splits_trims_and_dedupes_in_order(self):
+        from codex_swap import parse_pool
+        self.assertEqual(parse_pool("main, work ,main"), ["main", "work"])
+
+    def test_accepts_a_pre_split_list_too(self):
+        from codex_swap import parse_pool
+        self.assertEqual(parse_pool(["main", "work", "main"]), ["main", "work"])
+
+    def test_fewer_than_two_distinct_names_raises(self):
+        from codex_swap import parse_pool
+        with self.assertRaisesRegex(SwapError, "at least two"):
+            parse_pool("main")
+        with self.assertRaisesRegex(SwapError, "at least two"):
+            parse_pool("main, main")
+
+
+class OpenclawPoolCliTests(unittest.TestCase):
+    """--pool vs. positional NAME parsing, exercised through codex_swap.main."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.store = self.base / "store"
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        atomic_json(self.source / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token", "refresh_token": "fake-refresh"}})
+        self.env = {"CODEX_SWAP_HOME": str(self.store), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, self.env):
+            from codex_swap import Manager as _Manager
+            _Manager().register("main")
+
+    def run_main(self, argv):
+        import codex_swap
+        # Never let CLI-parsing tests reach this machine's real openclaw/node: force "not installed"
+        # so any argument that survives parsing fails fast and deterministically, without a subprocess.
+        with patch.dict(os.environ, self.env), patch("codex_swap.shutil.which", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = codex_swap.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_pool_and_positional_name_are_mutually_exclusive(self):
+        code, _, err = self.run_main(["openclaw", "main", "--pool", "main,second"])
+        self.assertEqual(code, 1)
+        self.assertIn("mutually exclusive", err)
+
+    def test_pool_requires_at_least_two_distinct_registered_names(self):
+        code, _, err = self.run_main(["openclaw", "--pool", "main,main"])
+        self.assertEqual(code, 1)
+        self.assertIn("at least two", err)
+
+    def test_use_openclaw_flag_keeps_single_account_behavior(self):
+        # use --openclaw never takes --pool; it still reaches sync_openclaw with a single name.
+        code, _, err = self.run_main(["use", "main", "--openclaw"])
+        self.assertEqual(code, 1)
+        self.assertIn("OpenClaw sync requires openclaw and node in PATH.", err)
+
+    def test_allow_mixed_without_pool_is_rejected(self):
+        code, _, err = self.run_main(["openclaw", "main", "--allow-mixed"])
+        self.assertEqual(code, 1)
+        self.assertIn("--allow-mixed requires --pool", err)
+
+
+def _unsigned_jwt(claims):
+    header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"{header}.{payload}.sig"
+
+
+class SameOrgGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.manager = Manager(self.base / "store", self.base / "unused-source")
+        (self.base / "unused-source").mkdir()
+
+    def _account_home(self, label, org_id):
+        home = self.base / label
+        home.mkdir()
+        token = _unsigned_jwt({"https://api.openai.com/auth": {"chatgpt_account_id": org_id}})
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": token, "refresh_token": "fake-refresh", "id_token": token}})
+        return home
+
+    def test_mixed_organizations_are_rejected_without_allow_mixed(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._account_home("second", "org-fixture-bbbb"))
+        with self.assertRaisesRegex(SwapError, "organizations"):
+            self.manager.sync_openclaw(["main", "second"])
+
+    def test_same_organization_pool_passes_the_guard(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._account_home("second", "org-fixture-aaaa"))
+        package = self.base / "openclaw"; package.mkdir()
+        (package / "package.json").write_text('{"name":"openclaw"}')
+        executable = package / "openclaw.mjs"; executable.touch()
+        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        with patch("codex_swap.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+            self.manager.sync_openclaw(["main", "second"])
+
+    def test_allow_mixed_bypasses_the_organization_guard(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._account_home("second", "org-fixture-bbbb"))
+        package = self.base / "openclaw"; package.mkdir()
+        (package / "package.json").write_text('{"name":"openclaw"}')
+        executable = package / "openclaw.mjs"; executable.touch()
+        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        with patch("codex_swap.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses) as run, contextlib.redirect_stdout(io.StringIO()):
+            self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
+        self.assertEqual(run.call_count, 2)
+        request = json.loads(run.call_args_list[0].kwargs["input"])
+        self.assertEqual([a["name"] for a in request["accounts"]], ["main", "second"])
+
+    def _opaque_account_home(self, label):
+        # No decodable https://api.openai.com/auth claim anywhere (not even a JWT shape):
+        # the organization is genuinely undeterminable, not just absent from one token.
+        home = self.base / label
+        home.mkdir()
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": "opaque-not-a-jwt", "refresh_token": "fake-refresh"}})
+        return home
+
+    def test_unverifiable_organization_fails_closed_without_allow_mixed(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._opaque_account_home("second"))
+        with self.assertRaisesRegex(SwapError, "cannot verify the ChatGPT organization for account second"):
+            self.manager.sync_openclaw(["main", "second"])
+
+    def test_allow_mixed_bypasses_an_unverifiable_organization(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._opaque_account_home("second"))
+        package = self.base / "openclaw"; package.mkdir()
+        (package / "package.json").write_text('{"name":"openclaw"}')
+        executable = package / "openclaw.mjs"; executable.touch()
+        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        with patch("codex_swap.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+            self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
+
+    def test_read_auth_permission_failure_also_fails_closed(self):
+        # chatgpt_org_id() must treat a CredentialError (e.g. an unsafe file mode) exactly
+        # like any other undeterminable organization: raise, never treat as unknown-but-fine.
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        second_home = self._account_home("second", "org-fixture-aaaa")
+        self.manager.register("second", second_home)
+        (second_home / "auth.json").chmod(0o644)  # read_auth requires 0600/0400
+        with self.assertRaisesRegex(SwapError, "cannot verify the ChatGPT organization for account second"):
+            self.manager.sync_openclaw(["main", "second"])
+
+
+class CachedFlagCLITests(unittest.TestCase):
+    setUp = MainCLITests.setUp
+
+    def test_offline_and_cached_together_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["list", "--offline", "--cached", "30"])
+        self.assertEqual(code, 1)
+        self.assertIn("xswap: --offline and --cached cannot be combined.", err.getvalue())
+
+    def test_invalid_cached_seconds_is_rejected_for_list_and_usage(self):
+        for value in ["0", "-5", "abc", "inf", "nan"]:
+            for command in (["list", "--cached", value], ["usage", "--cached", value]):
+                with self.subTest(command=command):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        code = self.codex_swap.main(command)
+                    self.assertEqual(code, 1)
+                    self.assertIn("--cached SECONDS must be a positive number", err.getvalue())
+
+    def test_cached_without_best_on_run_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["run", "--cached", "30", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--cached requires --best.", err.getvalue())
+
+    def test_cached_without_best_on_use_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["use", "main", "--cached", "30"])
+        self.assertEqual(code, 1)
+        self.assertIn("--cached requires --best.", err.getvalue())
+
+    def test_list_and_usage_accept_valid_cached_seconds(self):
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(self.codex_swap.Manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = self.codex_swap.main(["list", "--cached", "30", "--json"])
+        self.assertEqual(code, 0)
+        self.assertIn('"cached"', out.getvalue())
+
+    def test_use_best_cached_reuses_a_fresh_cache_entry_without_spawning_codex(self):
+        # Both main and second are signed in (MainCLITests.setUp), so the first live
+        # lookup fetches both before any cache entry exists.
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = self.codex_swap.main(["use", "--best", "--cached", "60"])
+        self.assertEqual(code, 0)
+        self.assertIn("Selected main", out.getvalue())
+        self.assertEqual(fetch.call_count, 2)
+        with patch("codex_swap.read_limits", return_value=response()) as fetch2, patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out2:
+            code2 = self.codex_swap.main(["use", "--best", "--cached", "60"])
+        self.assertEqual(code2, 0)
+        self.assertIn("Selected main", out2.getvalue())
+        fetch2.assert_not_called()  # Served entirely from the cache written by the first call.
+
+
+def response():
+    return {"rateLimitsByLimitId": {"codex": {"planType": "pro",
+            "primary": {"usedPercent": 23, "windowDurationMins": 300, "resetsAt": 10000}}}}
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -424,3 +957,311 @@ class AutoLauncherTests(unittest.TestCase):
         with patch('codex_swap.sys.platform','darwin'),patch('codex_swap.shutil.which',return_value='/fake/executable'),contextlib.redirect_stdout(io.StringIO()):
             self.manager.launch_auto_app('main,second',str(app),True)
         self.assertFalse((self.manager.root/'auto').exists())
+
+
+def dual_window_raw(remaining5h=90, remaining7d=90, reached=None, resets5h=10000, resets7d=20000):
+    bucket = {"planType": "pro",
+              "primary": {"usedPercent": 100 - remaining5h, "windowDurationMins": 300, "resetsAt": resets5h},
+              "secondary": {"usedPercent": 100 - remaining7d, "windowDurationMins": 10080, "resetsAt": resets7d}}
+    if reached:
+        bucket["rateLimitReachedType"] = reached
+    return {"rateLimitsByLimitId": {"codex": bucket}}
+
+
+def single_window_raw(remaining, resets):
+    return {"rateLimitsByLimitId": {"codex": {"planType": "pro",
+            "primary": {"usedPercent": 100 - remaining, "windowDurationMins": 10080, "resetsAt": resets}}}}
+
+
+class BestAccountTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.manager = Manager(self.base / "store", self.source)
+        self.manager.register("main")
+
+    def add(self, name, signed_in=True):
+        home = self.manager.prepare(name)
+        if signed_in:
+            atomic_json(home / "auth.json", self.auth)
+        return home
+
+    def fake_read_limits(self, mapping):
+        """mapping: {account name: raw response dict, or an Exception to raise}."""
+        by_home = {}
+        for name, value in mapping.items():
+            _, home = self.manager.account(name)
+            by_home[str(home)] = value
+
+        def read(codex, env, timeout=12):
+            value = by_home[env["CODEX_HOME"]]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        return read
+
+    def test_picks_the_highest_headroom(self):
+        self.add("second")
+        self.add("third")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+            "third": dual_window_raw(remaining5h=60, remaining7d=60),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "second")
+        self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
+        self.assertEqual({c["name"] for c in reason["candidates"]}, {"main", "second", "third"})
+
+    def test_skips_a_bucket_with_reached(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=95, remaining7d=95, reached="primary"),
+            "second": dual_window_raw(remaining5h=50, remaining7d=50),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, _ = self.manager.best_account()
+        self.assertEqual(name, "second")
+
+    def test_skips_disabled_accounts(self):
+        self.add("second")
+        self.manager.set_disabled("main", True)
+        fake = self.fake_read_limits({"second": dual_window_raw(remaining5h=10, remaining7d=10)})
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "second")
+        self.assertEqual({c["name"] for c in reason["candidates"]}, {"second"})
+
+    def test_skips_usage_unavailable_rows(self):
+        from xswap_usage import UsageError
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=70, remaining7d=70),
+            "second": UsageError("usage service unavailable"),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "main")
+        statuses = {c["name"]: c["status"] for c in reason["candidates"]}
+        self.assertIn("usage unavailable", statuses["second"])
+
+    def test_tie_break_on_resets_at(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": single_window_raw(50, 30000),
+            "second": single_window_raw(50, 20000),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, _ = self.manager.best_account()
+        self.assertEqual(name, "second")
+
+    def test_all_unknown_falls_back_to_active_with_warning(self):
+        self.add("second", signed_in=False)
+        fake = self.fake_read_limits({"main": {}})
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", return_value=0) as call, \
+             contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--", "resume"])
+        self.assertEqual(code, 0)
+        self.assertIn("no account with known remaining quota; using main", stderr.getvalue())
+        self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "resume"])
+        self.assertEqual(call.call_args.kwargs["env"]["CODEX_HOME"], str(self.source))
+
+    def test_best_with_account_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--account", "main", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--auto", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_accounts_without_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--accounts requires --auto", stderr.getvalue())
+
+    def test_best_account_uses_cache_when_fresh_and_still_ranks_correctly(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake) as fetch, patch.object(Manager, "codex", return_value="codex"):
+            first, _ = self.manager.best_account(max_age=60)
+            self.assertEqual(fetch.call_count, 2)
+            second, reason = self.manager.best_account(max_age=60)
+        self.assertEqual(fetch.call_count, 2)  # second call served entirely from cache
+        self.assertEqual(first, "second")
+        self.assertEqual(second, "second")
+        self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
+
+    def test_dry_run_prints_expected_json_shape(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+        })
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stdout = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(stdout):
+            code = main(["run", "--best", "--dry-run", "--", "exec", "hi"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(set(payload.keys()), {"account", "reason", "CODEX_HOME", "argv"})
+        self.assertEqual(set(payload["reason"].keys()), {"remaining", "candidates"})
+        self.assertEqual(payload["account"], "second")
+        self.assertEqual(payload["reason"]["remaining"], {"5h": 90, "7d": 90})
+        self.assertEqual({c["name"] for c in payload["reason"]["candidates"]}, {"main", "second"})
+        self.assertEqual(payload["CODEX_HOME"], str(self.manager.account("second")[1]))
+        self.assertEqual(payload["argv"], ["/usr/bin/codex", "exec", "hi"])
+
+
+class UseBestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.manager = Manager(self.base / "store", self.source)
+        self.manager.register("main")
+        self.env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+
+    def add(self, name, signed_in=True):
+        home = self.manager.prepare(name)
+        if signed_in:
+            atomic_json(home / "auth.json", self.auth)
+        return home
+
+    def fake_read_limits(self, mapping):
+        """mapping: {account name: raw response dict, or an Exception to raise}."""
+        by_home = {}
+        for name, value in mapping.items():
+            _, home = self.manager.account(name)
+            by_home[str(home)] = value
+
+        def read(codex, env, timeout=12):
+            value = by_home[env["CODEX_HOME"]]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        return read
+
+    def test_use_best_picks_and_sets_active(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(out):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account()[0], "second")
+        self.assertIn("Selected second (5h 100% left, 7d 88% left). CLI: xswap · Desktop: xswap app", out.getvalue())
+
+    def test_use_best_all_unknown_exits_and_leaves_active_unchanged(self):
+        fake = self.fake_read_limits({"main": {}})
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stderr(err):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 1)
+        self.assertIn("No account with known remaining quota; nothing selected.", err.getvalue())
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_use_without_name_or_best_fails(self):
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use"])
+        self.assertEqual(code, 1)
+        self.assertIn("Give an account name or --best.", err.getvalue())
+
+    def test_use_name_and_best_together_fails(self):
+        self.add("second")
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use", "second", "--best"])
+        self.assertEqual(code, 1)
+        self.assertIn("Give an account name or --best.", err.getvalue())
+
+    def test_switch_best_alias_works(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["switch", "--best"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account()[0], "second")
+
+    def test_use_best_openclaw_syncs_the_chosen_account(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             patch.object(Manager, "sync_openclaw") as sync_openclaw, \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["use", "--best", "--openclaw"])
+        self.assertEqual(code, 0)
+        sync_openclaw.assert_called_once_with("second", select=True)
+
+    def test_use_model_without_best_fails(self):
+        self.add("second")
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use", "second", "--model", "gpt-5"])
+        self.assertEqual(code, 1)
+        self.assertIn("--model requires --best.", err.getvalue())
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_use_best_omits_parenthetical_when_remaining_is_unknown(self):
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch.object(Manager, "best_account", return_value=("main", {"remaining": {"5h": None, "7d": None}, "candidates": []})), \
+             contextlib.redirect_stdout(out):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 0)
+        self.assertIn("Selected main. CLI: xswap · Desktop: xswap app", out.getvalue())
+        self.assertNotIn("(", out.getvalue())

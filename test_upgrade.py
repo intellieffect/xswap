@@ -1,6 +1,8 @@
 import contextlib
 import io
+import pathlib
 import subprocess
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -114,3 +116,15 @@ class UpgradeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionSingleSourceTests(unittest.TestCase):
+    def test_pyproject_and_module_version_match(self):
+        # `xswap --version` and `xswap upgrade` read codex_swap.__version__; uv installs
+        # pyproject's version. A release that bumps only one of them ships a wrong
+        # version string, or an upgrade that thinks it is already current.
+        import codex_swap
+        pyproject = pathlib.Path(__file__).with_name("pyproject.toml")
+        with pyproject.open("rb") as stream:
+            declared = tomllib.load(stream)["project"]["version"]
+        self.assertEqual(codex_swap.__version__, declared)

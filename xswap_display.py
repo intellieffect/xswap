@@ -2,7 +2,7 @@
 import os
 import sys
 import time
-from xswap_usage import reset_label, usage_lines
+from xswap_usage import is_ok, reset_label, usage_lines
 
 
 def weekly(row):
@@ -22,7 +22,7 @@ def summary(row, now=None):
     status = row['status']
     note = ('비활성화 (disabled)' if status == 'disabled' else '로그인 필요' if status == 'not signed in' else
             '오프라인' if status == 'offline' else
-            '조회 불가' if status != 'ok' else '주간 사용량 미제공')
+            '조회 불가' if not is_ok(status) else '주간 사용량 미제공')
     bar = ''
     if used is not None:
         filled = min(20, max(0, int(used / 5 + .5)))
@@ -42,7 +42,7 @@ def summary(row, now=None):
     return {'name': row['name'], 'selected': row.get('active', False), 'used': used,
             'remaining': left, 'bar': bar, 'summary': note, 'reset': reset,
             'tone': 'red' if used is not None and used >= 90 else 'yellow' if used is not None and used >= 80 else 'green' if used is not None else 'gray',
-            'exhausted': left == 0}
+            'exhausted': left == 0, 'cached': row.get('cached', False), 'fetchedAt': row.get('fetchedAt')}
 
 
 def policy_label(settings):
@@ -58,12 +58,16 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
         return '등록된 계정이 없습니다. xswap register main'
     if color is None:
         color = sys.stdout.isatty() and 'NO_COLOR' not in os.environ and os.environ.get('TERM') != 'dumb'
+    now = time.time() if now is None else now
     lines = ['xswap · 주간 사용량', '█ 사용  ░ 남음', '']
     for row in sorted(rows, key=lambda row: not row.get('active', False)):
         item = summary(row, now)
         badge = '선택됨' if item['selected'] else ''
         if item['exhausted']: badge += (' · ' if badge else '') + '한도 도달'
-        lines.append(('▸ ' if item['selected'] else '  ') + item['name'] + ('  [' + badge + ']' if badge else ''))
+        name = item['name']
+        if item['cached'] and item['fetchedAt'] is not None:
+            name += f" (cached {max(0, int(now - item['fetchedAt']))}s ago)"
+        lines.append(('▸ ' if item['selected'] else '  ') + name + ('  [' + badge + ']' if badge else ''))
         text = (item['bar'] + '  ' if item['bar'] else '') + item['summary']
         if color:
             code = {'green': 32, 'yellow': 33, 'red': 31, 'gray': 90}[item['tone']]
