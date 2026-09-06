@@ -192,6 +192,31 @@ def warnings(rows, threshold, now=None):
     return lines
 
 
+def short_line(rows):
+    """One line per account for a status line/prompt: `{*}{name} {p5h}/{p7d}`, joined by ' · '.
+
+    Pure formatting over rows shaped like show_accounts' output (name, active, status,
+    buckets); no subprocess, no I/O. p5h/p7d are the codex bucket's primary/secondary
+    window remainingPercent, rounded to an integer; unknown or unavailable is "?".
+    """
+    parts = []
+    for row in rows:
+        marker = "*" if row.get("active") else ""
+        primary = secondary = "?"
+        if row.get("status") == "ok":
+            bucket = next((b for b in row.get("buckets", []) if (b.get("id") or "").lower() == "codex"), None)
+            if bucket:
+                windows = {w["position"]: w for w in bucket.get("windows", [])}
+                window = windows.get("primary")
+                if window and window.get("remainingPercent") is not None:
+                    primary = str(round(window["remainingPercent"]))
+                window = windows.get("secondary")
+                if window and window.get("remainingPercent") is not None:
+                    secondary = str(round(window["remainingPercent"]))
+        parts.append(f"{marker}{row['name']} {primary}/{secondary}")
+    return " · ".join(parts)
+
+
 def usage_lines(buckets, now=None):
     now = time.time() if now is None else now
     lines = []

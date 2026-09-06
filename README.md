@@ -83,6 +83,14 @@ This is meant to be polled from `launchd` or `cron`, not run interactively. `lau
 
 Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does not schedule anything on its own.
 
+## Status line
+
+`xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). `xswap usage <name> --short` prints the same format for a single account. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
+
+```sh
+set -g status-right '#(xswap list --short)'
+```
+
 ## Automatic switching
 
 Start with an explicit pool of at least two signed-in accounts:
