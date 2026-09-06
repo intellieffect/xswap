@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, atomic_json
-from xswap_usage import UsageError, normalize_limits, read_limits, reset_label, usage_lines
+from codex_swap import Manager, SwapError, atomic_json, main
+from xswap_usage import UsageError, is_ok, normalize_limits, read_limits, reset_label, short_line, usage_lines, warnings
 
 
 def response():
@@ -142,6 +142,273 @@ for line in sys.stdin:
         self.assertIn("usage unavailable", rows[0]["status"])
         self.assertEqual(rows[1]["status"], "not signed in")
         self.assertNotIn("fake-token", output.getvalue())
+
+    def row(self, buckets, status="ok", name="work", disabled=False):
+        return {"name": name, "status": status, "buckets": buckets, "disabled": disabled}
+
+    def test_warnings_below_threshold_emits_one_line_per_window(self):
+        row = self.row(normalize_limits(response()))
+        lines = warnings([row], 80, now=9000)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("warn: work 5h 77% left", lines[0])
+        self.assertIn("warn: work 7d 1% left", lines[1])
+
+    def test_warnings_above_threshold_emits_nothing(self):
+        row = self.row(normalize_limits(response()))
+        self.assertEqual(warnings([row], 1), [])
+
+    def test_warnings_ignores_unknown_remaining(self):
+        buckets = normalize_limits({"rateLimits": {"primary": {"windowDurationMins": 300}}})
+        self.assertIsNone(buckets[0]["windows"][0]["remainingPercent"])
+        self.assertEqual(warnings([self.row(buckets)], 100), [])
+
+    def test_warnings_ignores_disabled_row(self):
+        row = self.row(normalize_limits(response()), disabled=True)
+        self.assertEqual(warnings([row], 100), [])
+
+    def test_warnings_ignores_non_ok_status(self):
+        row = self.row(normalize_limits(response()), status="not signed in")
+        self.assertEqual(warnings([row], 100), [])
+
+    def test_warnings_accepts_cached_status(self):
+        row = self.row(normalize_limits(response()), status="ok (cached)")
+        lines = warnings([row], 80, now=9000)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("warn: work 5h 77% left", lines[0])
+        self.assertIn("warn: work 7d 1% left", lines[1])
+
+    def test_main_list_warn_returns_three_and_prints_to_stderr(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "20"])
+        self.assertEqual(code, 3)
+        self.assertIn("warn: main 7d 1% left", stderr.getvalue())
+        self.assertNotIn("warn: main 5h", stderr.getvalue())
+
+    def test_main_list_warn_above_all_windows_returns_zero(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_main_list_warn_invalid_pct_is_an_error(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "0"])
+        self.assertEqual(code, 1)
+        self.assertIn("--warn", stderr.getvalue())
+
+    def test_main_list_warn_non_numeric_pct_is_the_same_swap_error(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "abc"])
+        self.assertEqual(code, 1)
+        self.assertIn("xswap: --warn must be a number from 1 to 100.", stderr.getvalue())
+
+    def test_short_and_json_are_mutually_exclusive(self):
+        manager = self.manager()
+        with self.assertRaises(SwapError):
+            manager.show_accounts(short=True, json_output=True)
+
+    def test_short_omits_disabled_registry_entries(self):
+        manager = self.manager()
+        data = json.loads(manager.registry.read_text())
+        data["accounts"]["second"]["disabled"] = True
+        atomic_json(manager.registry, data)
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(short=True)
+        self.assertEqual(output.getvalue(), "*main 77/1\n")
+
+    def test_short_composes_with_offline(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits") as fetch, contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(offline=True, short=True)
+        fetch.assert_not_called()
+        self.assertEqual(output.getvalue(), "*main ?/? · second ?/?\n")
+
+    def test_short_usage_for_a_named_account_shows_it_even_if_disabled(self):
+        manager = self.manager()
+        manager.set_disabled("second", True)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(name="second", short=True)
+        self.assertEqual(output.getvalue(), "second ?/?\n")
+
+    def test_second_call_within_max_age_serves_cache_without_spawning_codex(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            first = manager.account_rows(max_age=60)
+            second = manager.account_rows(max_age=60)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(first[0]["status"], "ok")
+        self.assertFalse(first[0]["cached"])
+        self.assertEqual(second[0]["status"], "ok (cached)")
+        self.assertTrue(second[0]["cached"])
+        self.assertEqual(second[0]["buckets"], first[0]["buckets"])
+        self.assertEqual(second[0]["fetchedAt"], first[0]["fetchedAt"])
+
+    def test_expired_cache_entry_refetches(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows(max_age=60)
+        self.assertEqual(fetch.call_count, 1)
+        cache_path = manager.usage_cache_path()
+        data = json.loads(cache_path.read_text())
+        data["main"]["fetchedAt"] -= 3600  # Force the cached entry to look old.
+        atomic_json(cache_path, data)
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertFalse(rows[0]["cached"])
+
+    def test_relogin_under_same_name_invalidates_the_cached_entry(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows(max_age=60)
+        cache_path = manager.usage_cache_path()
+        data = json.loads(cache_path.read_text())
+        data["main"]["identity"] = "someone-else@example.test"  # Simulate a re-login under the same account name.
+        atomic_json(cache_path, data)
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        fetch.assert_called_once()
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertFalse(rows[0]["cached"])
+
+    def test_failed_fetch_is_never_cached(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", side_effect=UsageError("boom")), patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        self.assertIn("usage unavailable", rows[0]["status"])
+        self.assertFalse(manager.usage_cache_path().exists())
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(rows[0]["status"], "ok")
+
+    def test_cache_file_is_0600_and_holds_only_whitelisted_fields(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows(max_age=60)
+        cache_path = manager.usage_cache_path()
+        self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
+        raw = cache_path.read_text()
+        self.assertNotIn("do-not-display", raw)
+        self.assertNotIn("fake-token", raw)
+        entry = json.loads(raw)["main"]
+        self.assertEqual(set(entry), {"buckets", "fetchedAt", "identity"})
+
+    def test_json_row_reports_cached_field_both_ways(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as out:
+            manager.show_accounts(json_output=True)
+        rows = {row["name"]: row for row in json.loads(out.getvalue())}
+        self.assertIn("cached", rows["main"])
+        self.assertFalse(rows["main"]["cached"])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            manager.show_accounts(json_output=True, max_age=60)
+        rows = {row["name"]: row for row in json.loads(out.getvalue())}
+        self.assertTrue(rows["main"]["cached"])
+
+    def test_offline_never_consults_or_populates_the_cache(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows(max_age=60)
+        with patch("codex_swap.read_limits") as fetch:
+            rows = manager.account_rows(offline=True, max_age=60)
+        fetch.assert_not_called()
+        self.assertEqual(rows[0]["status"], "offline")
+        self.assertFalse(rows[0]["cached"])
+
+    def test_main_list_cached_and_warn_together_reports_cached_rows_below_threshold(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            main(["list", "--warn", "100"])  # Warm the cache with a live fetch first.
+        with patch("codex_swap.read_limits") as fetch, patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--cached", "60", "--warn", "20"])
+        fetch.assert_not_called()  # Fully served from cache.
+        self.assertEqual(code, 3)
+        self.assertIn("warn: main 7d 1% left", stderr.getvalue())
+
+
+class ShortLineTests(unittest.TestCase):
+    @staticmethod
+    def bucket(primary=None, secondary=None, bucket_id="codex"):
+        windows = []
+        if primary is not None:
+            windows.append({"position": "primary", "remainingPercent": primary})
+        if secondary is not None:
+            windows.append({"position": "secondary", "remainingPercent": secondary})
+        return {"id": bucket_id, "name": bucket_id, "windows": windows}
+
+    def test_three_rows_including_a_failure_and_the_active_account(self):
+        rows = [
+            {"name": "main", "active": True, "status": "ok", "buckets": [self.bucket(77, 12)]},
+            {"name": "work", "active": False, "status": "ok", "buckets": [self.bucket(100, 98)]},
+            {"name": "broken", "active": False, "status": "usage unavailable: service down", "buckets": []},
+        ]
+        self.assertEqual(short_line(rows), "*main 77/12 · work 100/98 · broken ?/?")
+
+    def test_rounds_to_the_nearest_integer(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(76.6, 11.4)]}]
+        self.assertEqual(short_line(rows), "main 77/11")
+
+    def test_rounds_half_up_not_to_even(self):
+        # 50.5 rounds up to 51 (not Python's banker's round(), which would give 50).
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(50.5, 76.6)]}]
+        self.assertEqual(short_line(rows), "main 51/77")
+
+    def test_unknown_window_is_a_question_mark(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(None, None)]}]
+        self.assertEqual(short_line(rows), "main ?/?")
+
+    def test_missing_codex_bucket_is_a_question_mark(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(90, bucket_id="spark")]}]
+        self.assertEqual(short_line(rows), "main ?/?")
+
+    def test_offline_rows_are_question_marks(self):
+        rows = [
+            {"name": "main", "active": True, "status": "offline", "buckets": []},
+            {"name": "work", "active": False, "status": "not signed in", "buckets": []},
+        ]
+        self.assertEqual(short_line(rows), "*main ?/? · work ?/?")
+
+    def test_no_accounts_is_an_empty_line(self):
+        self.assertEqual(short_line([]), "")
+
+    def test_lone_weekly_window_reported_as_primary_lands_in_the_7d_slot(self):
+        # Live servers may return only a seven-day window and still call it "primary".
+        bucket = {"id": "codex", "name": "codex", "windows": [
+            {"position": "primary", "remainingPercent": 82, "windowMinutes": 10080}]}
+        rows = [{"name": "main", "active": True, "status": "ok", "buckets": [bucket]}]
+        self.assertEqual(short_line(rows), "*main ?/82")
+
+    def test_windows_are_classified_by_duration_regardless_of_position(self):
+        bucket = {"id": "codex", "name": "codex", "windows": [
+            {"position": "primary", "remainingPercent": 12, "windowMinutes": 10080},
+            {"position": "secondary", "remainingPercent": 77, "windowMinutes": 300}]}
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [bucket]}]
+        self.assertEqual(short_line(rows), "main 77/12")
+
+    def test_position_is_the_fallback_when_duration_is_missing(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(77, 12)]}]
+        self.assertEqual(short_line(rows), "main 77/12")
 
 
 if __name__ == "__main__":

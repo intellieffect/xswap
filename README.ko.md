@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 xswap --version
 ```
 
@@ -21,6 +21,7 @@ xswap --version
 xswap register main       # 현재 Codex 로그인 등록
 xswap add work --use      # 브라우저에서 추가 OpenAI 계정으로 로그인하고 바로 선택
 xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
+xswap use --best          # 잔여 사용량이 가장 많은 계정을 기본값으로 선택
 xswap                     # 선택한 계정으로 Codex CLI 실행
 xswap app                 # 선택한 계정의 별도 데스크톱 창 열기
 ```
@@ -40,7 +41,38 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 
 각 한도에 `77% left`처럼 **남은 비율**을 표시하고, 초기화 시각(로컬 시간대)과 남은 시간을 함께 보여줍니다. Codex 기본 한도를 먼저, 모델별 추가 한도를 별도 줄에 표시합니다. `5h`·`7d` 등의 주기는 서버가 제공한 실제 기간이며, 없는 한도를 임의로 만들어 표시하지 않습니다. `credits`는 서버가 제공한 별도 크레딧 잔액이며 구독 잔여 비율과 다릅니다.
 
-조회는 공식 Codex App Server의 `account/rateLimits/read`를 사용합니다. 모델 대화나 테스트 턴을 생성하지 않으며, 기본 계정을 전환하지 않습니다. Codex가 필요에 따라 정상 인증 갱신을 수행할 수 있습니다. 계정당 최대 12초를 기다리고 최대 4개 계정을 병렬 조회합니다. 조회 실패·미로그인·API 키 계정은 구분하며, 알 수 없는 값을 `100%`로 표시하지 않습니다. 결과는 매번 조회하고 캐시하지 않습니다.
+조회는 공식 Codex App Server의 `account/rateLimits/read`를 사용합니다. 모델 대화나 테스트 턴을 생성하지 않으며, 기본 계정을 전환하지 않습니다. Codex가 필요에 따라 정상 인증 갱신을 수행할 수 있습니다. 계정당 최대 12초를 기다리고 최대 4개 계정을 병렬 조회합니다. 조회 실패·미로그인·API 키 계정은 구분하며, 알 수 없는 값을 `100%`로 표시하지 않습니다. 기본값은 매번 실시간 조회이며 캐시하지 않습니다(아래 「캐시된 조회」 참고).
+
+### 캐시된 조회
+
+`xswap list`·`xswap usage`·`xswap run --best`·`xswap use --best`는 매번 계정당 `codex app-server`를 새로 띄웁니다. 상태표시줄이나 크론처럼 자주 조회하는 호출자를 위해 `--cached SECONDS`를 붙이면 그만큼 신선한 기존 결과를 재사용하고 새로 띄우지 않습니다 — `--cached`를 주지 않으면 기존과 동일하게 항상 실시간 조회입니다. 조회가 성공하면 결과는 항상 `~/.local/share/codex-swap/usage-cache.json`(권한 `0600`)에 계정 이름별로 저장되며, 화면에 보이는 것과 동일한 화이트리스트 필드 — 잔여 비율·초기화 시각·플랜 종류·크레딧, 그리고 이메일일 수도 있는 로컬 계정 라벨 — 만 담고 원본 서버 응답이나 토큰은 담지 않습니다. 저장된 라벨이 현재 로그인 라벨과 다르면(같은 이름으로 재로그인한 경우) 캐시를 재사용하지 않고 새로 조회합니다. `--offline`과 `--cached`는 동시에 쓸 수 없고, `run`·`use`에서는 `--best`와 함께여야 합니다.
+
+### 잔여량 알림
+
+```sh
+xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 있으면 경고
+```
+
+`--warn PCT`는 1~100 사이 값만 받습니다. 기존 표(또는 `--json`) 출력은 그대로 stdout에 찍히고, 그 뒤 비활성화되지 않은(disabled 아닌) 계정 중 조회에 성공한 계정의 `codex` 한도 창을 검사해 기준치 미만인 창마다 `warn: 이름 창 N% left (resets ...)` 한 줄을 stderr로 출력합니다. 알 수 없는 잔여값은 절대 경고를 발생시키지 않습니다. 경고가 하나라도 발생하면 `xswap list --warn`은 종료코드 `3`을 반환하고, 아니면 `0`을 반환합니다. `--warn` 없는 평범한 `xswap list`는 영향받지 않고 항상 `0`을 반환합니다.
+
+대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없으므로, 절대경로로 된 래퍼 스크립트를 만들어 거기에 걸어야 합니다.
+
+```sh
+#!/bin/sh
+# /Users/you/.local/bin/xswap-quota-check
+/Users/you/.local/bin/xswap list --warn 15 \
+  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+```
+
+`launchd`/`cron` 항목은 이 래퍼의 절대경로를 가리키게 하십시오. xswap 자체는 아무것도 스케줄링하지 않습니다.
+
+### 상태 표시줄(status line)
+
+`xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. 비활성화(disabled)된 계정은 `list --short`에서 제외되지만, `xswap usage <계정명> --short`는 비활성화된 계정이라도 지정한 계정을 항상 표시하며, 계정이 하나도 없으면 `list --short`는 빈 줄을 출력합니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:
+
+```sh
+set -g status-right '#(xswap list --short)'
+```
 
 기존 버전 업데이트:
 
@@ -52,7 +84,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -71,7 +103,7 @@ xswap auto-status
 xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 ```
 
-`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원하며, `codex exec`, login/logout 등 비대화형 명령과 명시적 `--remote` 연결은 원래 Codex로 전달되어 자동 전환 대상이 아닙니다.
+`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원하며, `codex exec`, login/logout 등 비대화형 명령과 명시적 `--remote` 연결은 원래 Codex로 전달되어 자동 전환 대상이 아닙니다. `codex exec`에는 `--remote`가 없어 이 실시간 전환이 보호하지 못하므로, 실행 직전 잔여량이 가장 많은 계정을 한 번만 고르는 `xswap run --best`로만 다룹니다.
 
 자동 모드 앱과 CLI는 각각 **실행 중인 한 개의 Codex 서버와 대화 저장소를 유지**합니다. CLI는 원본 TUI 프로세스도 그대로 유지하며 사용자 전용 Unix WebSocket으로 서버와 연결합니다. TCP 포트를 열지 않습니다. 앱과 CLI 저장소는 분리되어 있습니다. 새 턴 전에 현재 사용량을 확인하고, 적용되는 한도가 소진되면 잔여량이 확인된 다음 계정으로 인증을 바꿉니다. 한도 정보는 최대 30초 동안 재사용하며, Codex의 한도 알림으로 갱신합니다. 모델별 한도를 확인할 수 없는 후보는 선택하지 않습니다.
 
@@ -93,18 +125,21 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 xswap openclaw work --dry-run       # 적용할 계정·에이전트 확인
 xswap openclaw work                 # 로컬 OpenClaw 전체 에이전트에 적용
 xswap use main --openclaw           # CLI·앱 기본 계정과 OpenClaw를 함께 전환
+xswap openclaw --pool main,work     # OpenClaw가 두 계정을 스스로 순환하도록 등록
 ```
 
 `xswap openclaw`는 이름을 생략하면 현재 선택 계정을 사용합니다. 특정 에이전트만 바꾸려면 `xswap openclaw work --agent main --agent devagent`처럼 지정하십시오. 이 명령 자체는 xswap의 기본 계정을 바꾸지 않습니다.
 
+`--pool a,b,c`는 등록된 이름 2개 이상을 쉼표로 지정하며, 위치 인자 NAME과는 함께 쓸 수 없습니다. 나열한 순서 그대로 각 에이전트의 OpenAI 인증 순서에 전부 등록하면, 이후 OpenClaw가 자신의 쿨다운 로직(`resolveAuthProfileOrder`·`isProfileInCooldown`·`markAuthProfileFailure`/`markAuthProfileCooldown`)으로 그 안에서 스스로 순환합니다. 즉 한 계정이 한도에 걸려도 사람이 `xswap openclaw other`를 실행할 때까지 기다릴 필요가 없습니다. 풀에 묶인 에이전트는 그 순간 선택된 계정이 무엇이든 동일한 대화·작업 맥락을 공유하므로, 서로 다른 ChatGPT 조직(계정)을 섞으면 그 조직들의 맥락이 한 대화 안에서 뒤섞입니다 — `sync_openclaw`는 풀에 속한 계정들의 조직이 갈리면 기본적으로 중단하며, 의도한 것이면 `--allow-mixed`로 넘길 수 있습니다. 계정의 조직 자체를 확인할 수 없는 경우(인증 파일을 읽을 수 없거나 해독 가능한 클레임이 없는 경우)도 실제로 조직이 다를 때와 동일하게 중단합니다 — 확인 불가를 일치로 간주하지 않습니다.
+
 OpenClaw 연결은 다음을 수행합니다.
 
-1. 선택 계정의 ChatGPT OAuth 인증을 확인합니다.
+1. 선택 계정(들)의 ChatGPT OAuth 인증을 확인합니다. `--pool`이면 계정 간 조직 일치 여부도 함께 확인합니다.
 2. 변경 대상 인증·우선순위만 작은 0600 파일로 백업합니다.
 3. OpenClaw의 공개 SDK와 잠금·트랜잭션을 통해 인증을 등록하고 대상 에이전트의 OpenAI 인증 선택을 변경합니다.
 4. `openclaw secrets reload`로 실행 중인 Gateway 인증 상태를 재적용합니다.
 
-원래 인증 프로필은 보존합니다. 선택된 에이전트의 OpenAI 인증 순서는 해당 계정 하나로 지정하므로 다른 계정으로 자동 순환하지 않습니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
+원래 인증 프로필은 보존합니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
 
 백업 경로를 바꾸려면 `xswap openclaw work --backup-dir /path/to/private-backups`를 사용하십시오. 전체 미디어·대화 DB를 백업하지 않습니다.
 
@@ -114,14 +149,21 @@ OpenClaw 연결은 다음을 수행합니다.
 |---|---|
 | `xswap list` | 계정 목록·잔여 사용량·초기화 시간 표시 |
 | `xswap run --account main -- resume` | 지정 계정으로 Codex 명령 실행 |
+| `xswap run --best -- exec "요약해줘"` | 잔여 사용량이 가장 많은 계정으로 실행(1회성 선택) |
+| `xswap use --best` | 잔여 사용량이 가장 많은 계정을 이후 실행의 기본값으로 선택 |
 | `xswap app work` | 지정 계정의 macOS 앱 실행 |
 | `xswap add work --device-auth` | Codex의 기기 코드 로그인 사용 |
 | `xswap app work --dry-run` | 앱 실행 경로와 환경변수 확인 |
 | `xswap login work` | 등록된 계정을 재인증(로그인 만료 시) |
 | `xswap disable work` | 계정을 삭제하지 않고 선택 대상에서 제외 |
 | `xswap enable work` | 제외된 계정을 다시 선택 대상으로 복원 |
+| `xswap remove work` | 계정을 xswap에서 제거 |
+| `xswap map work ~/code/company` | 해당 디렉터리 하위에서는 기본으로 work 선택 |
+| `xswap unmap ~/code/company` | 디렉터리 매핑 제거 |
 
 `xswap disable`로 제외된 계정은 `use`, `--auto`/`auto-enable` 계정 풀, `openclaw`, `list`의 실시간 사용량 조회에서 모두 빠지며 목록에는 `(disabled)`로 표시됩니다. 다만 `xswap run --account NAME`·`xswap app NAME`처럼 계정을 명시적으로 지정한 단일 실행은 막지 않습니다.
+
+`xswap remove`는 계정의 레지스트리 항목만 지우고 파일은 기본적으로 남겨두며, `--purge`를 추가하면 관리형 프로필 디렉터리까지 삭제합니다(등록된 홈, 즉 사용자의 `~/.codex`는 어떤 플래그를 줘도 삭제하지 않습니다). 활성화된 `--auto`/`auto-enable` 풀에 속했거나 실행 중인 자동 세션이 사용 중인 계정은 거부하며, `--yes` 없이는 확인을 묻습니다.
 
 ## 지원 범위와 동작 원리
 
@@ -129,7 +171,7 @@ Codex 인증 저장은 `file` 방식만 지원합니다. `keyring`/`auto`는 변
 
 OpenClaw 연결은 **ChatGPT OAuth + 로컬 Gateway** 전용입니다. API 키 인증이나 원격 Gateway를 이 명령으로 교체하지 않습니다. OpenClaw 2026.8.1에서 실제 검증했으며, 공개 SDK가 없는 버전에서는 중단합니다. Gateway가 실행 중이어야 인증 재적용까지 완료됩니다.
 
-`xswap use`는 이후 **xswap으로 실행하는** CLI와 앱에 적용됩니다. 일반 `codex` 명령과 이미 열린 앱·CLI 세션에는 소급 적용되지 않습니다. `--openclaw`를 붙이지 않으면 OpenClaw는 변경하지 않습니다. 명시적으로 계정을 고정한 기존 OpenClaw 세션이나 진행 중인 작업은 기존 인증을 유지할 수 있습니다.
+`xswap use`는 이후 **xswap으로 실행하는** CLI와 앱에 적용됩니다. 일반 `codex` 명령과 이미 열린 앱·CLI 세션에는 소급 적용되지 않습니다. `--openclaw`를 붙이지 않으면 OpenClaw는 변경하지 않습니다. 명시적으로 계정을 고정한 기존 OpenClaw 세션이나 진행 중인 작업은 기존 인증을 유지할 수 있습니다. 계정을 명시하지 않았을 때 정확히 다음 명령만 디렉터리 매핑을 따릅니다: 계정 없는 `xswap`·`--account` 없는 `xswap run`·`xswap app`·`xswap status`·`xswap usage`(가장 깊이 일치하는 매핑 우선, 매핑이 없을 때만 `xswap use`로 선택한 계정으로 돌아감. 우선순위: 명시적 계정 > 디렉터리 매핑 > 선택된 계정). `xswap openclaw`는 이름을 생략해도 디렉터리 매핑을 절대 따르지 않고 항상 `xswap use`로 선택한 계정을 사용합니다 — 하나의 실행 세션이 아니라 로컬 OpenClaw 에이전트 전체의 공유 인증 상태를 바꾸기 때문입니다. 비활성화(`disable`)된 계정에 매핑돼 있어도 해당 매핑은 그대로 적용되어 실행되며, 이는 `disable`이 `use`·`--auto`/`auto-enable` 풀·`openclaw`·실시간 사용량 조회에만 영향을 준다는 기존 규칙과 일치합니다.
 
 현재 계정을 등록할 때는 기존 `CODEX_HOME`을 참조합니다. 추가 계정은 독립된 인증·대화·DB를 사용하며, `config.toml`, `AGENTS.md`, `skills`, `rules`는 원래 홈을 공유합니다. `plugins`는 각 홈에 독립된 코드 캐시를 생성하고 이후에는 해당 홈의 플러그인 관리자가 갱신합니다. 다른 홈의 플러그인 변경을 자동 덮어쓰지 않습니다. **계정 분리는 파일·도구 접근 권한을 격리하는 보안 샌드박스가 아닙니다.**
 
@@ -138,6 +180,8 @@ OpenClaw 연결은 실행 시점의 인증을 동기화합니다. 이미 OpenCla
 데스크톱은 계정별 `CODEX_HOME`과 `CODEX_ELECTRON_USER_DATA_PATH`로 실행합니다. ChatGPT 26.901.20858의 별도 프로필 실행과 내장 Codex의 인증 인식을 검증했습니다. 이 환경변수는 공식 안정 API로 보장되지 않으므로 앱 업데이트 후 새 창의 프로필 메뉴에서 계정을 확인하십시오.
 
 ## 오류가 나면
+
+먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, `codex` 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료, 플러그인 링크, 자동 전환 풀, OpenClaw plugin SDK를 점검합니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
 
 | 상황 | 다음 행동 |
 |---|---|
@@ -230,4 +274,18 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 
 macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오.
 
-`xswap switch NAME` is an alias for `xswap use NAME`: it selects the default for new launches, not a live switch of existing sessions.
+`xswap switch NAME`(`xswap use NAME`과 동일)은 기본 계정을 선택하고 **실행 중인 호환 자동 모드 CLI·데스크톱 브리지 전체에 전환을 전달**합니다. 대기 중인 세션은 바로 적용하고, 응답 중인 세션은 모든 턴이 끝난 뒤 적용합니다. 서버 프로세스와 대화는 유지됩니다. 자동 풀 밖의 등록 계정도 수동 선택할 수 있으며, 이후 턴의 자동 전환 풀·잔여량 정책은 그대로 적용됩니다.
+
+```sh
+xswap switch work
+xswap auto-status                    # manualState: pending / applying / applied / failed
+xswap switch work --default-only      # 새 실행의 기본값만 변경
+```
+
+결과는 적용 완료(`applied`), 대기(`pending`), 미지원(`unsupported`), 실패(`failed`), 수신 미확인(`unconfirmed`) 건수로 표시합니다. 실제 인증 갱신 성공 응답이 있어야 적용 완료로 셉니다. 명령은 최대 2초 동안 응답을 확인하며, 대기 중인 요청의 후속 상태는 `auto-status`에서 확인합니다. 실패·수신 미확인은 종료 코드 1을 반환하며 저장된 기본 계정은 유지됩니다. 바쁜 세션에 반복 요청하면 마지막 선택이 대기 요청을 대체합니다.
+
+**이전 버전으로 이미 실행 중인 브리지와 일반 고정 계정 세션은 수신할 수 없습니다.** 업데이트된 설치본으로 자동 모드 세션을 한 번 열어야 합니다. `manualSwitchVersion: 1`이 지원 여부를 나타냅니다. 설치는 실행 중인 프로세스를 교체하거나 종료하지 않습니다. 계정별 인증 파일을 복사하지 않으며, 비공개 로컬 요청 파일에는 계정 이름과 프로세스별 식별자만 기록합니다.
+
+자동 모드의 `codex resume UUID` / `fork UUID`는 자동 런타임·기존 Codex 홈·등록 계정 홈에서 해당 대화를 찾고, 대화를 복사하지 않고 원래 홈에서 인증 브리지와 함께 재개합니다. 선택 화면·대화 이름·`--last`는 자동 런타임 범위를 유지합니다. 자동 런타임 밖 여러 홈에 같은 UUID가 있으면 원래 홈을 명시해야 합니다.
+
+자동 모드 CLI 종료 후에는 Codex의 임시 원격 주소 아래에 마지막으로 표시되는 xswap 재개 명령을 사용하십시오. 종료된 소켓 대신 새 브리지를 열며 계정 풀·현재 계정·원래 세션 홈을 유지합니다.

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -64,7 +65,31 @@ class WebSocketBridge(Bridge):
     def __init__(self, *args, socket, **kwargs):
         self.socket = socket
         self.outbox = asyncio.Queue(maxsize=4096)
+        self.resume_thread = None
+        self.thread_requests = set()
         super().__init__(*args, emit=self.outbox.put_nowait, **kwargs)
+
+    async def on_client(self, message):
+        method = message.get('method')
+        if method in ('thread/start', 'thread/resume', 'thread/fork') and 'id' in message:
+            self.thread_requests.add(message['id'])
+        if method == 'turn/start':
+            self.remember_thread((message.get('params') or {}).get('threadId'))
+        await super().on_client(message)
+
+    def remember_thread(self, value):
+        try:
+            self.resume_thread = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    async def on_server(self, message):
+        key = message.get('id')
+        if key in self.thread_requests and 'method' not in message:
+            self.thread_requests.discard(key)
+            if 'error' not in message:
+                self.remember_thread(((message.get('result') or {}).get('thread') or {}).get('id'))
+        await super().on_server(message)
 
     async def client_reader(self):
         async def receive():
@@ -90,10 +115,11 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
     """One TUI and one child server. No TCP listener and no TUI restart."""
     from websockets.asyncio.server import unix_serve
     connected = False
+    active_bridge = None
     client_ready = asyncio.Event()
 
     async def handle(socket):
-        nonlocal connected
+        nonlocal connected, active_bridge
         if connected:
             await socket.close(1008, 'one client per CLI session')
             return
@@ -143,6 +169,72 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 await cli.wait()
             listener.close()
             await listener.wait_closed()
+            command = reconnect_command(pool, env, active_bridge)
+            if command:
+                print('xswap: the temporary connection above is closed. '
+                      'Resume this conversation with a new bridge:', file=sys.stderr)
+                print(command, file=sys.stderr)
+
+
+def reconnect_command(pool, env, bridge):
+    """Only emit a known conversation and shell-quoted, non-secret metadata."""
+    thread = getattr(bridge, 'resume_thread', None)
+    manager = getattr(pool, 'manager', None)
+    if not thread or not manager or not env.get('CODEX_HOME'):
+        return None
+    names = list(dict.fromkeys([bridge.current, *pool.names]))
+    return shlex.join(['env', 'CODEX_SWAP_HOME=' + str(manager.root),
+        'CODEX_HOME=' + env['CODEX_HOME'], 'xswap', 'run', '--auto',
+        '--accounts', ','.join(names), '--', 'resume', thread])
+
+
+def resume_home(manager, args, default):
+    """Explicit UUID resumes use the home that already owns the conversation."""
+    command = None
+    session_id = None
+    iterator = iter(args)
+    for arg in iterator:
+        if arg in VALUE_FLAGS:
+            next(iterator, None)
+            continue
+        if arg.startswith('-'):
+            continue
+        if command is None:
+            command = arg
+            if command not in ('resume', 'fork'):
+                return default
+        else:
+            try:
+                session_id = str(uuid.UUID(arg))
+            except ValueError:
+                return default  # Named sessions and picker/--last keep normal scope.
+            break
+    if session_id is None:
+        return default
+    homes = [default, manager.source, Path.home() / '.codex']
+    homes.extend(Path(entry['home']) for entry in manager.read()['accounts'].values())
+    seen = set()
+    matches = []
+    for home in homes:
+        home = home.resolve()
+        if home in seen:
+            continue
+        seen.add(home)
+        for folder in ('sessions', 'archived_sessions'):
+            for path in (home / folder).glob(f'**/*-{session_id}.jsonl'):
+                if path.is_file() and not path.is_symlink():
+                    if home == default.resolve():
+                        return default  # Prefer the current runtime if both have copies.
+                    matches.append(home)
+                    break
+    matches = list(dict.fromkeys(matches))
+    if len(matches) > 1:
+        raise LiveError('This session exists in multiple account homes; resume from its original CODEX_HOME with XSWAP_BYPASS=1.')
+    if matches:
+        from codex_swap import check_file_store
+        check_file_store(matches[0])
+        return matches[0]
+    return default
 
 
 def launch_cli(manager, accounts, args, dry=False):
@@ -152,20 +244,24 @@ def launch_cli(manager, accounts, args, dry=False):
         raise LiveError('auto CLI supports interactive Codex, resume, fork, and agents; ordinary utility/exec commands use normal authentication')
     real = manager.codex()
     pool = AccountPool(manager, names, real)
-    home = manager.root / 'auto' / 'cli-codex'
+    runtime = manager.root / 'auto' / 'cli-codex'
+    home = resume_home(manager, args, runtime)
     if dry:
         print(json.dumps({'mode': 'auto-cli', 'accounts': names, 'CODEX_HOME': str(home),
                           'transport': 'private Unix WebSocket', 'args': args}, indent=2))
         return 0
-    private_dir(home.parent)
-    private_dir(home)
-    _, source = manager.account(names[0])
-    for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
-        src, dst = source / entry, home / entry
-        if src.exists() and not dst.exists() and not dst.is_symlink():
-            dst.symlink_to(src, target_is_directory=src.is_dir())
-    from xswap_plugins import ensure_plugins
-    ensure_plugins(home, source)
+    if home == runtime:
+        private_dir(home.parent)
+        private_dir(home)
+        _, source = manager.account(names[0])
+        for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
+            src, dst = source / entry, home / entry
+            if src.exists() and not dst.exists() and not dst.is_symlink():
+                dst.symlink_to(src, target_is_directory=src.is_dir())
+        from xswap_plugins import ensure_plugins
+        ensure_plugins(home, source)
+    else:
+        print('xswap auto: resuming from the original session home', file=sys.stderr)
     run_dir = manager.root / 'auto' / 'cli-runs' / uuid.uuid4().hex
     private_dir(run_dir.parent)
     private_dir(run_dir)
@@ -340,7 +436,7 @@ def status_data(manager, prune=False, cleanup=True):
             continue
         result.append({'surface': 'desktop' if run_dir is None else 'cli',
             'running': running, **{key: state.get(key) for key in
-            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold')}})
+            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance', 'manualRequest', 'manualState')}})
     wrapper = settings.get('wrapper') or {}
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and

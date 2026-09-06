@@ -15,6 +15,7 @@ Only the latest release receives security fixes. Automatic switching is experime
 - Auto-mode accounts share task context and local tool permissions. Account separation is not a sandbox. Do not combine unrelated users or organizations.
 - Plugin code is trusted executable code. xswap materializes local caches without relaxing trusted roots; it does not audit third-party plugins.
 - Explicit OpenClaw sync writes credentials and creates sensitive recovery backups. It is distinct from auto-mode token handling.
+- `xswap list`/`usage`/`run --best`/`use --best --cached SECONDS` (opt-in; default is uncached) persists `usage-cache.json` (mode `0600`) per account, holding the same whitelisted fields shown on screen for that account: remaining percentages, reset times, plan type, credits, and the local account label — which can be an email address. It never stores raw server responses or tokens, a failed lookup is never cached, and a cache entry is discarded (not reused) once the account's current login label no longer matches the one it was saved under.
 
 ## Files that must not be submitted
 

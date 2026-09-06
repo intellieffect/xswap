@@ -168,6 +168,73 @@ def reset_label(timestamp, now):
     return f"resets {clock} (in {duration})"
 
 
+def is_ok(status):
+    """True for a successful quota fetch, whether live or served from the local cache."""
+    return status in ("ok", "ok (cached)")
+
+
+def warnings(rows, threshold, now=None):
+    """Pure evaluation for `list --warn`: which codex windows are below threshold.
+
+    Only non-disabled rows (``row.get("disabled")`` falsy) with a successful status
+    (``is_ok``: live or cached) are considered. A window only warns when its
+    ``remainingPercent`` is a known number below ``threshold``; unknown values never
+    trigger a warning.
+    """
+    now = time.time() if now is None else now
+    lines = []
+    for row in rows:
+        if row.get("disabled") or not is_ok(row.get("status")):
+            continue
+        for bucket in row.get("buckets", []):
+            if bucket.get("id") != "codex":
+                continue
+            for window in bucket.get("windows", []):
+                remaining = window.get("remainingPercent")
+                if not number(remaining) or remaining >= threshold:
+                    continue
+                lines.append(f"warn: {row.get('name')} {window_label(window)} {remaining:g}% left "
+                             f"({reset_label(window.get('resetsAt'), now)})")
+    return lines
+
+
+def short_line(rows):
+    """One line per account for a status line/prompt: `{*}{name} {p5h}/{p7d}`, joined by ' · '.
+
+    Pure formatting over rows shaped like show_accounts' output (name, active, status,
+    buckets); no subprocess, no I/O. p5h/p7d are the codex bucket's short (under a day)
+    and weekly (a day or longer, by windowMinutes) window remainingPercent, rounded half
+    up to an integer; position is only a fallback when windowMinutes is absent. Unknown
+    or unavailable is "?".
+    """
+    parts = []
+    for row in rows:
+        marker = "*" if row.get("active") else ""
+        primary = secondary = "?"
+        if is_ok(row.get("status")):
+            bucket = next((b for b in row.get("buckets", []) if (b.get("id") or "").lower() == "codex"), None)
+            if bucket:
+                # Classify by duration, not position: the server may report only a
+                # seven-day window and still call it "primary".
+                short = weekly = None
+                for window in bucket.get("windows", []):
+                    minutes = window.get("windowMinutes")
+                    if minutes is None:
+                        is_weekly = window.get("position") == "secondary"
+                    else:
+                        is_weekly = minutes >= 1440
+                    if is_weekly:
+                        weekly = weekly or window
+                    else:
+                        short = short or window
+                if short and short.get("remainingPercent") is not None:
+                    primary = str(math.floor(short["remainingPercent"] + 0.5))
+                if weekly and weekly.get("remainingPercent") is not None:
+                    secondary = str(math.floor(weekly["remainingPercent"] + 0.5))
+        parts.append(f"{marker}{row['name']} {primary}/{secondary}")
+    return " · ".join(parts)
+
+
 def usage_lines(buckets, now=None):
     now = time.time() if now is None else now
     lines = []
