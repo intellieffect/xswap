@@ -68,16 +68,13 @@ xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 �
 
 `--warn PCT`는 1~100 사이 값만 받습니다. 기존 표(또는 `--json`) 출력은 그대로 stdout에 찍히고, 그 뒤 비활성화되지 않은(disabled 아닌) 계정 중 조회에 성공한 계정의 `codex` 한도 창을 검사해 기준치 미만인 창마다 `warn: 이름 창 N% left (resets ...)` 한 줄을 stderr로 출력합니다. 알 수 없는 잔여값은 절대 경고를 발생시키지 않습니다. 경고가 하나라도 발생하면 `xswap list --warn`은 종료코드 `3`을 반환하고, 아니면 `0`을 반환합니다. `--warn` 없는 평범한 `xswap list`는 영향받지 않고 항상 `0`을 반환합니다.
 
-대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없으므로, 절대경로로 된 래퍼 스크립트를 만들어 거기에 걸어야 합니다.
+대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `xswap alert --install`이면 그 등록까지 대신 해줍니다.
 
 ```sh
-#!/bin/sh
-# /Users/you/.local/bin/xswap-quota-check
-/Users/you/.local/bin/xswap list --warn 15 \
-  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+xswap alert --install --warn 15 --every 30
 ```
 
-`launchd`/`cron` 항목은 이 래퍼의 절대경로를 가리키게 하십시오. xswap 자체는 아무것도 스케줄링하지 않습니다.
+macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정한 절대경로의 `xswap`을 호출하는 래퍼 — `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없기 때문이며, `warn:` 줄마다 `osascript` 알림으로 바꿔줍니다)와 `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`를 만든 뒤 `launchctl bootstrap`으로 등록합니다. 매 실행 결과는 `alert/last.log`에 남습니다. 상태 확인은 `xswap alert --status`, 제거는 `xswap alert --uninstall`입니다. macOS가 아니면 `--install`은 아무것도 쓰지 않고 대신 동등한 `cron` 한 줄만 출력합니다.
 
 ### 상태 표시줄(status line)
 
