@@ -452,7 +452,7 @@ def parser():
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
     up.add_argument("--dry-run", action="store_true")
-    u = sub.add_parser("use", help="Select the default account for xswap and xswap app")
+    u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
     d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
@@ -529,7 +529,7 @@ def main(argv=None):
             show_status(manager, args.prune)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
-        elif args.command == "use":
+        elif args.command in ("use", "switch"):
             if args.openclaw:
                 manager.sync_openclaw(args.name, select=True)
             else:

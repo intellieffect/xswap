@@ -42,3 +42,9 @@ class DisplayTests(unittest.TestCase):
     def test_disabled_policy_and_explicit_details(self):
         self.assertIn('OFF',policy_label({}))
         self.assertIn('private@example.test',render([row()],{},details=True,color=False))
+
+    def test_switch_alias_parses_default_selection(self):
+        from codex_swap import parser
+        args = parser().parse_args(['switch', 'work'])
+        self.assertEqual(args.command, 'switch')
+        self.assertEqual(args.name, 'work')
