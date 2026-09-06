@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import tempfile
 import time
 import unittest
@@ -204,6 +205,24 @@ class ClearCooldownTests(SqliteFixture):
         os.chmod(path, 0o600)
         backup_path = state.clear_cooldown(path, ["openai:xswap-a"], self.base / "backups")
         self.assertTrue(backup_path.exists())
+
+
+class BackupTests(SqliteFixture):
+    def test_backup_includes_pages_still_in_the_wal(self):
+        # OpenClaw runs its state DB in WAL mode; a raw copy of the main file
+        # would miss committed rows that have not been checkpointed yet.
+        path = self.write_db({"openai:xswap-a": {"blockedUntil": 1, "errorCount": 1}})
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA journal_mode=wal")
+        conn.execute("UPDATE config_machine_state SET value_json = ? WHERE state_key = ?",
+                     (json.dumps({"version": 1, "usageStats": {"openai:xswap-b": {"errorCount": 7}}}), state.STATE_KEY))
+        conn.commit()
+        # Keep the connection open so sqlite does not checkpoint on close.
+        self.addCleanup(conn.close)
+        self.assertTrue((path.parent / "openclaw.sqlite-wal").exists())
+        backup = state._make_backup(path, self.base / "backups")
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+        self.assertEqual(self.read_raw_state(backup)["usageStats"], {"openai:xswap-b": {"errorCount": 7}})
 
 
 class ProfileIdTests(unittest.TestCase):
