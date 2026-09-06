@@ -236,6 +236,34 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIsNone(self.manager.read()["active"])
 
+    def test_add_use_with_aborted_browser_login_reports_error_only(self):
+        # rc 0 but the user closed the browser tab before finishing: no auth.json is written.
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", return_value=0), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["add", "work", "--use"])
+        self.assertEqual(code, 1)
+        self.assertEqual(self.manager.account(), ("main", self.source))
+        self.assertNotIn("Saved", out.getvalue())
+        self.assertIn("xswap:", err.getvalue())
+
+    def test_first_add_with_aborted_browser_login_leaves_active_none(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", return_value=0), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["add", "first"])
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.manager.read()["active"])
+        self.assertNotIn("Saved", out.getvalue())
+        self.assertIn("xswap:", err.getvalue())
+
     def test_bridge_error_does_not_forward_raw_stderr(self):
         self.manager.register("main")
         executable = self.bridge_installation()
