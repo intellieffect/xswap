@@ -285,7 +285,9 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 
 `xswap list`는 주간 사용량 막대, 사용/남은 비율, 초기화 시간을 보여줍니다. `--details`로 이메일·다른 시간대 잔여량을, `--include-spark`로 Spark를 추가 표시합니다. 선택됨은 새 실행의 기본 계정이며 기존 실행 세션의 계정은 아닙니다.
 
-macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오.
+텍스트 출력(및 `xswap dashboard`)은 기본값이 영어이며, `--lang ko` 또는 `XSWAP_LANG=ko`를 주면 한국어로 표시됩니다. 두 값을 모두 지정하지 않아도 `LANG=ko_KR.UTF-8`처럼 로케일이 한국어면 자동으로 한국어가 선택됩니다.
+
+macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오. 메뉴바 앱은 (실행한 셸이 아니라) 자신이 실행될 때의 환경에서 `--lang`/`XSWAP_LANG`과 같은 규칙으로 영어·한국어를 스스로 판정하며, 내부에서 호출하는 `xswap dashboard`에도 그 판정을 명시적으로 전달합니다.
 
 `xswap switch NAME`(`xswap use NAME`과 동일)은 기본 계정을 선택하고 **실행 중인 호환 자동 모드 CLI·데스크톱 브리지 전체에 전환을 전달**합니다. 대기 중인 세션은 바로 적용하고, 응답 중인 세션은 모든 턴이 끝난 뒤 적용합니다. 서버 프로세스와 대화는 유지됩니다. 자동 풀 밖의 등록 계정도 수동 선택할 수 있으며, 이후 턴의 자동 전환 풀·잔여량 정책은 그대로 적용됩니다.
 

@@ -307,7 +307,7 @@ class AccountTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.manager.show_accounts(offline=True)
         self.assertIn("second", out.getvalue())
-        self.assertIn("비활성화 (disabled)", out.getvalue())
+        self.assertIn("disabled", out.getvalue())
 
     def test_disable_refuses_unknown_account(self):
         with self.assertRaises(SwapError):
