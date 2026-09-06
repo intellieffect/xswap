@@ -15,6 +15,10 @@ xswap --version
 
 명령을 찾지 못하면 `uv tool update-shell` 실행 후 새 터미널을 여십시오. `codex-swap`도 동일한 명령입니다. Claude 전용 `cswap`은 변경하지 않습니다.
 
+## 셸 자동완성
+
+zsh는 `xswap completion zsh > "${fpath[1]}/_xswap"` 실행 또는 `.zshrc`에 `eval "$(xswap completion zsh)"` 추가, bash는 `.bashrc`에 `eval "$(xswap completion bash)"` 추가로 설정합니다. 서브커맨드·옵션·계정 이름(`xswap list --offline`으로 로컬에서만 조회, 네트워크 없음) 모두 자동완성됩니다.
+
 ## 처음 사용하기
 
 ```sh

@@ -823,6 +823,8 @@ def parser():
     a.add_argument("name", nargs="?"); a.add_argument("--app"); a.add_argument("--dry-run", action="store_true")
     a.add_argument("--auto", action="store_true", help="Keep one desktop session and switch accounts after quota exhaustion (experimental)")
     a.add_argument("--accounts", help="Explicit fallback order, e.g. work,main; requires --auto")
+    comp = sub.add_parser("completion", help="Print a shell completion script (see xswap_completion.py)")
+    comp.add_argument("shell", choices=["zsh", "bash"])
     return p
 
 
@@ -1000,6 +1002,9 @@ def main(argv=None):
             # that dedupes and enforces >=2 distinct names, so this list isn't re-validated.
             names = args.pool.split(",") if args.pool else args.name
             manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
+        elif args.command == "completion":
+            from xswap_completion import generate
+            sys.stdout.write(generate(parser(), args.shell))
         else:
             rest = getattr(args, "args", [])
             if rest[:1] == ["--"]:
