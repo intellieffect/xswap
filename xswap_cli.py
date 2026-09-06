@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 from xswap_live import AccountPool, Bridge, LiveError, validate_threshold
@@ -279,32 +280,67 @@ def codex_main():
         return 130
 
 
-def show_status(manager):
+STALE_RUN_SECONDS = 7 * 24 * 3600
+MIN_PRUNE_AGE_SECONDS = 60
+
+
+def show_status(manager, prune=False):
     settings = read_settings(manager)
-    statuses = [manager.root / 'auto' / 'status.json']
-    statuses.extend(sorted((manager.root / 'auto' / 'cli-runs').glob('*/status.json')))
+    run_root = manager.root / 'auto' / 'cli-runs'
+    entries = [(manager.root / 'auto' / 'status.json', None)]
+    if run_root.is_dir():
+        entries += [(run_dir / 'status.json', run_dir) for run_dir in sorted(run_root.iterdir())
+                    if run_dir.is_dir() and not run_dir.is_symlink()]
     result = []
-    for path in statuses:
-        if not path.exists():
-            continue
+    pruned = 0
+    for path, run_dir in entries:
+        state = None
+        if path.exists():
+            try:
+                state = json.loads(path.read_text())
+            except (OSError, ValueError):
+                state = None
+        lock_path = path.parent / '.bridge.lock'
+        fd = os.open(lock_path, os.O_RDONLY) if lock_path.exists() else None
+        running = False
         try:
-            state = json.loads(path.read_text())
-            lock_path = path.parent / '.bridge.lock'
-            running = False
-            if lock_path.exists():
-                fd = os.open(lock_path, os.O_RDONLY)
+            # Holding the fd (and any lock acquired below) through the removal
+            # decision keeps a bridge from starting in the same run dir mid-check.
+            if fd is not None:
                 try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    running = True
+            if (run_dir is not None and not running and run_dir.parent == run_root and
+                    run_dir.is_dir() and not run_dir.is_symlink()):
+                updated_at = state.get('updatedAt') if isinstance(state, dict) else None
+                if isinstance(updated_at, (int, float)):
+                    age = time.time() - updated_at
+                else:
                     try:
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        running = True
-                finally:
-                    os.close(fd)
-            result.append({'surface': 'desktop' if path.parent.name == 'auto' else 'cli',
-                'running': running, **{key: state.get(key) for key in
-                ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold')}})
-        except (OSError, ValueError):
+                        age = time.time() - run_dir.stat().st_mtime
+                    except OSError:
+                        age = 0
+                # A run dir this fresh may still be between creation and the
+                # bridge taking its lock (no lock file, no status.json yet);
+                # never race that startup window regardless of --prune.
+                if age > MIN_PRUNE_AGE_SECONDS and (prune or age > STALE_RUN_SECONDS):
+                    try:
+                        shutil.rmtree(run_dir)
+                    except OSError:
+                        # Lost a race with another prune, or the dir vanished;
+                        # never let one bad removal crash the whole report.
+                        continue
+                    pruned += 1
+                    continue
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if state is None:
             continue
+        result.append({'surface': 'desktop' if run_dir is None else 'cli',
+            'running': running, **{key: state.get(key) for key in
+            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold')}})
     wrapper = settings.get('wrapper') or {}
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and
@@ -312,4 +348,4 @@ def show_status(manager):
     print(json.dumps({'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []), 'codexWrapped': wrapped,
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
-                      'sessions': result[-20:]}, indent=2))
+                      'pruned': pruned, 'sessions': result[-20:]}, indent=2))

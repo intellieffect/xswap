@@ -417,7 +417,8 @@ def parser():
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("status", help="Show selected account and login status")
-    sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
+    st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
+    st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
     ae.add_argument("--accounts", required=True)
     ae.add_argument("--wrap-codex", action="store_true", help="Also wrap the user-owned codex symlink, with rollback metadata")
@@ -493,7 +494,7 @@ def main(argv=None):
             disable(manager)
         elif args.command == "auto-status":
             from xswap_cli import show_status
-            show_status(manager)
+            show_status(manager, args.prune)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command == "use":
