@@ -281,6 +281,7 @@ def codex_main():
 
 
 STALE_RUN_SECONDS = 7 * 24 * 3600
+MIN_PRUNE_AGE_SECONDS = 60
 
 
 def show_status(manager, prune=False):
@@ -320,8 +321,16 @@ def show_status(manager, prune=False):
                         age = time.time() - run_dir.stat().st_mtime
                     except OSError:
                         age = 0
-                if prune or age > STALE_RUN_SECONDS:
-                    shutil.rmtree(run_dir)
+                # A run dir this fresh may still be between creation and the
+                # bridge taking its lock (no lock file, no status.json yet);
+                # never race that startup window regardless of --prune.
+                if age > MIN_PRUNE_AGE_SECONDS and (prune or age > STALE_RUN_SECONDS):
+                    try:
+                        shutil.rmtree(run_dir)
+                    except OSError:
+                        # Lost a race with another prune, or the dir vanished;
+                        # never let one bad removal crash the whole report.
+                        continue
                     pruned += 1
                     continue
         finally:

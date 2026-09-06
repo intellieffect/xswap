@@ -76,7 +76,7 @@ class CliTests(TestCase):
   self.assertFalse(run_dir.exists())
   self.assertEqual(json.loads(out.getvalue())['pruned'],1)
  def test_prune_flag_removes_fresh_non_running_dir(self):
-  run_dir,_=self.make_run('fresh',updated_at=time.time())
+  run_dir,_=self.make_run('fresh',updated_at=time.time()-5*60)
   with contextlib.redirect_stdout(io.StringIO()) as out:
    show_status(self.manager)
   self.assertTrue(run_dir.exists())
@@ -85,6 +85,18 @@ class CliTests(TestCase):
    show_status(self.manager,prune=True)
   self.assertFalse(run_dir.exists())
   self.assertEqual(json.loads(out.getvalue())['pruned'],1)
+ def test_prune_never_removes_booting_run(self):
+  run_dir=self.manager.root/'auto'/'cli-runs'/'booting';run_dir.mkdir(parents=True)
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager,prune=True)
+  self.assertTrue(run_dir.exists())
+  self.assertEqual(json.loads(out.getvalue())['pruned'],0)
+ def test_prune_survives_rmtree_errors(self):
+  run_dir,_=self.make_run('raceremoved',updated_at=time.time()-8*86400)
+  with patch('xswap_cli.shutil.rmtree',side_effect=FileNotFoundError),contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  self.assertTrue(run_dir.exists())
+  self.assertEqual(json.loads(out.getvalue())['pruned'],0)
  def test_prune_never_follows_symlink(self):
   target=self.base/'external-run';target.mkdir()
   (target/'status.json').write_text(json.dumps({'updatedAt':time.time()-30*86400}))
