@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "intellieffect-xswap"
+version = "0.4.0"
+description = "Account switching for Codex CLI, macOS desktop, and local OpenClaw"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Tools",
+]
+requires-python = ">=3.11"
+authors = [{name = "IntelliEffect"}]
+dependencies = ["websockets>=15,<18"]
+
+[project.scripts]
+xswap = "codex_swap:main"
+codex-swap = "codex_swap:main"
+xswap-proxy = "xswap_live:proxy_main"
+xswap-codex = "xswap_cli:codex_main"
+
+[project.urls]
+Repository = "https://github.com/intellieffect/xswap"
+
+[tool.setuptools]
+py-modules = ["codex_swap", "xswap_usage", "xswap_live", "xswap_cli", "xswap_plugins"]
+packages = ["xswap_bridge"]
+
+[tool.setuptools.package-data]
+xswap_bridge = ["*.mjs"]

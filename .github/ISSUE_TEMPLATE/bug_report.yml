@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible problem without private account data.
+body:
+  - type: markdown
+    attributes:
+      value: "Do not paste tokens, auth files, private account identifiers, or raw session logs. Report vulnerabilities privately using Security Advisories."
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: xswap, Codex, OS, and Python versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Commands with generic account names, expected behavior, and observed behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Review output for credentials, emails, local paths, and account IDs before submitting.
