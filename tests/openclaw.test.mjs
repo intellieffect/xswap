@@ -166,3 +166,37 @@ test('one expired credential in the pool blocks the whole sync before any write'
   assert.equal(f.writes(), 0);
   assert(!fs.existsSync(request.backupRoot));
 });
+
+test('a divergent second pooled credential blocks the whole credential write: the first one is never stored either, and no agent order changes', async t => {
+  const f = fixture(t);
+  const second = addAccount(f.root, 'second');
+  // Sync "second" alone first so its profile already exists in the shared store, then make it
+  // diverge (same expiry, different tokens) from what the next pooled sync would derive from
+  // its source auth.json. preferredCredential() throws on that divergence.
+  const onlySecond = await sync({ ...f.request, accounts: [{ name: 'second', codexHome: second.codexHome }] }, f.sdk, f.agentSdk, {});
+  f.shared().profiles[onlySecond.profileId].refresh = 'different-refresh';
+  const beforeProfiles = structuredClone(f.shared().profiles);
+  const beforeLocal = structuredClone(f.local);
+  const request = { ...f.request, accounts: [{ name: 'main', codexHome: f.request.codexHome }, { name: 'second', codexHome: second.codexHome }] };
+  await assert.rejects(sync(request, f.sdk, f.agentSdk, {}), /diverged/);
+  // "main" would have succeeded on its own, but it is never written because "second" (evaluated
+  // after it) failed validation first -- selections are resolved before any of them is assigned.
+  assert.deepEqual(f.shared().profiles, beforeProfiles);
+  assert.deepEqual(f.local, beforeLocal);
+});
+
+test('a failed sync marks its backup directory FAILED instead of deleting it or leaving it looking complete', async t => {
+  const f = fixture(t);
+  const original = f.sdk.updateAuthProfileStoreWithLock;
+  f.sdk.updateAuthProfileStoreWithLock = async params => {
+    if (!params.sharedStoreWrite && params.agentDir === 'worker') throw new Error('secret=fake-refresh');
+    return original(params);
+  };
+  const error = await sync(f.request, f.sdk, f.agentSdk, {}).catch(e => e);
+  assert.ok(error instanceof Error, error);
+  const match = error.message.match(/Backups: (\S+)\./);
+  assert.ok(match, error.message);
+  const backupDir = match[1];
+  assert.ok(fs.existsSync(path.join(backupDir, 'manifest.json')), 'backup is preserved, not deleted');
+  assert.ok(fs.existsSync(path.join(backupDir, 'FAILED')), 'a FAILED marker distinguishes it from a completed sync');
+});

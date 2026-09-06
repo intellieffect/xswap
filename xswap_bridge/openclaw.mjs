@@ -118,10 +118,16 @@ export async function sync(request, sdk, agentSdk, config) {
       agentDir: targets[0].agentDir, sharedStoreWrite: true,
       saveOptions: { filterExternalAuthProfiles: false, syncExternalCli: false },
       updater(store) {
-        for (const source of sources) {
-          const existing = store.profiles[source.profileId];
-          const selected = preferredCredential(source.credential, existing);
-          writeBackup(path.join(backup, `credential-${backupSlug(source.profileId)}.json`), { profileId: source.profileId, previous: existing ?? null });
+        // Resolve every pooled credential against the current store BEFORE mutating any of
+        // them: a divergence/type-mismatch on credential N must never leave credential N-1
+        // written. This does not rely on the SDK discarding a partially mutated snapshot on
+        // throw -- it never mutates `store` until every selection above has already succeeded.
+        const selections = sources.map(source => {
+          const existing = store.profiles[source.profileId] ?? null;
+          return { source, existing, selected: preferredCredential(source.credential, existing) };
+        });
+        for (const { source, existing, selected } of selections) {
+          writeBackup(path.join(backup, `credential-${backupSlug(source.profileId)}.json`), { profileId: source.profileId, previous: existing });
           store.profiles[source.profileId] = selected;
         }
         return true;
@@ -151,8 +157,15 @@ export async function sync(request, sdk, agentSdk, config) {
     }
     return result;
   } catch (error) {
-    // Preserve honest partial state and a recovery point instead of undoing a concurrent token refresh.
+    // Preserve honest partial state and a recovery point instead of undoing a concurrent token
+    // refresh: the backup directory is never deleted on failure. Instead, mark it FAILED so a
+    // partial backup (some credential-*.json/agent-*.json files, but not a completed sync) is
+    // never mistaken for a clean recovery point.
     const detail = error instanceof BridgeError ? error.message : 'SDK or backup write failed; check storage permissions and free space, then retry.';
+    try {
+      const marker = path.join(backup, 'FAILED');
+      if (!fs.existsSync(marker)) writeBackup(marker, { reason: detail, completed: result.completed });
+    } catch { /* best effort; the thrown BridgeError below already reports the failure */ }
     throw new BridgeError(`OpenClaw sync incomplete (${result.completed.length}/${ids.length} agents). Backups: ${backup}. ${detail}`);
   }
 }

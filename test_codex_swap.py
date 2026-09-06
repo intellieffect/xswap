@@ -282,8 +282,10 @@ class AccountTests(unittest.TestCase):
         executable = self.bridge_installation()
         result = {"completed": ["main", "worker"], "backup": "/example/backup", "profileIds": ["p-main", "p-second"], "profileId": "p-main"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        # This fixture's tokens are opaque (not JWT-shaped), so the organization is genuinely
+        # undeterminable; --allow-mixed sidesteps that guard since this test is about request shape.
         with patch("codex_swap.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses) as run, contextlib.redirect_stdout(io.StringIO()):
-            self.manager.sync_openclaw(["main", "second"])
+            self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
         request = json.loads(run.call_args_list[0].kwargs["input"])
         # Single-account callers still see "account"/"codexHome" for the first pool member.
         self.assertEqual(request["account"], "main")
@@ -682,6 +684,10 @@ class ParsePoolTests(unittest.TestCase):
         from codex_swap import parse_pool
         self.assertEqual(parse_pool("main, work ,main"), ["main", "work"])
 
+    def test_accepts_a_pre_split_list_too(self):
+        from codex_swap import parse_pool
+        self.assertEqual(parse_pool(["main", "work", "main"]), ["main", "work"])
+
     def test_fewer_than_two_distinct_names_raises(self):
         from codex_swap import parse_pool
         with self.assertRaisesRegex(SwapError, "at least two"):
@@ -731,6 +737,11 @@ class OpenclawPoolCliTests(unittest.TestCase):
         code, _, err = self.run_main(["use", "main", "--openclaw"])
         self.assertEqual(code, 1)
         self.assertIn("OpenClaw sync requires openclaw and node in PATH.", err)
+
+    def test_allow_mixed_without_pool_is_rejected(self):
+        code, _, err = self.run_main(["openclaw", "main", "--allow-mixed"])
+        self.assertEqual(code, 1)
+        self.assertIn("--allow-mixed requires --pool", err)
 
 
 def _unsigned_jwt(claims):
@@ -784,6 +795,31 @@ class SameOrgGuardTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         request = json.loads(run.call_args_list[0].kwargs["input"])
         self.assertEqual([a["name"] for a in request["accounts"]], ["main", "second"])
+
+    def _opaque_account_home(self, label):
+        # No decodable https://api.openai.com/auth claim anywhere (not even a JWT shape):
+        # the organization is genuinely undeterminable, not just absent from one token.
+        home = self.base / label
+        home.mkdir()
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": "opaque-not-a-jwt", "refresh_token": "fake-refresh"}})
+        return home
+
+    def test_unverifiable_organization_fails_closed_without_allow_mixed(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._opaque_account_home("second"))
+        with self.assertRaisesRegex(SwapError, "cannot verify the ChatGPT organization for account second"):
+            self.manager.sync_openclaw(["main", "second"])
+
+    def test_allow_mixed_bypasses_an_unverifiable_organization(self):
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        self.manager.register("second", self._opaque_account_home("second"))
+        package = self.base / "openclaw"; package.mkdir()
+        (package / "package.json").write_text('{"name":"openclaw"}')
+        executable = package / "openclaw.mjs"; executable.touch()
+        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+        with patch("codex_swap.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+            self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
 
 
 if __name__ == "__main__":

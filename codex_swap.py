@@ -97,10 +97,12 @@ def resolve_openclaw_package_root(executable):
     return None
 
 
-def parse_pool(text):
+def parse_pool(value):
+    """Split "a, b,a" (or dedupe an already-split list) into >=2 distinct, ordered names."""
+    parts = value.split(",") if isinstance(value, str) else value
     seen = []
-    for part in text.split(","):
-        part = part.strip()
+    for part in parts:
+        part = part.strip() if isinstance(part, str) else part
         if part and part not in seen:
             seen.append(part)
     if len(seen) < 2:
@@ -108,22 +110,27 @@ def parse_pool(text):
     return seen
 
 
-def chatgpt_org_id(home):
-    """Best-effort, unverified org id from a local credential; None if unreadable/unknown."""
+def chatgpt_org_id(home, name):
+    """Unverified org id from a local credential, for the same-organization pool guard.
+
+    Checked access_token first, then id_token, matching xswap_live.load_credentials'
+    claim precedence. Fails closed: raises SwapError instead of returning None/unknown,
+    because an undeterminable organization must never be treated as matching another
+    account's organization (that would silently let mismatched orgs share one pool).
+    """
     try:
         data = read_auth(home)
+        tokens = data.get("tokens")
+        if isinstance(tokens, dict):
+            for key in ("access_token", "id_token"):
+                token = tokens.get(key)
+                if isinstance(token, str) and token:
+                    auth = jwt_claims(token).get("https://api.openai.com/auth")
+                    if isinstance(auth, dict) and auth.get("chatgpt_account_id"):
+                        return auth["chatgpt_account_id"]
     except CredentialError:
-        return None
-    tokens = data.get("tokens")
-    if not isinstance(tokens, dict):
-        return None
-    for key in ("id_token", "access_token"):
-        token = tokens.get(key)
-        if isinstance(token, str) and token:
-            auth = jwt_claims(token).get("https://api.openai.com/auth")
-            if isinstance(auth, dict) and auth.get("chatgpt_account_id"):
-                return auth["chatgpt_account_id"]
-    return None
+        pass
+    raise SwapError(f"cannot verify the ChatGPT organization for account {name}; run xswap login {name} or pass --allow-mixed.")
 
 
 def identity(home):
@@ -504,15 +511,7 @@ class Manager:
         # Directory mappings scope a single launched session; OpenClaw sync mutates
         # shared agent state, so an omitted/pooled name must resolve through the
         # active account only, never a directory mapping.
-        pool = names if isinstance(names, list) else [names]
-        if isinstance(names, list):
-            deduped = []
-            for entry in pool:
-                if entry not in deduped:
-                    deduped.append(entry)
-            if len(deduped) < 2:
-                raise SwapError("--pool needs at least two distinct registered account names.")
-            pool = deduped
+        pool = parse_pool(names) if isinstance(names, list) else [names]
         resolved = []
         for entry in pool:
             entry_name, entry_home = self.account(entry, mapped=False)
@@ -522,9 +521,8 @@ class Manager:
         if len(resolved) > 1 and not allow_mixed:
             groups = {}
             for entry_name, entry_home in resolved:
-                org = chatgpt_org_id(entry_home)
-                if org:
-                    groups.setdefault(org, []).append(entry_name)
+                org = chatgpt_org_id(entry_home, entry_name)
+                groups.setdefault(org, []).append(entry_name)
             if len(groups) > 1:
                 pretty = ", ".join("[" + ", ".join(names_in_group) + "]" for names_in_group in groups.values())
                 raise SwapError(f"Pooled accounts belong to different ChatGPT organizations: {pretty}. OpenClaw shares one agent's conversation context across whatever it selects from the pool, so mixing organizations mixes their context across accounts. Pass --allow-mixed to override.")
@@ -909,6 +907,8 @@ def main(argv=None):
         elif args.command == "openclaw":
             if args.pool and args.name:
                 raise SwapError("--pool and a positional NAME are mutually exclusive.")
+            if args.allow_mixed and not args.pool:
+                raise SwapError("--allow-mixed requires --pool.")
             names = parse_pool(args.pool) if args.pool else args.name
             manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
         else:
