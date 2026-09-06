@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import plistlib
+import shlex
 import stat
 import subprocess
 import sys
@@ -49,7 +50,18 @@ class ValidationTests(unittest.TestCase):
     def test_every_rejects_below_one_minute(self):
         with self.assertRaises(AlertError):
             validate_every(0)
-        self.assertEqual(validate_every(1), 1.0)
+        self.assertEqual(validate_every(1), 1)
+
+    def test_every_returns_int_and_rejects_fractional_minutes(self):
+        # A fractional --every would make the crontab fallback's `*/N` output diverge
+        # from the plist's exact StartInterval = every * 60; reject it instead of
+        # silently rounding or truncating either side.
+        self.assertEqual(validate_every(30), 30)
+        self.assertIsInstance(validate_every(30), int)
+        with self.assertRaises(AlertError):
+            validate_every(1.5)
+        with self.assertRaises(AlertError):
+            validate_every("2.5")
 
     def test_cached_rejects_negative_but_allows_zero(self):
         with self.assertRaises(AlertError):
@@ -67,10 +79,16 @@ class ResolveXswapTests(unittest.TestCase):
             with patch("xswap_alert.shutil.which", return_value=str(link)):
                 self.assertEqual(resolve_xswap(), str(target.resolve()))
 
-    def test_falls_back_to_argv0(self):
+    def test_falls_back_to_argv0_only_when_it_is_named_xswap(self):
+        with patch("xswap_alert.shutil.which", return_value=None), \
+             patch.object(sys, "argv", ["/some/dir/xswap"]):
+            self.assertEqual(resolve_xswap(), str(Path("/some/dir/xswap").resolve()))
+
+    def test_raises_when_not_found_and_argv0_is_not_named_xswap(self):
         with patch("xswap_alert.shutil.which", return_value=None), \
              patch.object(sys, "argv", ["/some/dir/codex_swap.py"]):
-            self.assertEqual(resolve_xswap(), str(Path("/some/dir/codex_swap.py").resolve()))
+            with self.assertRaisesRegex(AlertError, "Could not find"):
+                resolve_xswap()
 
 
 class PlistTests(unittest.TestCase):
@@ -129,7 +147,11 @@ class RunScriptTests(unittest.TestCase):
 
     def test_contains_absolute_xswap_path(self):
         script = render_run_script("/abs/path/to/xswap", warn=15, cached=600, log=self.dir / "last.log")
-        self.assertIn('"/abs/path/to/xswap" list --warn 15 --cached 600', script)
+        # Passed through shlex.quote(), not interpolated raw into a double-quoted shell
+        # string: see CommandInjectionRegressionTests for why the latter is unsafe. A
+        # "boring" path like this one has no characters shlex.quote() needs to escape,
+        # so it comes through byte-for-byte (still shell-safe either way).
+        self.assertIn(shlex.quote("/abs/path/to/xswap") + " list --warn 15 --cached 600", script)
 
     def test_escapes_quote_and_backslash_in_notification(self):
         warn_line = 'warn: work codex 5h 3% left (resets in 2h) has a "quote" and a \\backslash\\'
@@ -182,6 +204,109 @@ class RunScriptTests(unittest.TestCase):
 
         self.run_script(script_path, self.dir)
         self.assertNotIn("stale content", log.read_text())
+
+
+class CommandInjectionRegressionTests(unittest.TestCase):
+    """render_run_script() used to interpolate install-time paths (the resolved xswap
+    binary, and the log path derived from CODEX_SWAP_HOME) into DOUBLE-quoted shell
+    strings via plain str.replace(). Double quotes do not neutralise `$(...)` or
+    backticks, so a path containing either was live shell syntax the moment run.sh was
+    parsed -- and since launchd re-runs run.sh unattended forever, that was a persistent
+    RCE primitive. The fix wraps both values in shlex.quote() (POSIX single quotes).
+    These tests render with a path containing $(...), backticks, a double quote, a
+    single quote, a space, and a backslash, then actually execute the script and assert
+    nothing outside the intended files was ever touched.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.marker_subshell = self.dir / "REAL_PWNED_SUBSHELL"
+        self.marker_backtick = self.dir / "REAL_PWNED_BACKTICK"
+        # One path component carrying every dangerous character in one go: command
+        # substitution, backticks, a double quote, a single quote, a space, a backslash.
+        self.evil_component = (
+            "evil$(touch " + self.marker_subshell.name + ")"
+            "`touch " + self.marker_backtick.name + "`"
+            '"double" \'single\' back\\slash and space'
+        )
+
+    def write_fake_xswap(self, path, exit_code, warn_lines):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "#!/bin/sh\n"
+        for line in warn_lines:
+            body += f"printf '%s\\n' {shlex.quote(line)} 1>&2\n"
+        body += f"exit {exit_code}\n"
+        path.write_text(body)
+        path.chmod(0o700)
+
+    def write_fake_osascript(self, bin_dir):
+        fake = bin_dir / "osascript"
+        record = bin_dir / "osascript-calls.log"
+        fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$2\" >> {shlex.quote(str(record))}\n")
+        fake.chmod(0o700)
+        return record
+
+    def run_script(self, script_path, bin_dir, cwd):
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        return subprocess.run(["/bin/sh", str(script_path)], env=env, cwd=str(cwd),
+                               capture_output=True, text=True, timeout=10)
+
+    def test_malicious_xswap_and_log_paths_are_not_shell_interpreted(self):
+        bin_dir = self.dir / "safe-bin"
+        bin_dir.mkdir()
+        record = self.write_fake_osascript(bin_dir)
+
+        evil_dir = self.dir / self.evil_component
+        xswap_bin = evil_dir / "xswap"
+        self.write_fake_xswap(xswap_bin, exit_code=3, warn_lines=["warn: work codex 5h 3% left"])
+        log = evil_dir / "last.log"  # evil_dir already exists: write_fake_xswap created it
+
+        script_text = render_run_script(str(xswap_bin), warn=15, cached=600, log=log)
+        script_path = self.dir / "run.sh"
+        script_path.write_text(script_text)
+        script_path.chmod(0o700)
+
+        # Run with cwd=self.dir: if $(...) or backticks in the path were actually
+        # executed by the shell, `touch <relative-name>` would land right here.
+        result = self.run_script(script_path, bin_dir, cwd=self.dir)
+
+        self.assertFalse(self.marker_subshell.exists(),
+                          "command substitution $(...) in an interpolated path was executed")
+        self.assertFalse(self.marker_backtick.exists(),
+                          "backtick command substitution in an interpolated path was executed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # The script still worked correctly end-to-end with the (safely quoted) exotic path.
+        self.assertTrue(log.exists())
+        log_text = log.read_text()
+        self.assertIn("exited 3", log_text)
+        self.assertTrue(record.exists())
+        self.assertEqual(record.read_text().strip("\n"),
+                          'display notification "work codex 5h 3% left" with title "xswap"')
+
+    def test_malicious_path_alone_with_no_warn_output_still_runs_cleanly(self):
+        bin_dir = self.dir / "safe-bin"
+        bin_dir.mkdir()
+        self.write_fake_osascript(bin_dir)
+
+        evil_dir = self.dir / self.evil_component
+        xswap_bin = evil_dir / "xswap"
+        self.write_fake_xswap(xswap_bin, exit_code=0, warn_lines=[])
+        log = evil_dir / "last.log"
+
+        script_path = self.dir / "run.sh"
+        script_path.write_text(render_run_script(str(xswap_bin), warn=15, cached=600, log=log))
+        script_path.chmod(0o700)
+
+        result = self.run_script(script_path, bin_dir, cwd=self.dir)
+
+        self.assertFalse(self.marker_subshell.exists())
+        self.assertFalse(self.marker_backtick.exists())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("exited 0", log.read_text())
 
 
 class InstallUninstallStatusTests(unittest.TestCase):
@@ -322,13 +447,17 @@ class NonDarwinTests(unittest.TestCase):
         platform_patch = patch("xswap_alert.sys.platform", "linux")
         platform_patch.start()
         self.addCleanup(platform_patch.stop)
+        # Deterministic regardless of what's actually on this test runner's PATH.
+        which_patch = patch("xswap_alert.shutil.which", return_value="/usr/local/bin/xswap")
+        which_patch.start()
+        self.addCleanup(which_patch.stop)
 
     def test_install_prints_crontab_line_and_exits_2_without_writing(self):
         with patch("xswap_alert.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as out:
-            code = install(self.root)
+            code = install(self.root, every=45)
         self.assertEqual(code, 2)
         run.assert_not_called()
-        self.assertIn("*", out.getvalue())
+        self.assertIn("*/45 * * * *", out.getvalue())
         self.assertIn("list --warn", out.getvalue())
         self.assertFalse((self.home / "Library").exists())
         self.assertFalse(alert_dir(self.root).exists())

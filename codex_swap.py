@@ -877,7 +877,7 @@ def parser():
     al.add_argument("--status", action="store_true", help="Show whether the job is installed and loaded, and the last log tail")
     al.add_argument("--dry-run", action="store_true", help="Print what --install/--uninstall would do without changing anything")
     al.add_argument("--warn", type=float, default=15, metavar="PCT", help="Threshold passed to `list --warn` (1-100, default 15)")
-    al.add_argument("--every", type=float, default=30, metavar="MINUTES", help="Polling interval in minutes (default 30; launchd merges under 60s)")
+    al.add_argument("--every", type=int, default=30, metavar="MINUTES", help="Polling interval in whole minutes (default 30; launchd merges under 60s)")
     al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name", nargs="?")
