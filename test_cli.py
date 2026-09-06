@@ -147,3 +147,17 @@ class ResumeHomeTests(TestCase):
   home=self.manager.prepare('other');self.saved(home)
   runtime=self.manager.root/'auto'/'cli-codex'
   self.assertEqual(resume_home(self.manager,['fork',self.session_id],runtime),home)
+
+class GlobalSelectionTests(TestCase):
+ setUp = CliTests.setUp
+ setup_pool = CliTests.setup_pool
+ def test_use_updates_new_session_pool_and_preserves_settings(self):
+  from codex_swap import atomic_json
+  self.setup_pool()
+  atomic_json(self.manager.root/'auto.json', {'enabled':True, 'accounts':['second'], 'weeklyRemainingThreshold':10})
+  self.manager.use('main')
+  settings=read_settings(self.manager)
+  self.assertEqual(settings['accounts'], ['main','second'])
+  self.assertEqual(settings['weeklyRemainingThreshold'],10)
+  self.manager.use('main')
+  self.assertEqual(read_settings(self.manager)['accounts'], ['main','second'])

@@ -277,3 +277,9 @@ When an auto-mode CLI exits, use the final xswap resume command printed below Co
 Earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
 
 The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After upgrading, restart existing CLI sessions once to load the updated bridge.
+
+Automatic CLI session pickers omit conversations locked by another writer. Explicit UUID resumes stop before starting the TUI if that conversation is still open elsewhere. Return to its existing window or close that session before resuming. Writer locks are never deleted. Reconnect hints use only conversation IDs with saved rollouts.
+
+CLI bridge status events are recorded for `xswap auto-status` without writing into the active TUI. Connection-failure diagnostics are printed after the TUI exits.
+
+`xswap switch NAME` / `use NAME` also puts NAME first in the enabled automatic-mode pool, so new automatic CLI/app sessions follow the selection. Existing compatible bridges apply it when idle; active turns defer it. `--default-only` updates future launches without broadcasting.

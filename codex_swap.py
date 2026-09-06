@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 
 class SwapError(Exception):
@@ -320,6 +320,13 @@ class Manager:
             if identity(home) in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
             data = self.read()
+            # New automatic CLI/app sessions must follow the same selection as
+            # the live-switch broadcast, even when it was outside the old pool.
+            from xswap_cli import read_settings
+            settings = read_settings(self)
+            if settings.get('enabled'):
+                settings['accounts'] = list(dict.fromkeys([name, *settings.get('accounts', [])]))
+                atomic_json(self.root / 'auto.json', settings)
             data["active"] = name
             atomic_json(self.registry, data)
         return home

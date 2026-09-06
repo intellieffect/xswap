@@ -38,7 +38,7 @@ def main():
   master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
   real=os.environ.get('XSWAP_SMOKE_CODEX',os.path.expanduser('~/.codex/packages/standalone/current/bin/codex'))
   process=subprocess.Popen([sys.executable,__file__,'--runner',tmp,real],stdin=slave,stdout=slave,stderr=slave,start_new_session=True);os.close(slave)
-  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None;picker_done=False;picker_opened_at=0
+  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None;picker_done=False;picker_opened_at=0;manual_done=False
   try:
    while time.monotonic()-started<60:
     if select.select([master],[],[],.1)[0]:
@@ -60,6 +60,13 @@ def main():
     completed=sum(e['message'].get('method')=='turn/completed' and e['message']['params']['turn']['status']=='completed' and e['message']['params'].get('threadId')==main_tid for e in events)
     if stage==0 and home.joinpath('status.json').exists() and time.monotonic()-started>4:
      os.write(master,b'\x1b[200~first turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=1;sent_at=time.monotonic()
+    elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_MANUAL')=='1' and not manual_done:
+     state=json.loads(home.joinpath('status.json').read_text())
+     from codex_swap import atomic_json
+     atomic_json(home/'switch.json', {'instance':state['bridgeInstance'],'id':'fixture-manual-switch','account':'second'})
+     stage=12
+    elif stage==12 and json.loads(home.joinpath('status.json').read_text()).get('manualState')=='applied':
+     manual_done=True;stage=1
     elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_PICKER')=='1' and not picker_done:
      time.sleep(1);os.write(master,b'/resume');time.sleep(.3);os.write(master,b'\r');stage=10;picker_opened_at=time.monotonic()
     elif stage==10 and b'Resume a previous session' in output and time.monotonic()-picker_opened_at>3:
@@ -73,13 +80,14 @@ def main():
      time.sleep(2);os.write(master,b'\x1b[200~third turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=3
     elif stage==3 and completed>=3:
      assert process.poll() is None
+     assert b'xswap auto:' not in output, 'bridge log corrupted the active TUI'
      if browser_fixture:
       asyncio.run(assert_browser_setup(home,browser_fixture))
       print('PASS: actual browser runtime setup before and after CLI account switch')
      assert len(pids)==1 and len(tids)==1 and len(cli_pids)==1,(pids,tids,cli_pids)
      os.kill(next(iter(cli_pids)),0)
      first_second=any(c['account']=='first' and 'second turn' in json.dumps(c['body'].get('input',[])) for c in calls)
-     assert first_second == (os.environ.get('XSWAP_TEST_RESERVE')!='1')
+     assert first_second == (os.environ.get('XSWAP_TEST_RESERVE')!='1' and os.environ.get('XSWAP_TEST_MANUAL')!='1')
      assert any(c['account']=='second' and 'second turn' in json.dumps(c['body'].get('input',[])) for c in calls)
      assert not home.joinpath('auth.json').exists()
      os.write(master,b'\x03');time.sleep(.3);os.write(master,b'\x03');stage=4
@@ -89,6 +97,9 @@ def main():
     print(output.decode(errors='replace')[-2500:]);raise AssertionError(f'TUI failed: stage={stage}, calls={len(calls)}, completed={completed}')
    try:process.wait(timeout=10)
    except subprocess.TimeoutExpired:raise AssertionError('TUI/bridge did not shut down cleanly')
+   if os.environ.get('XSWAP_TEST_MANUAL')=='1':
+    assert manual_done
+    print('PASS: manual account switch acknowledged, subsequent turns complete, no bridge stderr in TUI')
    if os.environ.get('XSWAP_TEST_PICKER')=='1':
     assert picker_done
     print('PASS: /resume picker opens, resumes the saved session, and subsequent turns complete')

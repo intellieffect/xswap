@@ -39,7 +39,8 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.remember_thread(self.thread)
         self.bridge.current = 'outside'
         env = {'CODEX_HOME': '/tmp/original home', 'OPENAI_API_KEY': 'do-not-print'}
-        command = reconnect_command(pool, env, self.bridge)
+        with patch('xswap_cli.saved_thread', return_value=True):
+            command = reconnect_command(pool, env, self.bridge)
         self.assertEqual(shlex.split(command), ['env',
             'CODEX_SWAP_HOME=/tmp/store with spaces;$(touch nope)',
             'CODEX_HOME=/tmp/original home', 'xswap', 'run', '--auto',
@@ -49,3 +50,19 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
 
     def test_no_hint_before_a_conversation_is_known(self):
         self.assertIsNone(reconnect_command(Pool(), {}, self.bridge))
+
+    def test_hint_ignores_unsaved_bootstrap_thread(self):
+        pool = Pool()
+        pool.manager = SimpleNamespace(root=Path('/tmp/store'))
+        self.bridge.remember_thread(self.thread)
+        self.bridge.remember_thread('00000000-0000-4000-8000-000000000002')
+        with patch('xswap_cli.saved_thread', side_effect=lambda home, tid: tid == self.thread):
+            command = reconnect_command(pool, {'CODEX_HOME': '/tmp/home'}, self.bridge)
+        self.assertEqual(shlex.split(command)[-1], self.thread)
+
+    def test_no_hint_for_unsaved_thread(self):
+        pool = Pool()
+        pool.manager = SimpleNamespace(root=Path('/tmp/store'))
+        self.bridge.remember_thread(self.thread)
+        with patch('xswap_cli.saved_thread', return_value=False):
+            self.assertIsNone(reconnect_command(pool, {'CODEX_HOME': '/tmp/home'}, self.bridge))

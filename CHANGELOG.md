@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.2
+
+- Keep account-switch status logs out of the active Codex TUI; status remains available through `xswap auto-status`.
+- Apply `switch`/`use` selections to the enabled automatic-mode pool so new CLI/app sessions start with the selected account, including accounts outside the previous pool.
+- Omit conversations held by other writers from resume lists and reject explicit locked UUID resumes before TUI startup, without deleting locks or interrupting their owners.
+- Only print reconnect hints for saved conversation IDs. Reopen existing CLI sessions once after updating to load the new bridge.
+
 ## 0.7.1
 
 - Fix the in-session `/resume` picker in automatic CLI mode by sharing the running app server through isolated browsing connections. Preserve the main TUI, conversation, and account switching.
