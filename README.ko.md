@@ -18,6 +18,15 @@ xswap --version
 ## 처음 사용하기
 
 ```sh
+codex login   # 아직 로그인하지 않았다면 먼저 실행
+xswap init    # 그 로그인을 등록하고, 계정을 추가로 물어보고, 자동 전환·정책을 설정한 뒤 doctor까지 실행
+```
+
+`xswap init`은 아래 네 단계를 대신 실행하는 얇은 마법사입니다: 현재 `codex login`이 아직 등록되지 않았다면 `main`으로 등록하고, 계정을 추가로 등록할지 물어보고(빈 값이면 건너뜀), 계정이 2개 이상이면 `auto-enable --wrap-codex`를 제안하고, `auto-policy --weekly-remaining 10`을 제안한 뒤 마지막으로 `xswap doctor`를 실행합니다. 각 단계는 건너뛸 수 있고 다시 실행해도 안전합니다. `--yes`를 주면 아무것도 묻지 않고 안전한 기본값만 적용하며(등록 대상이 있으면 `main`으로 등록, 계정 추가는 생략, 자동 전환은 켜지 않음), `--no-auto`는 자동 전환 단계를 건너뛰고, `--weekly-remaining PCT`는 정책 기본값을 덮어씁니다.
+
+또는 네 단계를 직접 실행할 수도 있습니다.
+
+```sh
 xswap register main       # 현재 Codex 로그인 등록
 xswap add work --use      # 브라우저에서 추가 OpenAI 계정으로 로그인하고 바로 선택
 xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
