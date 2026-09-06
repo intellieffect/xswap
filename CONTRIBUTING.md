@@ -33,7 +33,6 @@ XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
 ```sh
 uv run python tests/plugin_runtime_smoke.py
 XSWAP_TEST_BROWSER=1 XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
-XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
 ```
 
 These setup checks do not validate a live browser backend or page navigation. Tests must never redistribute provider binaries/plugins or use actual credentials as fixtures.
