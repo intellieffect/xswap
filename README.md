@@ -23,6 +23,15 @@ If the command isn't found, run `uv tool update-shell` and open a new terminal. 
 
 ```sh
 codex login                 # Skip if already signed in
+xswap init                  # Register that login, optionally add more accounts, enable auto mode, then run doctor
+```
+
+`xswap init` is a thin wizard over the commands below: it registers your existing `codex login` as `main` if it isn't registered yet, asks whether to add another account (blank to skip), offers `auto-enable --wrap-codex` once at least two accounts exist, offers `auto-policy --weekly-remaining 10`, and finishes by running `xswap doctor`. Each step is skippable and safe to run again. Add `--yes` to accept every safe default without prompting (registers `main` if eligible, adds no accounts, leaves auto mode off); `--no-auto` skips the automatic-switching step, and `--weekly-remaining PCT` overrides the policy default.
+
+Or run the four steps by hand:
+
+```sh
+codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
 xswap add work --use        # Sign in to a separate local profile and select it
 xswap login work            # Re-authenticate work after its login expires

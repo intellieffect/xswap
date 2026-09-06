@@ -214,7 +214,9 @@ class Manager:
         data = self.read()
         name = name or (self.default_account() if mapped else data["active"])
         if name not in data["accounts"]:
-            raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
+            # ASCII-only hint text: some terminals/log pipelines mangle non-ASCII dashes.
+            hint = " -- no accounts yet -- run xswap init" if not data["accounts"] else ""
+            raise SwapError(f"No matching account. Run: xswap register main, or xswap add NAME{hint}")
         return name, Path(data["accounts"][name]["home"])
 
     def _best_mapping(self, data, cwd=None):
@@ -736,6 +738,10 @@ def parser():
     p = argparse.ArgumentParser(description="Codex account switcher for CLI + macOS desktop. Bare xswap opens the selected CLI account.")
     p.add_argument("--version", action="version", version=f"xswap {__version__}")
     sub = p.add_subparsers(dest="command")
+    ini = sub.add_parser("init", help="First-run setup: register, add accounts, enable auto mode, set policy, then doctor")
+    ini.add_argument("--yes", action="store_true", help="Non-interactive: accept every safe default, prompt for nothing")
+    ini.add_argument("--no-auto", action="store_true", dest="no_auto", help="Skip the automatic-switching step")
+    ini.add_argument("--weekly-remaining", type=float, help="Weekly remaining percentage for auto-policy (default 10)")
     r = sub.add_parser("register", help="Register an existing signed-in Codex home without copying its tokens")
     r.add_argument("name"); r.add_argument("--home", type=Path)
     a = sub.add_parser("add", help="Sign in to an isolated account home")
@@ -824,7 +830,10 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         manager = Manager()
-        if args.command == "register":
+        if args.command == "init":
+            from xswap_init import run_init
+            return run_init(manager, args)
+        elif args.command == "register":
             home = manager.register(args.name, args.home)
             print(f"Registered {args.name}: {identity(home)}. Credentials stay at {home}.")
         elif args.command == "add":
