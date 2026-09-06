@@ -26,6 +26,7 @@ codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
 xswap add work              # Sign in to a separate local profile
 xswap use work
+xswap login work            # Re-authenticate work after its login expires
 xswap                       # Launch the selected account's CLI
 ```
 

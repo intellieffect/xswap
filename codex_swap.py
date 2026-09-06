@@ -303,6 +303,15 @@ class Manager:
         print(f"OpenClaw now selects {name} for {len(output['completed'])} agents; Gateway auth reloaded.\nBackup: {output['backup']}")
         return output
 
+    def login(self, name, device_auth=False):
+        name, home = self.account(name)
+        check_file_store(home)
+        command = [self.codex(), "login"] + (["--device-auth"] if device_auth else [])
+        result = subprocess.call(command, env=self.env(home))
+        if not result:
+            print(f"Signed in {name}: {identity(home)}")
+        return result
+
     def launch_cli(self, name, args, dry=False):
         from xswap_cli import read_settings, interactive_args, launch_cli
         settings = read_settings(self)
@@ -396,6 +405,8 @@ def parser():
     a = sub.add_parser("add", help="Sign in to an isolated account home")
     a.add_argument("name"); a.add_argument("--device-auth", action="store_true")
     a.add_argument("--prepare-only", action="store_true")
+    lg = sub.add_parser("login", help="Re-authenticate a registered account whose login expired")
+    lg.add_argument("name"); lg.add_argument("--device-auth", action="store_true")
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
     listing.add_argument("--offline", action="store_true", help="Show local account labels without fetching usage")
     listing.add_argument("--json", action="store_true", dest="json_output")
@@ -447,12 +458,14 @@ def main(argv=None):
                 print(f"Prepared {args.name}. Sign in: xswap add {args.name}")
                 return 0
             if identity(home) not in ("not signed in", "unreadable auth cache"):
-                raise SwapError(f"{args.name} already has a login. Use a new name to add another account.")
+                raise SwapError(f"{args.name} already has a login. Re-authenticate with: xswap login {args.name}")
             command = [manager.codex(), "login"] + (["--device-auth"] if args.device_auth else [])
             result = subprocess.call(command, env=manager.env(home))
             if result:
                 return result
             print(f"Saved {args.name}: {identity(home)}. Select it: xswap use {args.name}")
+        elif args.command == "login":
+            return manager.login(args.name, args.device_auth)
         elif args.command == "list":
             manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark)
         elif args.command == "usage":
