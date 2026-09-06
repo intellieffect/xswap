@@ -156,6 +156,18 @@ OpenClaw 연결은 다음을 수행합니다.
 
 백업 경로를 바꾸려면 `xswap openclaw work --backup-dir /path/to/private-backups`를 사용하십시오. 전체 미디어·대화 DB를 백업하지 않습니다.
 
+### 죽은 OpenClaw 쿨다운
+
+OpenClaw는 429 한 번이면 해당 시각 기준 한도 초기화 시점까지 OpenAI 인증 프로필을 잠그고, 그 창이 끝나기 전에는 다시 확인하지 않습니다. 실제 한도가 그보다 먼저 풀려도(플랜 업그레이드, 상위에서의 수동 초기화 등) 프로필은 그대로 잠겨 있습니다 — 증상은 `xswap list`에서 `openai usage: 100% left`인데 `openclaw models status`에는 `[cooldown 6d]`가 나란히 뜨는 것입니다. `xswap doctor`는 이를 `이름: openclaw cooldown` 항목으로 보고합니다: 쿨다운 중인데 xswap 자체 사용량 캐시에 실제 잔여량이 보이면 `FAIL`, 쿨다운 중이지만 잔여량을 로컬에서 알 수 없으면 `WARN`이며, 비활성화된 계정은 절대 실패로 표시하지 않습니다.
+
+```sh
+xswap openclaw 이름 --clear-cooldown --dry-run
+xswap openclaw 이름 --clear-cooldown
+xswap openclaw --pool a,b --clear-cooldown --yes
+```
+
+로컬 Gateway를 멈추고(`openclaw gateway stop --force`) 상태 DB를 비공개로 백업한 뒤, 지정한 계정(들)의 — NAME/`--pool`을 생략하면 등록된 모든 계정의 — 죽은 `blockedUntil`/`blockedReason`/`blockedSource` 키만 지우고 오류 횟수를 0으로 되돌린 다음 Gateway를 다시 시작합니다. Gateway 정지가 실패하면 아무것도 쓰지 않고 중단하며, `--dry-run`은 지울 항목만 보여줄 뿐 Gateway도 DB도 건드리지 않습니다.
+
 ## 자주 쓰는 명령
 
 | 명령 | 동작 |

@@ -207,6 +207,18 @@ This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, sel
 
 `--pool a,b,c` (two or more distinct registered names; mutually exclusive with a positional NAME) copies every listed account's credentials into OpenClaw and sets each target agent's OpenAI auth order to the given pool, in that order. OpenClaw then rotates within that order on its own cooldowns (`resolveAuthProfileOrder`, `isProfileInCooldown`, `markAuthProfileFailure`/`markAuthProfileCooldown`) — no human has to run `xswap openclaw other` to bring a rate-limited bot back. Because a pooled agent shares one conversation/task context across whichever account it is currently using, pooling only makes sense for accounts that may see each other's context; sync refuses to pool accounts from different ChatGPT organizations unless you pass `--allow-mixed`. If an account's organization can't even be determined (unreadable credential, no decodable claim), the pool is refused the same way an actual mismatch would be refused — an unknown organization is never treated as a match.
 
+### Stale OpenClaw cooldown
+
+OpenClaw blocks an OpenAI auth profile for the rest of its rate-limit window after a single 429, and never re-checks it before that window ends. If the underlying limit actually clears earlier (a plan upgrade, a manual reset upstream), the profile stays locked out anyway — the symptom is `openai usage: 100% left` in `xswap list` sitting next to `[cooldown 6d]` in `openclaw models status`. `xswap doctor` reports this as a `NAME: openclaw cooldown` check: `FAIL` when the cooldown is active but xswap's own usage cache shows real quota remaining, `WARN` when it's in cooldown but the remaining amount isn't known locally, and it never fails a disabled account.
+
+```sh
+xswap openclaw NAME --clear-cooldown --dry-run
+xswap openclaw NAME --clear-cooldown
+xswap openclaw --pool a,b --clear-cooldown --yes
+```
+
+This stops the local Gateway (`openclaw gateway stop --force`), backs up its state database privately, clears only the stale `blockedUntil`/`blockedReason`/`blockedSource` keys (resetting the error count to 0) for the named account(s) — or every registered account when NAME/`--pool` is omitted — and starts the Gateway again. A failed Gateway stop aborts before anything is written; `--dry-run` only lists what would be cleared and never touches the Gateway or the database.
+
 ## Update or uninstall
 
 ```sh
