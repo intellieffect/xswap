@@ -27,6 +27,7 @@ xswap register main         # Reference the current login without copying it
 xswap add work              # Sign in to a separate local profile
 xswap use work
 xswap                       # Launch the selected account's CLI
+xswap login work            # Re-authenticate work after its login expires
 ```
 
 `main` and `work` are example local labels. Each account stores its own credentials and conversations. Credential storage must use Codex's `file` mode; `keyring` and `auto` modes are rejected without changing your configuration.

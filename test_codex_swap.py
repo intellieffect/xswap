@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, SwapError, atomic_json
+from codex_swap import Manager, SwapError, atomic_json, main
 
 
 class AccountTests(unittest.TestCase):
@@ -134,6 +134,37 @@ class AccountTests(unittest.TestCase):
         with patch("codex_swap.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw("second", select=True)
         self.assertEqual(self.manager.account()[0], "second")
+
+    def test_login_unknown_account_raises(self):
+        with self.assertRaises(SwapError):
+            self.manager.login("ghost")
+
+    def test_login_calls_codex_with_selected_home(self):
+        self.manager.register("main")
+        with patch("codex_swap.subprocess.call", return_value=0) as call, \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = self.manager.login("main")
+        self.assertEqual(result, 0)
+        self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "login"])
+        self.assertEqual(call.call_args.kwargs["env"]["CODEX_HOME"], str(self.source))
+
+    def test_login_device_auth_flag_is_forwarded(self):
+        self.manager.register("main")
+        with patch("codex_swap.subprocess.call", return_value=0) as call, \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.manager.login("main", device_auth=True)
+        self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "login", "--device-auth"])
+
+    def test_add_refusal_points_to_login(self):
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env), contextlib.redirect_stderr(stderr):
+            code = main(["add", "main"])
+        self.assertEqual(code, 1)
+        self.assertIn("xswap login main", stderr.getvalue())
 
     def test_bridge_error_does_not_forward_raw_stderr(self):
         self.manager.register("main")

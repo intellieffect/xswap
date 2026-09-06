@@ -23,6 +23,7 @@ xswap add work            # 브라우저에서 추가 OpenAI 계정으로 로그
 xswap use work            # xswap의 기본 계정 선택
 xswap                     # 선택한 계정으로 Codex CLI 실행
 xswap app                 # 선택한 계정의 별도 데스크톱 창 열기
+xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
 ```
 
 현재 Codex에 로그인하지 않았다면 먼저 `codex login`을 실행하십시오. `xswap list`로 등록 계정을, `xswap status`로 선택된 계정의 로컬 로그인 상태를 확인할 수 있습니다.
@@ -110,6 +111,7 @@ OpenClaw 연결은 다음을 수행합니다.
 | `xswap app work` | 지정 계정의 macOS 앱 실행 |
 | `xswap add work --device-auth` | Codex의 기기 코드 로그인 사용 |
 | `xswap app work --dry-run` | 앱 실행 경로와 환경변수 확인 |
+| `xswap login work` | 등록된 계정을 재인증(로그인 만료 시) |
 
 ## 지원 범위와 동작 원리
 
