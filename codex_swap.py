@@ -788,7 +788,7 @@ def main(argv=None):
                 manager.sync_openclaw(name, select=True)
             else:
                 manager.use(name)
-            print(f"Selected {name}{detail}.")
+            print(f"Selected {name}{detail}. CLI: xswap · Desktop: xswap app")
             if not args.default_only:
                 from xswap_switch import switch_running
                 report = switch_running(manager, name)

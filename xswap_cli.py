@@ -145,6 +145,55 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
             await listener.wait_closed()
 
 
+def resume_home(manager, args, default):
+    """Explicit UUID resumes use the home that already owns the conversation."""
+    command = None
+    session_id = None
+    iterator = iter(args)
+    for arg in iterator:
+        if arg in VALUE_FLAGS:
+            next(iterator, None)
+            continue
+        if arg.startswith('-'):
+            continue
+        if command is None:
+            command = arg
+            if command not in ('resume', 'fork'):
+                return default
+        else:
+            try:
+                session_id = str(uuid.UUID(arg))
+            except ValueError:
+                return default  # Named sessions and picker/--last keep normal scope.
+            break
+    if session_id is None:
+        return default
+    homes = [default, manager.source, Path.home() / '.codex']
+    homes.extend(Path(entry['home']) for entry in manager.read()['accounts'].values())
+    seen = set()
+    matches = []
+    for home in homes:
+        home = home.resolve()
+        if home in seen:
+            continue
+        seen.add(home)
+        for folder in ('sessions', 'archived_sessions'):
+            for path in (home / folder).glob(f'**/*-{session_id}.jsonl'):
+                if path.is_file() and not path.is_symlink():
+                    if home == default.resolve():
+                        return default  # Prefer the current runtime if both have copies.
+                    matches.append(home)
+                    break
+    matches = list(dict.fromkeys(matches))
+    if len(matches) > 1:
+        raise LiveError('This session exists in multiple account homes; resume from its original CODEX_HOME with XSWAP_BYPASS=1.')
+    if matches:
+        from codex_swap import check_file_store
+        check_file_store(matches[0])
+        return matches[0]
+    return default
+
+
 def launch_cli(manager, accounts, args, dry=False):
     from codex_swap import private_dir
     names = [value.strip() for value in accounts.split(',') if value.strip()]
@@ -152,20 +201,24 @@ def launch_cli(manager, accounts, args, dry=False):
         raise LiveError('auto CLI supports interactive Codex, resume, fork, and agents; ordinary utility/exec commands use normal authentication')
     real = manager.codex()
     pool = AccountPool(manager, names, real)
-    home = manager.root / 'auto' / 'cli-codex'
+    runtime = manager.root / 'auto' / 'cli-codex'
+    home = resume_home(manager, args, runtime)
     if dry:
         print(json.dumps({'mode': 'auto-cli', 'accounts': names, 'CODEX_HOME': str(home),
                           'transport': 'private Unix WebSocket', 'args': args}, indent=2))
         return 0
-    private_dir(home.parent)
-    private_dir(home)
-    _, source = manager.account(names[0])
-    for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
-        src, dst = source / entry, home / entry
-        if src.exists() and not dst.exists() and not dst.is_symlink():
-            dst.symlink_to(src, target_is_directory=src.is_dir())
-    from xswap_plugins import ensure_plugins
-    ensure_plugins(home, source)
+    if home == runtime:
+        private_dir(home.parent)
+        private_dir(home)
+        _, source = manager.account(names[0])
+        for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
+            src, dst = source / entry, home / entry
+            if src.exists() and not dst.exists() and not dst.is_symlink():
+                dst.symlink_to(src, target_is_directory=src.is_dir())
+        from xswap_plugins import ensure_plugins
+        ensure_plugins(home, source)
+    else:
+        print('xswap auto: resuming from the original session home', file=sys.stderr)
     run_dir = manager.root / 'auto' / 'cli-runs' / uuid.uuid4().hex
     private_dir(run_dir.parent)
     private_dir(run_dir)
