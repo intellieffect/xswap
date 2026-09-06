@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
 xswap --version
 ```
 
@@ -146,7 +146,7 @@ xswap upgrade --dry-run          # Print the command without running it
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
 ```
 
 Before uninstalling, restore the optional wrapper:
@@ -163,3 +163,11 @@ Account data is intentionally retained. These commands do not revoke credentials
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integration checks. Report reproducible bugs through [GitHub Issues](https://github.com/intellieffect/xswap/issues); report vulnerabilities privately through [Security Advisories](https://github.com/intellieffect/xswap/security/advisories/new).
 
 [MIT license](LICENSE). OpenAI, Codex, ChatGPT, OpenClaw, and their distributed plugins remain governed by their own licenses and terms; their binaries or plugin code are not included in this repository.
+
+### Weekly dashboard and macOS menu bar
+
+`xswap list` and `xswap usage` show weekly used/remaining percentages as bars, selected account first. Colors are disabled for pipes, `NO_COLOR`, and dumb terminals. Missing weekly data stays unknown. `--details` shows identities and other quota windows; `--include-spark` adds Spark. `--json` preserves machine-readable quota data.
+
+On macOS, run `xswap menubar` to compile and open `~/Applications/Xswap.app` using Apple Command Line Tools (`xcode-select --install` if missing). It shows the selected default account's weekly usage, all accounts, actual running bridge accounts, and the automatic-switch policy. It refreshes every five minutes and offers Refresh/Quit. Selection is not proof of a running session's account. Failed refreshes retain explicitly marked stale data. No login startup is configured. Quit the menu app before rebuilding after an upgrade, then run `xswap menubar` again. The app is built locally, not a notarized binary distribution.
+
+`xswap switch NAME` is an alias for `xswap use NAME`: it selects the default for new launches, not a live switch of existing sessions.

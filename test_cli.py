@@ -69,6 +69,12 @@ class CliTests(TestCase):
    self.assertEqual(json.loads(out.getvalue())['pruned'],0)
   finally:
    os.close(fd)
+ def test_menu_status_does_not_prune(self):
+  from xswap_cli import status_data
+  run_dir,_=self.make_run('stale-menu',updated_at=time.time()-8*86400)
+  result=status_data(self.manager,cleanup=False)
+  self.assertTrue(run_dir.exists())
+  self.assertEqual(result['pruned'],0)
  def test_prune_removes_stale_dir_by_default(self):
   run_dir,_=self.make_run('stale',updated_at=time.time()-8*86400)
   with contextlib.redirect_stdout(io.StringIO()) as out:

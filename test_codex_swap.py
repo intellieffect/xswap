@@ -280,7 +280,8 @@ class AccountTests(unittest.TestCase):
         self.assertTrue(json.loads(self.manager.registry.read_text())["accounts"]["second"]["disabled"])
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.manager.show_accounts(offline=True)
-        self.assertIn("second           ChatGPT (disabled)", out.getvalue())
+        self.assertIn("second", out.getvalue())
+        self.assertIn("비활성화 (disabled)", out.getvalue())
 
     def test_disable_refuses_unknown_account(self):
         with self.assertRaises(SwapError):

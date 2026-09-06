@@ -284,7 +284,7 @@ STALE_RUN_SECONDS = 7 * 24 * 3600
 MIN_PRUNE_AGE_SECONDS = 60
 
 
-def show_status(manager, prune=False):
+def status_data(manager, prune=False, cleanup=True):
     settings = read_settings(manager)
     run_root = manager.root / 'auto' / 'cli-runs'
     entries = [(manager.root / 'auto' / 'status.json', None)]
@@ -324,7 +324,7 @@ def show_status(manager, prune=False):
                 # A run dir this fresh may still be between creation and the
                 # bridge taking its lock (no lock file, no status.json yet);
                 # never race that startup window regardless of --prune.
-                if age > MIN_PRUNE_AGE_SECONDS and (prune or age > STALE_RUN_SECONDS):
+                if cleanup and age > MIN_PRUNE_AGE_SECONDS and (prune or age > STALE_RUN_SECONDS):
                     try:
                         shutil.rmtree(run_dir)
                     except OSError:
@@ -345,7 +345,11 @@ def show_status(manager, prune=False):
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and
                    os.readlink(wrapper_path) == wrapper.get('proxy'))
-    print(json.dumps({'enabled': settings.get('enabled', False),
+    return {'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []), 'codexWrapped': wrapped,
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
-                      'pruned': pruned, 'sessions': result[-20:]}, indent=2))
+                      'pruned': pruned, 'sessions': result[-20:]}
+
+
+def show_status(manager, prune=False):
+    print(json.dumps(status_data(manager, prune=prune), indent=2))

@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
 xswap --version
 ```
 
@@ -52,7 +52,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.4.3'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -223,3 +223,11 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 
 
 라이선스: [MIT](LICENSE). 보안 및 개인정보: [SECURITY.md](SECURITY.md). 기여 안내: [CONTRIBUTING.md](CONTRIBUTING.md). OpenAI의 공식 제품이 아니며, Codex·ChatGPT·OpenClaw의 라이선스는 각 제공자에게 있습니다.
+
+## 주간 대시보드와 메뉴바
+
+`xswap list`는 주간 사용량 막대, 사용/남은 비율, 초기화 시간을 보여줍니다. `--details`로 이메일·다른 시간대 잔여량을, `--include-spark`로 Spark를 추가 표시합니다. 선택됨은 새 실행의 기본 계정이며 기존 실행 세션의 계정은 아닙니다.
+
+macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오.
+
+`xswap switch NAME` is an alias for `xswap use NAME`: it selects the default for new launches, not a live switch of existing sessions.
