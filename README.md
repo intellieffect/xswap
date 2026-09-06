@@ -26,6 +26,7 @@ codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
 xswap add work --use        # Sign in to a separate local profile and select it
 xswap login work            # Re-authenticate work after its login expires
+xswap use --best            # Select whichever signed-in account has the most quota right now
 xswap                       # Launch the selected account's CLI
 ```
 
@@ -53,6 +54,8 @@ xswap run --best -- exec "summarize this repo"
 ```
 
 `codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot protect them. `--best` checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
+
+To persist that choice as the default for later `xswap` and `xswap app` launches instead of a single run, use `xswap use --best` (also `--model` and `--openclaw`). It fails instead of keeping the current selection if no account has known remaining quota.
 
 ### Directory mappings
 
