@@ -279,7 +279,7 @@ def codex_main():
         return 130
 
 
-def show_status(manager):
+def status_data(manager):
     settings = read_settings(manager)
     statuses = [manager.root / 'auto' / 'status.json']
     statuses.extend(sorted((manager.root / 'auto' / 'cli-runs').glob('*/status.json')))
@@ -309,7 +309,11 @@ def show_status(manager):
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and
                    os.readlink(wrapper_path) == wrapper.get('proxy'))
-    print(json.dumps({'enabled': settings.get('enabled', False),
+    return {'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []), 'codexWrapped': wrapped,
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
-                      'sessions': result[-20:]}, indent=2))
+                      'sessions': result[-20:]}
+
+
+def show_status(manager):
+    print(json.dumps(status_data(manager), indent=2))

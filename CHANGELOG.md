@@ -1,5 +1,10 @@
 # 0.4.0 — 2026-09-06
 
+## 0.5.0
+
+- Weekly-first text dashboard with colored usage bars, selected-first sorting, private defaults, and explicit details.
+- Native macOS menu app built from bundled Swift source, five-minute refresh, stale/error status, and running bridge account labels.
+
 ## 0.4.3
 
 - Hide Spark quotas in default list/usage text output; use --include-spark to show them. JSON quota data and automatic account selection are unchanged.

@@ -1,3 +1,5 @@
 include LICENSE README.md README.ko.md SECURITY.md CONTRIBUTING.md CHANGELOG.md
 include test_*.py
 recursive-include tests *.py *.mjs
+
+recursive-include xswap_bridge *.swift

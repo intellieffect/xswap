@@ -180,7 +180,7 @@ class Bridge:
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.4.3', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': '0.5.0', 'weeklyRemainingThreshold': self.threshold(),
                 'updatedAt': time.time(), **extra})
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
 

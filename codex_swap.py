@@ -24,7 +24,7 @@ from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 
 class SwapError(Exception):
@@ -222,7 +222,7 @@ class Manager:
                 row["status"] = "usage unavailable: cannot start Codex CLI"
         return row
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False):
+    def account_rows(self, name=None, offline=False):
         data = self.read()
         if name is not None:
             selected, home = self.account(name)
@@ -234,22 +234,16 @@ class Manager:
             rows = list(pool.map(lambda item: self.account_usage(*item, offline=offline), accounts))
         for row in rows:
             row["active"] = row["name"] == data["active"]
+        return rows
+
+    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False):
+        rows = self.account_rows(name, offline)
         if json_output:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return
-        if not rows:
-            print("No accounts. Start: xswap register main")
-        for row in rows:
-            plan = next((bucket["plan"] for bucket in row["buckets"] if bucket["plan"]), None)
-            print(f"{'*' if row['active'] else ' '} {row['name']:16} {row['identity']}" + (f" [{plan}]" if plan else ""))
-            if row["status"] == "ok":
-                buckets = row["buckets"] if include_spark else [
-                    bucket for bucket in row["buckets"]
-                    if "spark" not in (bucket["id"] + " " + bucket["name"]).lower()]
-                for line in usage_lines(buckets):
-                    print(f"    {line}")
-            elif row["status"] not in ("offline", "not signed in", "unreadable auth cache"):
-                print(f"    {row['status']}")
+        from xswap_display import render
+        from xswap_cli import read_settings
+        print(render(rows, read_settings(self), include_spark, details))
 
     def sync_openclaw(self, name=None, agents=None, dry=False, backup_dir=None, select=False):
         name, home = self.account(name)
@@ -416,6 +410,10 @@ def parser():
     usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
+    listing.add_argument("--details", action="store_true", help="Show identity and all quota window details")
+    usage.add_argument("--details", action="store_true", help="Show identity and all quota window details")
+    sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
+    sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
     sub.add_parser("status", help="Show selected account and login status")
     sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
@@ -471,10 +469,16 @@ def main(argv=None):
         elif args.command == "login":
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":
-            manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark)
+            manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
         elif args.command == "usage":
             name, _ = manager.account(args.name)
-            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark)
+            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
+        elif args.command == "dashboard":
+            from xswap_display import dashboard
+            print(json.dumps(dashboard(manager), ensure_ascii=False))
+        elif args.command == "menubar":
+            from xswap_menubar import launch
+            return launch()
         elif args.command == "status":
             name, home = manager.account()
             print(f"Selected: {name}\nHome: {home}\nLocal label: {identity(home)}", flush=True)
