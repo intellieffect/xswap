@@ -759,19 +759,19 @@ def parser():
     listing.add_argument("--short", action="store_true", help="Print one line for a status line/prompt: `*name p5h/p7d · ...`")
     listing.add_argument("--warn", metavar="PCT",
                           help="Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3")
-    listing.add_argument("--lang", choices=["en", "ko"], help="Text output language (default: English, or XSWAP_LANG/LANG if it starts with ko)")
+    listing.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
     usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("--details", action="store_true", help="Show identity and all quota window details")
     usage.add_argument("--short", action="store_true", help="Print one line: `name p5h/p7d`")
-    usage.add_argument("--lang", choices=["en", "ko"], help="Text output language (default: English, or XSWAP_LANG/LANG if it starts with ko)")
+    usage.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     listing.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex (not with --offline)")
     usage.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
     sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
     dash = sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
-    dash.add_argument("--lang", choices=["en", "ko"], help="Text fields language (default: English, or XSWAP_LANG/LANG if it starts with ko)")
+    dash.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     sub.add_parser("status", help="Show selected account and login status")
     st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
     st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
@@ -870,7 +870,7 @@ def main(argv=None):
             max_age = parse_cache_seconds(args.cached)
             if args.offline and max_age is not None:
                 raise SwapError("--offline and --cached cannot be combined.")
-            lang = args.lang or resolve_lang(None, os.environ)
+            lang = resolve_lang(args.lang, os.environ)
             rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age, lang=lang)
             if threshold is not None:
                 messages = usage_warnings(rows, threshold)
@@ -880,11 +880,11 @@ def main(argv=None):
         elif args.command == "usage":
             max_age = parse_cache_seconds(args.cached)
             name, _ = manager.account(args.name)
-            lang = args.lang or resolve_lang(None, os.environ)
+            lang = resolve_lang(args.lang, os.environ)
             manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age, lang=lang)
         elif args.command == "dashboard":
             from xswap_display import dashboard
-            lang = args.lang or resolve_lang(None, os.environ)
+            lang = resolve_lang(args.lang, os.environ)
             print(json.dumps(dashboard(manager, lang=lang), ensure_ascii=False))
         elif args.command == "menubar":
             from xswap_menubar import launch

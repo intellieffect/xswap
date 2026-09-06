@@ -260,3 +260,28 @@ class OfflineListNoHangulUnderLangCTests(unittest.TestCase):
             main(['list', '--offline'])
         output = out.getvalue()
         self.assertFalse(re.search(r'[가-힣]', output), output)
+
+
+class MenuBarSwiftLocalizationTests(unittest.TestCase):
+    """The menu bar app is launched from Finder/Dock/a login item, whose
+    environment usually carries no LANG/XSWAP_LANG at all (only PATH is
+    patched for the subprocess call). It must resolve its own language from
+    its own launch environment and pass that choice explicitly to the
+    `xswap dashboard` subprocess, and every Hangul string it can show must
+    live in its own localisation table, not float around the source."""
+
+    SOURCE = Path(__file__).resolve().parent / 'xswap_bridge' / 'MenuBar.swift'
+
+    def setUp(self):
+        self.text = self.SOURCE.read_text()
+
+    def test_hangul_appears_only_inside_the_localization_table(self):
+        begin = self.text.index('// L10N_TABLE_BEGIN')
+        end = self.text.index('// L10N_TABLE_END') + len('// L10N_TABLE_END')
+        outside = self.text[:begin] + self.text[end:]
+        self.assertFalse(re.search(r'[가-힣]', outside), 'Hangul literal found outside the localisation table')
+        inside = self.text[begin:end]
+        self.assertTrue(re.search(r'[가-힣]', inside), 'localisation table should still contain the ko strings')
+
+    def test_passes_lang_explicitly_to_the_dashboard_subprocess(self):
+        self.assertIn('process.arguments = ["dashboard", "--lang", menuLang]', self.text)
