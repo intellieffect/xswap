@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 xswap --version
 ```
 
@@ -84,7 +84,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -287,3 +287,5 @@ xswap switch work --default-only      # 새 실행의 기본값만 변경
 **이전 버전으로 이미 실행 중인 브리지와 일반 고정 계정 세션은 수신할 수 없습니다.** 업데이트된 설치본으로 자동 모드 세션을 한 번 열어야 합니다. `manualSwitchVersion: 1`이 지원 여부를 나타냅니다. 설치는 실행 중인 프로세스를 교체하거나 종료하지 않습니다. 계정별 인증 파일을 복사하지 않으며, 비공개 로컬 요청 파일에는 계정 이름과 프로세스별 식별자만 기록합니다.
 
 자동 모드의 `codex resume UUID` / `fork UUID`는 자동 런타임·기존 Codex 홈·등록 계정 홈에서 해당 대화를 찾고, 대화를 복사하지 않고 원래 홈에서 인증 브리지와 함께 재개합니다. 선택 화면·대화 이름·`--last`는 자동 런타임 범위를 유지합니다. 자동 런타임 밖 여러 홈에 같은 UUID가 있으면 원래 홈을 명시해야 합니다.
+
+자동 모드 CLI 종료 후에는 Codex의 임시 원격 주소 아래에 마지막으로 표시되는 xswap 재개 명령을 사용하십시오. 종료된 소켓 대신 새 브리지를 열며 계정 풀·현재 계정·원래 세션 홈을 유지합니다.

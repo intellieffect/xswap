@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 xswap --version
 ```
 
@@ -204,7 +204,7 @@ xswap upgrade --dry-run          # Print the command without running it
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.6.1'
 ```
 
 Before uninstalling, restore the optional wrapper:
@@ -249,3 +249,5 @@ The command reports `applied`, `pending`, `unsupported`, `failed`, and `unconfir
 **Existing older bridges and ordinary account-specific CLI/app sessions cannot receive this update.** Open an auto-mode session once with the updated installation. Compatibility is advertised as `manualSwitchVersion: 1`; installing files does not modify running Python processes. No processes are killed, no conversation is restarted, and account credential files are not copied. Requests contain account names and per-process IDs only, in private local files. Authentication uses the existing [OpenAI App Server external-token login](https://learn.chatgpt.com/docs/app-server#3c-log-in-with-externally-managed-chatgpt-tokens-chatgptauthtokens).
 
 Explicit `codex resume UUID` / `fork UUID` in automatic mode now locates that conversation in the current runtime, the original Codex home, or a registered account home. It reuses the owning home without copying the conversation and keeps the authentication bridge. The picker, named sessions, and `--last` remain scoped to the automatic runtime. Ambiguous duplicate UUIDs outside that runtime require choosing the original home explicitly.
+
+When an auto-mode CLI exits, use the final xswap resume command printed below Codex’s temporary remote reconnect address. It starts a new bridge and preserves the account pool, current account, and original session home; the old Unix socket is closed.
