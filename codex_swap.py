@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines, window_label
+from xswap_usage import UsageError, normalize_limits, read_limits, short_line, usage_lines, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_live import LiveError, buckets_available
 from xswap_plugins import ensure_plugins
@@ -423,8 +423,15 @@ class Manager:
             row["active"] = row["name"] == data["active"]
         return rows
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False):
+    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False):
+        if short and json_output:
+            raise SwapError("--short and --json are mutually exclusive.")
         rows = self.account_rows(name, offline)
+        if short:
+            # An explicit `usage NAME --short` always shows that one account, even if
+            # disabled; the aggregate `list --short` omits disabled accounts instead.
+            print(short_line(rows if name is not None else [r for r in rows if not r.get("disabled")]))
+            return rows
         if json_output:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return rows
@@ -620,15 +627,17 @@ def parser():
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
     listing.add_argument("--offline", action="store_true", help="Show local account labels without fetching usage")
     listing.add_argument("--json", action="store_true", dest="json_output")
+    listing.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
+    listing.add_argument("--details", action="store_true", help="Show identity and all quota window details")
+    listing.add_argument("--short", action="store_true", help="Print one line for a status line/prompt: `*name p5h/p7d · ...`")
     listing.add_argument("--warn", metavar="PCT",
                           help="Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
-    listing.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
-    usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
-    listing.add_argument("--details", action="store_true", help="Show identity and all quota window details")
+    usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("--details", action="store_true", help="Show identity and all quota window details")
+    usage.add_argument("--short", action="store_true", help="Print one line: `name p5h/p7d`")
     sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
     sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
     sub.add_parser("status", help="Show selected account and login status")
@@ -648,7 +657,9 @@ def parser():
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.1")
     up.add_argument("--dry-run", action="store_true")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
-    u.add_argument("name")
+    u.add_argument("name", nargs="?")
+    u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
+    u.add_argument("--model", help="Model hint for --best; never passed to codex")
     u.add_argument("--default-only", action="store_true", help="Change only the default for future sessions")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
     d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
@@ -715,7 +726,7 @@ def main(argv=None):
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":
             threshold = validate_warn_threshold(args.warn) if args.warn is not None else None
-            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
+            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short)
             if threshold is not None:
                 messages = usage_warnings(rows, threshold)
                 for message in messages:
@@ -723,7 +734,7 @@ def main(argv=None):
                 return 3 if messages else 0
         elif args.command == "usage":
             name, _ = manager.account(args.name)
-            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
+            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short)
         elif args.command == "dashboard":
             from xswap_display import dashboard
             print(json.dumps(dashboard(manager), ensure_ascii=False))
@@ -759,14 +770,28 @@ def main(argv=None):
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command in ("use", "switch"):
-            if args.openclaw:
-                manager.sync_openclaw(args.name, select=True)
+            if bool(args.name) == bool(args.best):
+                raise SwapError("Give an account name or --best.")
+            if args.model and not args.best:
+                raise SwapError("--model requires --best.")
+            detail = ""
+            if args.best:
+                name, reason = manager.best_account(args.model)
+                if name is None:
+                    raise SwapError("No account with known remaining quota; nothing selected.")
+                parts = [f"{label} {value:g}% left" for label, value in reason["remaining"].items() if value is not None]
+                if parts:
+                    detail = f" ({', '.join(parts)})"
             else:
-                manager.use(args.name)
-            print(f"Selected {args.name}.")
+                name = args.name
+            if args.openclaw:
+                manager.sync_openclaw(name, select=True)
+            else:
+                manager.use(name)
+            print(f"Selected {name}{detail}.")
             if not args.default_only:
                 from xswap_switch import switch_running
-                report = switch_running(manager, args.name)
+                report = switch_running(manager, name)
                 print('Running bridges: ' + ', '.join(f'{key}={value}' for key, value in report.items()))
                 print('Pending requests apply when the current turn finishes. '
                       'Older bridges and sessions without a bridge require reopening once.')

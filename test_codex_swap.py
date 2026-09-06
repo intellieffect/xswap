@@ -857,3 +857,129 @@ class BestAccountTests(unittest.TestCase):
         self.assertEqual({c["name"] for c in payload["reason"]["candidates"]}, {"main", "second"})
         self.assertEqual(payload["CODEX_HOME"], str(self.manager.account("second")[1]))
         self.assertEqual(payload["argv"], ["/usr/bin/codex", "exec", "hi"])
+
+
+class UseBestTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.manager = Manager(self.base / "store", self.source)
+        self.manager.register("main")
+        self.env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+
+    def add(self, name, signed_in=True):
+        home = self.manager.prepare(name)
+        if signed_in:
+            atomic_json(home / "auth.json", self.auth)
+        return home
+
+    def fake_read_limits(self, mapping):
+        """mapping: {account name: raw response dict, or an Exception to raise}."""
+        by_home = {}
+        for name, value in mapping.items():
+            _, home = self.manager.account(name)
+            by_home[str(home)] = value
+
+        def read(codex, env, timeout=12):
+            value = by_home[env["CODEX_HOME"]]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        return read
+
+    def test_use_best_picks_and_sets_active(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(out):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account()[0], "second")
+        self.assertIn("Selected second (5h 100% left, 7d 88% left). CLI: xswap · Desktop: xswap app", out.getvalue())
+
+    def test_use_best_all_unknown_exits_and_leaves_active_unchanged(self):
+        fake = self.fake_read_limits({"main": {}})
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stderr(err):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 1)
+        self.assertIn("No account with known remaining quota; nothing selected.", err.getvalue())
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_use_without_name_or_best_fails(self):
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use"])
+        self.assertEqual(code, 1)
+        self.assertIn("Give an account name or --best.", err.getvalue())
+
+    def test_use_name_and_best_together_fails(self):
+        self.add("second")
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use", "second", "--best"])
+        self.assertEqual(code, 1)
+        self.assertIn("Give an account name or --best.", err.getvalue())
+
+    def test_switch_best_alias_works(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["switch", "--best"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manager.account()[0], "second")
+
+    def test_use_best_openclaw_syncs_the_chosen_account(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=100, remaining7d=88),
+        })
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             patch.object(Manager, "sync_openclaw") as sync_openclaw, \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["use", "--best", "--openclaw"])
+        self.assertEqual(code, 0)
+        sync_openclaw.assert_called_once_with("second", select=True)
+
+    def test_use_model_without_best_fails(self):
+        self.add("second")
+        err = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), contextlib.redirect_stderr(err):
+            code = main(["use", "second", "--model", "gpt-5"])
+        self.assertEqual(code, 1)
+        self.assertIn("--model requires --best.", err.getvalue())
+        self.assertEqual(self.manager.account()[0], "main")
+
+    def test_use_best_omits_parenthetical_when_remaining_is_unknown(self):
+        out = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=False), \
+             patch.object(Manager, "best_account", return_value=("main", {"remaining": {"5h": None, "7d": None}, "candidates": []})), \
+             contextlib.redirect_stdout(out):
+            code = main(["use", "--best"])
+        self.assertEqual(code, 0)
+        self.assertIn("Selected main. CLI: xswap · Desktop: xswap app", out.getvalue())
+        self.assertNotIn("(", out.getvalue())

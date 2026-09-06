@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, atomic_json, main
-from xswap_usage import UsageError, normalize_limits, read_limits, reset_label, usage_lines, warnings
+from codex_swap import Manager, SwapError, atomic_json, main
+from xswap_usage import UsageError, normalize_limits, read_limits, reset_label, short_line, usage_lines, warnings
 
 
 def response():
@@ -208,6 +208,80 @@ for line in sys.stdin:
             code = main(["list", "--warn", "abc"])
         self.assertEqual(code, 1)
         self.assertIn("xswap: --warn must be a number from 1 to 100.", stderr.getvalue())
+
+    def test_short_and_json_are_mutually_exclusive(self):
+        manager = self.manager()
+        with self.assertRaises(SwapError):
+            manager.show_accounts(short=True, json_output=True)
+
+    def test_short_omits_disabled_registry_entries(self):
+        manager = self.manager()
+        data = json.loads(manager.registry.read_text())
+        data["accounts"]["second"]["disabled"] = True
+        atomic_json(manager.registry, data)
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(short=True)
+        self.assertEqual(output.getvalue(), "*main 77/1\n")
+
+    def test_short_composes_with_offline(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits") as fetch, contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(offline=True, short=True)
+        fetch.assert_not_called()
+        self.assertEqual(output.getvalue(), "*main ?/? · second ?/?\n")
+
+    def test_short_usage_for_a_named_account_shows_it_even_if_disabled(self):
+        manager = self.manager()
+        manager.set_disabled("second", True)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(name="second", short=True)
+        self.assertEqual(output.getvalue(), "second ?/?\n")
+
+
+class ShortLineTests(unittest.TestCase):
+    @staticmethod
+    def bucket(primary=None, secondary=None, bucket_id="codex"):
+        windows = []
+        if primary is not None:
+            windows.append({"position": "primary", "remainingPercent": primary})
+        if secondary is not None:
+            windows.append({"position": "secondary", "remainingPercent": secondary})
+        return {"id": bucket_id, "name": bucket_id, "windows": windows}
+
+    def test_three_rows_including_a_failure_and_the_active_account(self):
+        rows = [
+            {"name": "main", "active": True, "status": "ok", "buckets": [self.bucket(77, 12)]},
+            {"name": "work", "active": False, "status": "ok", "buckets": [self.bucket(100, 98)]},
+            {"name": "broken", "active": False, "status": "usage unavailable: service down", "buckets": []},
+        ]
+        self.assertEqual(short_line(rows), "*main 77/12 · work 100/98 · broken ?/?")
+
+    def test_rounds_to_the_nearest_integer(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(76.6, 11.4)]}]
+        self.assertEqual(short_line(rows), "main 77/11")
+
+    def test_rounds_half_up_not_to_even(self):
+        # 50.5 rounds up to 51 (not Python's banker's round(), which would give 50).
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(50.5, 76.6)]}]
+        self.assertEqual(short_line(rows), "main 51/77")
+
+    def test_unknown_window_is_a_question_mark(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(None, None)]}]
+        self.assertEqual(short_line(rows), "main ?/?")
+
+    def test_missing_codex_bucket_is_a_question_mark(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(90, bucket_id="spark")]}]
+        self.assertEqual(short_line(rows), "main ?/?")
+
+    def test_offline_rows_are_question_marks(self):
+        rows = [
+            {"name": "main", "active": True, "status": "offline", "buckets": []},
+            {"name": "work", "active": False, "status": "not signed in", "buckets": []},
+        ]
+        self.assertEqual(short_line(rows), "*main ?/? · work ?/?")
+
+    def test_no_accounts_is_an_empty_line(self):
+        self.assertEqual(short_line([]), "")
 
 
 if __name__ == "__main__":

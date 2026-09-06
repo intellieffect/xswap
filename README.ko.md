@@ -21,6 +21,7 @@ xswap --version
 xswap register main       # 현재 Codex 로그인 등록
 xswap add work --use      # 브라우저에서 추가 OpenAI 계정으로 로그인하고 바로 선택
 xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
+xswap use --best          # 잔여 사용량이 가장 많은 계정을 기본값으로 선택
 xswap                     # 선택한 계정으로 Codex CLI 실행
 xswap app                 # 선택한 계정의 별도 데스크톱 창 열기
 ```
@@ -60,6 +61,14 @@ xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 �
 ```
 
 `launchd`/`cron` 항목은 이 래퍼의 절대경로를 가리키게 하십시오. xswap 자체는 아무것도 스케줄링하지 않습니다.
+
+### 상태 표시줄(status line)
+
+`xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. 비활성화(disabled)된 계정은 `list --short`에서 제외되지만, `xswap usage <계정명> --short`는 비활성화된 계정이라도 지정한 계정을 항상 표시하며, 계정이 하나도 없으면 `list --short`는 빈 줄을 출력합니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:
+
+```sh
+set -g status-right '#(xswap list --short)'
+```
 
 기존 버전 업데이트:
 
@@ -134,6 +143,7 @@ OpenClaw 연결은 다음을 수행합니다.
 | `xswap list` | 계정 목록·잔여 사용량·초기화 시간 표시 |
 | `xswap run --account main -- resume` | 지정 계정으로 Codex 명령 실행 |
 | `xswap run --best -- exec "요약해줘"` | 잔여 사용량이 가장 많은 계정으로 실행(1회성 선택) |
+| `xswap use --best` | 잔여 사용량이 가장 많은 계정을 이후 실행의 기본값으로 선택 |
 | `xswap app work` | 지정 계정의 macOS 앱 실행 |
 | `xswap add work --device-auth` | Codex의 기기 코드 로그인 사용 |
 | `xswap app work --dry-run` | 앱 실행 경로와 환경변수 확인 |
