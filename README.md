@@ -82,6 +82,8 @@ xswap auto-disable                       # Restore the original codex symlink an
 
 Disabling defaults does not terminate running sessions. Fixed-account commands (`xswap run --account main -- ...`, `xswap app main`) remain available.
 
+Each auto CLI run leaves a small record under `auto/cli-runs/`; `auto-status` removes non-running records older than 7 days automatically, and `--prune` removes all non-running records immediately.
+
 ### Compatibility and limits
 
 | Surface | Support |
