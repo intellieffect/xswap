@@ -375,13 +375,12 @@ class Manager:
         `--remote` hook and so cannot be protected by the live auto bridge.
         """
         excluded = set(exclude)
-        candidates = [(n, h) for n, h in self.enabled_accounts() if n not in excluded]
+        # Reuse the single parallel-fetch implementation; filter out disabled/excluded rows.
+        candidates = [row for row in self.account_rows() if not row["disabled"] and row["name"] not in excluded]
         if not candidates:
             return None, {"remaining": {}, "candidates": []}
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(candidates)))) as pool:
-            rows = list(pool.map(lambda item: self.account_usage(*item), candidates))
         summary, ranked = [], []
-        for row in rows:
+        for row in candidates:
             summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
                              "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
             if row["status"] == "ok" and buckets_available(row["buckets"], model) is True:
