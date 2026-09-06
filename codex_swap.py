@@ -8,6 +8,7 @@ import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ import tomllib
 import time
 
 from xswap_usage import UsageError, normalize_limits, read_limits, usage_lines, window_label
+from xswap_usage import warnings as usage_warnings
 from xswap_live import LiveError, buckets_available
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
@@ -56,6 +58,12 @@ def validate_name(name):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}", name):
         raise SwapError("Name must be 1–40 letters, digits, underscores or hyphens.")
     return name
+
+
+def validate_warn_threshold(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 1 <= value <= 100:
+        raise SwapError("--warn must be a number from 1 to 100.")
+    return float(value)
 
 
 def check_file_store(home):
@@ -287,10 +295,11 @@ class Manager:
         rows = self.account_rows(name, offline)
         if json_output:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
-            return
+            return rows
         from xswap_display import render
         from xswap_cli import read_settings
         print(render(rows, read_settings(self), include_spark, details))
+        return rows
 
     def best_account(self, model=None, exclude=()):
         """Pick the signed-in account with the most codex headroom right now.
@@ -486,6 +495,8 @@ def parser():
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
     listing.add_argument("--offline", action="store_true", help="Show local account labels without fetching usage")
     listing.add_argument("--json", action="store_true", dest="json_output")
+    listing.add_argument("--warn", type=float, metavar="PCT",
+                          help="Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
     listing.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
@@ -566,7 +577,13 @@ def main(argv=None):
         elif args.command == "login":
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":
-            manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
+            threshold = validate_warn_threshold(args.warn) if args.warn is not None else None
+            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details)
+            if threshold is not None:
+                messages = usage_warnings(rows, threshold)
+                for message in messages:
+                    print(message, file=sys.stderr)
+                return 3 if messages else 0
         elif args.command == "usage":
             name, _ = manager.account(args.name)
             manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details)

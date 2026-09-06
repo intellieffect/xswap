@@ -168,6 +168,30 @@ def reset_label(timestamp, now):
     return f"resets {clock} (in {duration})"
 
 
+def warnings(rows, threshold, now=None):
+    """Pure evaluation for `list --warn`: which codex windows are below threshold.
+
+    Only non-disabled rows (``row.get("disabled")`` falsy) with ``status == "ok"``
+    are considered. A window only warns when its ``remainingPercent`` is a known
+    number below ``threshold``; unknown values never trigger a warning.
+    """
+    now = time.time() if now is None else now
+    lines = []
+    for row in rows:
+        if row.get("disabled") or row.get("status") != "ok":
+            continue
+        for bucket in row.get("buckets", []):
+            if bucket.get("id") != "codex":
+                continue
+            for window in bucket.get("windows", []):
+                remaining = window.get("remainingPercent")
+                if not number(remaining) or remaining >= threshold:
+                    continue
+                lines.append(f"warn: {row.get('name')} {window_label(window)} {remaining:g}% left "
+                             f"({reset_label(window.get('resetsAt'), now)})")
+    return lines
+
+
 def usage_lines(buckets, now=None):
     now = time.time() if now is None else now
     lines = []

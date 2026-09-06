@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, atomic_json
-from xswap_usage import UsageError, normalize_limits, read_limits, reset_label, usage_lines
+from codex_swap import Manager, atomic_json, main
+from xswap_usage import UsageError, normalize_limits, read_limits, reset_label, usage_lines, warnings
 
 
 def response():
@@ -142,6 +142,63 @@ for line in sys.stdin:
         self.assertIn("usage unavailable", rows[0]["status"])
         self.assertEqual(rows[1]["status"], "not signed in")
         self.assertNotIn("fake-token", output.getvalue())
+
+    def row(self, buckets, status="ok", name="work", disabled=False):
+        return {"name": name, "status": status, "buckets": buckets, "disabled": disabled}
+
+    def test_warnings_below_threshold_emits_one_line_per_window(self):
+        row = self.row(normalize_limits(response()))
+        lines = warnings([row], 80, now=9000)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("warn: work 5h 77% left", lines[0])
+        self.assertIn("warn: work 7d 1% left", lines[1])
+
+    def test_warnings_above_threshold_emits_nothing(self):
+        row = self.row(normalize_limits(response()))
+        self.assertEqual(warnings([row], 1), [])
+
+    def test_warnings_ignores_unknown_remaining(self):
+        buckets = normalize_limits({"rateLimits": {"primary": {"windowDurationMins": 300}}})
+        self.assertIsNone(buckets[0]["windows"][0]["remainingPercent"])
+        self.assertEqual(warnings([self.row(buckets)], 100), [])
+
+    def test_warnings_ignores_disabled_row(self):
+        row = self.row(normalize_limits(response()), disabled=True)
+        self.assertEqual(warnings([row], 100), [])
+
+    def test_warnings_ignores_non_ok_status(self):
+        row = self.row(normalize_limits(response()), status="not signed in")
+        self.assertEqual(warnings([row], 100), [])
+
+    def test_main_list_warn_returns_three_and_prints_to_stderr(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "20"])
+        self.assertEqual(code, 3)
+        self.assertIn("warn: main 7d 1% left", stderr.getvalue())
+        self.assertNotIn("warn: main 5h", stderr.getvalue())
+
+    def test_main_list_warn_above_all_windows_returns_zero(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(Manager, "codex", return_value="codex"), \
+             patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "1"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_main_list_warn_invalid_pct_is_an_error(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "0"])
+        self.assertEqual(code, 1)
+        self.assertIn("--warn", stderr.getvalue())
 
 
 if __name__ == "__main__":

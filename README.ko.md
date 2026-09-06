@@ -42,6 +42,25 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 
 조회는 공식 Codex App Server의 `account/rateLimits/read`를 사용합니다. 모델 대화나 테스트 턴을 생성하지 않으며, 기본 계정을 전환하지 않습니다. Codex가 필요에 따라 정상 인증 갱신을 수행할 수 있습니다. 계정당 최대 12초를 기다리고 최대 4개 계정을 병렬 조회합니다. 조회 실패·미로그인·API 키 계정은 구분하며, 알 수 없는 값을 `100%`로 표시하지 않습니다. 결과는 매번 조회하고 캐시하지 않습니다.
 
+### 잔여량 알림
+
+```sh
+xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 있으면 경고
+```
+
+`--warn PCT`는 1~100 사이 값만 받습니다. 기존 표(또는 `--json`) 출력은 그대로 stdout에 찍히고, 그 뒤 비활성화되지 않은(disabled 아닌) 계정 중 조회에 성공한 계정의 `codex` 한도 창을 검사해 기준치 미만인 창마다 `warn: 이름 창 N% left (resets ...)` 한 줄을 stderr로 출력합니다. 알 수 없는 잔여값은 절대 경고를 발생시키지 않습니다. 경고가 하나라도 발생하면 `xswap list --warn`은 종료코드 `3`을 반환하고, 아니면 `0`을 반환합니다. `--warn` 없는 평범한 `xswap list`는 영향받지 않고 항상 `0`을 반환합니다.
+
+대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없으므로, 절대경로로 된 래퍼 스크립트를 만들어 거기에 걸어야 합니다.
+
+```sh
+#!/bin/sh
+# /Users/you/.local/bin/xswap-quota-check
+/Users/you/.local/bin/xswap list --warn 15 \
+  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+```
+
+`launchd`/`cron` 항목은 이 래퍼의 절대경로를 가리키게 하십시오. xswap 자체는 아무것도 스케줄링하지 않습니다.
+
 기존 버전 업데이트:
 
 ```sh
