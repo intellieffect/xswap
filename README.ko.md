@@ -121,18 +121,21 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 xswap openclaw work --dry-run       # 적용할 계정·에이전트 확인
 xswap openclaw work                 # 로컬 OpenClaw 전체 에이전트에 적용
 xswap use main --openclaw           # CLI·앱 기본 계정과 OpenClaw를 함께 전환
+xswap openclaw --pool main,work     # OpenClaw가 두 계정을 스스로 순환하도록 등록
 ```
 
 `xswap openclaw`는 이름을 생략하면 현재 선택 계정을 사용합니다. 특정 에이전트만 바꾸려면 `xswap openclaw work --agent main --agent devagent`처럼 지정하십시오. 이 명령 자체는 xswap의 기본 계정을 바꾸지 않습니다.
 
+`--pool a,b,c`는 등록된 이름 2개 이상을 쉼표로 지정하며, 위치 인자 NAME과는 함께 쓸 수 없습니다. 나열한 순서 그대로 각 에이전트의 OpenAI 인증 순서에 전부 등록하면, 이후 OpenClaw가 자신의 쿨다운 로직(`resolveAuthProfileOrder`·`isProfileInCooldown`·`markAuthProfileFailure`/`markAuthProfileCooldown`)으로 그 안에서 스스로 순환합니다. 즉 한 계정이 한도에 걸려도 사람이 `xswap openclaw other`를 실행할 때까지 기다릴 필요가 없습니다. 풀에 묶인 에이전트는 그 순간 선택된 계정이 무엇이든 동일한 대화·작업 맥락을 공유하므로, 서로 다른 ChatGPT 조직(계정)을 섞으면 그 조직들의 맥락이 한 대화 안에서 뒤섞입니다 — `sync_openclaw`는 풀에 속한 계정들의 조직이 갈리면 기본적으로 중단하며, 의도한 것이면 `--allow-mixed`로 넘길 수 있습니다. 계정의 조직 자체를 확인할 수 없는 경우(인증 파일을 읽을 수 없거나 해독 가능한 클레임이 없는 경우)도 실제로 조직이 다를 때와 동일하게 중단합니다 — 확인 불가를 일치로 간주하지 않습니다.
+
 OpenClaw 연결은 다음을 수행합니다.
 
-1. 선택 계정의 ChatGPT OAuth 인증을 확인합니다.
+1. 선택 계정(들)의 ChatGPT OAuth 인증을 확인합니다. `--pool`이면 계정 간 조직 일치 여부도 함께 확인합니다.
 2. 변경 대상 인증·우선순위만 작은 0600 파일로 백업합니다.
 3. OpenClaw의 공개 SDK와 잠금·트랜잭션을 통해 인증을 등록하고 대상 에이전트의 OpenAI 인증 선택을 변경합니다.
 4. `openclaw secrets reload`로 실행 중인 Gateway 인증 상태를 재적용합니다.
 
-원래 인증 프로필은 보존합니다. 선택된 에이전트의 OpenAI 인증 순서는 해당 계정 하나로 지정하므로 다른 계정으로 자동 순환하지 않습니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
+원래 인증 프로필은 보존합니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
 
 백업 경로를 바꾸려면 `xswap openclaw work --backup-dir /path/to/private-backups`를 사용하십시오. 전체 미디어·대화 DB를 백업하지 않습니다.
 
