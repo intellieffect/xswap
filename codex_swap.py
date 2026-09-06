@@ -23,7 +23,7 @@ from xswap_live import LiveError
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 
 class SwapError(Exception):

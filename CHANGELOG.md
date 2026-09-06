@@ -1,6 +1,8 @@
 # 0.4.0 — 2026-09-06
 
-## 0.4.1
+## 0.4.2
+
+Version 0.4.1 was skipped: its tag accidentally points to the unchanged 0.4.0 source. Use 0.4.2 for these fixes.
 
 - Reject unsafe credential ownership, permission modes, symlinks and non-regular files before registration, automatic refresh, and OpenClaw sync. Read validated descriptors without modifying source files.
 - Pin the security scanner digest and pip-audit dependency hashes.
