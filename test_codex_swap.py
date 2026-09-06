@@ -579,6 +579,27 @@ class AccountTests(unittest.TestCase):
         with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)):
             self.assertEqual(self.manager.account(None)[0], "second")
 
+    def test_pool_openclaw_never_follows_directory_mapping_either(self):
+        # Same guarantee as test_openclaw_never_follows_directory_mapping, exercised
+        # through the pool-aware signature: an omitted name (sync_openclaw(None)) must
+        # still resolve the active account, not a directory mapping. --pool members are
+        # always explicit names (never None), so they were never at risk of following a
+        # mapping in the first place -- this only confirms the single/omitted-name path
+        # still holds under the pool-capable sync_openclaw(names=...) signature.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        mapped_dir = self.base / "work-repo"
+        mapped_dir.mkdir()
+        self.manager.map_dir("second", mapped_dir)
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)), \
+             patch("codex_swap.shutil.which", return_value=None):
+            with self.assertRaisesRegex(SwapError, "OpenClaw sync requires openclaw and node in PATH."):
+                self.manager.sync_openclaw(None)
+        with patch("codex_swap.os.getcwd", return_value=str(mapped_dir)):
+            self.assertEqual(self.manager.account(None)[0], "second")
+
     def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
         self.manager.register("main")
         second = self.manager.prepare("second")
@@ -820,6 +841,16 @@ class SameOrgGuardTests(unittest.TestCase):
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         with patch("codex_swap.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
+
+    def test_read_auth_permission_failure_also_fails_closed(self):
+        # chatgpt_org_id() must treat a CredentialError (e.g. an unsafe file mode) exactly
+        # like any other undeterminable organization: raise, never treat as unknown-but-fine.
+        self.manager.register("main", self._account_home("main", "org-fixture-aaaa"))
+        second_home = self._account_home("second", "org-fixture-aaaa")
+        self.manager.register("second", second_home)
+        (second_home / "auth.json").chmod(0o644)  # read_auth requires 0600/0400
+        with self.assertRaisesRegex(SwapError, "cannot verify the ChatGPT organization for account second"):
+            self.manager.sync_openclaw(["main", "second"])
 
 
 if __name__ == "__main__":

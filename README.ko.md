@@ -126,7 +126,7 @@ xswap openclaw --pool main,work     # OpenClaw가 두 계정을 스스로 순환
 
 `xswap openclaw`는 이름을 생략하면 현재 선택 계정을 사용합니다. 특정 에이전트만 바꾸려면 `xswap openclaw work --agent main --agent devagent`처럼 지정하십시오. 이 명령 자체는 xswap의 기본 계정을 바꾸지 않습니다.
 
-`--pool a,b,c`는 등록된 이름 2개 이상을 쉼표로 지정하며, 위치 인자 NAME과는 함께 쓸 수 없습니다. 나열한 순서 그대로 각 에이전트의 OpenAI 인증 순서에 전부 등록하면, 이후 OpenClaw가 자신의 쿨다운 로직(`resolveAuthProfileOrder`·`isProfileInCooldown`·`markAuthProfileFailure`/`markAuthProfileCooldown`)으로 그 안에서 스스로 순환합니다. 즉 한 계정이 한도에 걸려도 사람이 `xswap openclaw other`를 실행할 때까지 기다릴 필요가 없습니다. 풀에 묶인 에이전트는 그 순간 선택된 계정이 무엇이든 동일한 대화·작업 맥락을 공유하므로, 서로 다른 ChatGPT 조직(계정)을 섞으면 그 조직들의 맥락이 한 대화 안에서 뒤섞입니다 — `sync_openclaw`는 풀에 속한 계정들의 조직이 갈리면 기본적으로 중단하며, 의도한 것이면 `--allow-mixed`로 넘길 수 있습니다.
+`--pool a,b,c`는 등록된 이름 2개 이상을 쉼표로 지정하며, 위치 인자 NAME과는 함께 쓸 수 없습니다. 나열한 순서 그대로 각 에이전트의 OpenAI 인증 순서에 전부 등록하면, 이후 OpenClaw가 자신의 쿨다운 로직(`resolveAuthProfileOrder`·`isProfileInCooldown`·`markAuthProfileFailure`/`markAuthProfileCooldown`)으로 그 안에서 스스로 순환합니다. 즉 한 계정이 한도에 걸려도 사람이 `xswap openclaw other`를 실행할 때까지 기다릴 필요가 없습니다. 풀에 묶인 에이전트는 그 순간 선택된 계정이 무엇이든 동일한 대화·작업 맥락을 공유하므로, 서로 다른 ChatGPT 조직(계정)을 섞으면 그 조직들의 맥락이 한 대화 안에서 뒤섞입니다 — `sync_openclaw`는 풀에 속한 계정들의 조직이 갈리면 기본적으로 중단하며, 의도한 것이면 `--allow-mixed`로 넘길 수 있습니다. 계정의 조직 자체를 확인할 수 없는 경우(인증 파일을 읽을 수 없거나 해독 가능한 클레임이 없는 경우)도 실제로 조직이 다를 때와 동일하게 중단합니다 — 확인 불가를 일치로 간주하지 않습니다.
 
 OpenClaw 연결은 다음을 수행합니다.
 

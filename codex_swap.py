@@ -113,10 +113,12 @@ def parse_pool(value):
 def chatgpt_org_id(home, name):
     """Unverified org id from a local credential, for the same-organization pool guard.
 
-    Checked access_token first, then id_token, matching xswap_live.load_credentials'
-    claim precedence. Fails closed: raises SwapError instead of returning None/unknown,
-    because an undeterminable organization must never be treated as matching another
-    account's organization (that would silently let mismatched orgs share one pool).
+    Checks access_token first, matching xswap_live.load_credentials' claim source; the
+    id_token fallback is this guard's own extension (load_credentials has none), covering
+    a credential whose access_token lacks the claim but whose id_token still carries it.
+    Fails closed: raises SwapError instead of returning None/unknown, because an
+    undeterminable organization must never be treated as matching another account's
+    organization (that would silently let mismatched orgs share one pool).
     """
     try:
         data = read_auth(home)
@@ -909,7 +911,9 @@ def main(argv=None):
                 raise SwapError("--pool and a positional NAME are mutually exclusive.")
             if args.allow_mixed and not args.pool:
                 raise SwapError("--allow-mixed requires --pool.")
-            names = parse_pool(args.pool) if args.pool else args.name
+            # Only split here; sync_openclaw's own parse_pool() call is the single place
+            # that dedupes and enforces >=2 distinct names, so this list isn't re-validated.
+            names = args.pool.split(",") if args.pool else args.name
             manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
         else:
             rest = getattr(args, "args", [])
