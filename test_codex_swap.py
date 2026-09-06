@@ -424,3 +424,170 @@ class AutoLauncherTests(unittest.TestCase):
         with patch('codex_swap.sys.platform','darwin'),patch('codex_swap.shutil.which',return_value='/fake/executable'),contextlib.redirect_stdout(io.StringIO()):
             self.manager.launch_auto_app('main,second',str(app),True)
         self.assertFalse((self.manager.root/'auto').exists())
+
+
+def dual_window_raw(remaining5h=90, remaining7d=90, reached=None, resets5h=10000, resets7d=20000):
+    bucket = {"planType": "pro",
+              "primary": {"usedPercent": 100 - remaining5h, "windowDurationMins": 300, "resetsAt": resets5h},
+              "secondary": {"usedPercent": 100 - remaining7d, "windowDurationMins": 10080, "resetsAt": resets7d}}
+    if reached:
+        bucket["rateLimitReachedType"] = reached
+    return {"rateLimitsByLimitId": {"codex": bucket}}
+
+
+def single_window_raw(remaining, resets):
+    return {"rateLimitsByLimitId": {"codex": {"planType": "pro",
+            "primary": {"usedPercent": 100 - remaining, "windowDurationMins": 10080, "resetsAt": resets}}}}
+
+
+class BestAccountTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        self.auth = {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token"}}
+        atomic_json(self.source / "auth.json", self.auth)
+        self.manager = Manager(self.base / "store", self.source)
+        self.manager.register("main")
+
+    def add(self, name, signed_in=True):
+        home = self.manager.prepare(name)
+        if signed_in:
+            atomic_json(home / "auth.json", self.auth)
+        return home
+
+    def fake_read_limits(self, mapping):
+        """mapping: {account name: raw response dict, or an Exception to raise}."""
+        by_home = {}
+        for name, value in mapping.items():
+            _, home = self.manager.account(name)
+            by_home[str(home)] = value
+
+        def read(codex, env, timeout=12):
+            value = by_home[env["CODEX_HOME"]]
+            if isinstance(value, BaseException):
+                raise value
+            return value
+        return read
+
+    def test_picks_the_highest_headroom(self):
+        self.add("second")
+        self.add("third")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+            "third": dual_window_raw(remaining5h=60, remaining7d=60),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "second")
+        self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
+        self.assertEqual({c["name"] for c in reason["candidates"]}, {"main", "second", "third"})
+
+    def test_skips_a_bucket_with_reached(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=95, remaining7d=95, reached="primary"),
+            "second": dual_window_raw(remaining5h=50, remaining7d=50),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, _ = self.manager.best_account()
+        self.assertEqual(name, "second")
+
+    def test_skips_disabled_accounts(self):
+        self.add("second")
+        self.manager.set_disabled("main", True)
+        fake = self.fake_read_limits({"second": dual_window_raw(remaining5h=10, remaining7d=10)})
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "second")
+        self.assertEqual({c["name"] for c in reason["candidates"]}, {"second"})
+
+    def test_skips_usage_unavailable_rows(self):
+        from xswap_usage import UsageError
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=70, remaining7d=70),
+            "second": UsageError("usage service unavailable"),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, reason = self.manager.best_account()
+        self.assertEqual(name, "main")
+        statuses = {c["name"]: c["status"] for c in reason["candidates"]}
+        self.assertIn("usage unavailable", statuses["second"])
+
+    def test_tie_break_on_resets_at(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": single_window_raw(50, 30000),
+            "second": single_window_raw(50, 20000),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake), patch.object(Manager, "codex", return_value="codex"):
+            name, _ = self.manager.best_account()
+        self.assertEqual(name, "second")
+
+    def test_all_unknown_falls_back_to_active_with_warning(self):
+        self.add("second", signed_in=False)
+        fake = self.fake_read_limits({"main": {}})
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", return_value=0) as call, \
+             contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--", "resume"])
+        self.assertEqual(code, 0)
+        self.assertIn("no account with known remaining quota; using main", stderr.getvalue())
+        self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "resume"])
+        self.assertEqual(call.call_args.kwargs["env"]["CODEX_HOME"], str(self.source))
+
+    def test_best_with_account_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--account", "main", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--auto", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--best", stderr.getvalue())
+
+    def test_best_with_accounts_without_auto_raises(self):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stderr = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), contextlib.redirect_stderr(stderr):
+            code = main(["run", "--best", "--accounts", "main,second", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--accounts requires --auto", stderr.getvalue())
+
+    def test_dry_run_prints_expected_json_shape(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+        })
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stdout = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(stdout):
+            code = main(["run", "--best", "--dry-run", "--", "exec", "hi"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(set(payload.keys()), {"account", "reason", "CODEX_HOME", "argv"})
+        self.assertEqual(set(payload["reason"].keys()), {"remaining", "candidates"})
+        self.assertEqual(payload["account"], "second")
+        self.assertEqual(payload["reason"]["remaining"], {"5h": 90, "7d": 90})
+        self.assertEqual({c["name"] for c in payload["reason"]["candidates"]}, {"main", "second"})
+        self.assertEqual(payload["CODEX_HOME"], str(self.manager.account("second")[1]))
+        self.assertEqual(payload["argv"], ["/usr/bin/codex", "exec", "hi"])

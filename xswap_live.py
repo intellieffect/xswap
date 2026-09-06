@@ -66,10 +66,8 @@ def validate_threshold(value):
     return float(value)
 
 
-def quota_available(raw, model=None, weekly_remaining=0):
-    """Unknown is not available. Require all applicable known windows > 0."""
-    weekly_remaining = validate_threshold(weekly_remaining)
-    buckets = normalize_limits(raw)
+def buckets_available(buckets, model=None, weekly_remaining=0):
+    """Same rule as quota_available, but on already-normalized buckets."""
     applicable = [b for b in buckets if b['id'] == 'codex']
     if model and 'spark' in model.lower():
         applicable.extend(b for b in buckets if 'spark' in (b['id'] + b['name']).lower())
@@ -97,6 +95,12 @@ def quota_available(raw, model=None, weekly_remaining=0):
         if weekly_remaining > 0 and not weekly_seen:
             unknown = True
     return None if unknown else True
+
+
+def quota_available(raw, model=None, weekly_remaining=0):
+    """Unknown is not available. Require all applicable known windows > 0."""
+    weekly_remaining = validate_threshold(weekly_remaining)
+    return buckets_available(normalize_limits(raw), model, weekly_remaining)
 
 
 def usage_failure(turn):
