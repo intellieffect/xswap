@@ -120,12 +120,12 @@ for line in sys.stdin:
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.args[1]["CODEX_HOME"], str(manager.source))
         self.assertEqual(manager.account()[0], "main")
-        self.assertIn("99% 사용 · 1% 남음", output.getvalue())
+        self.assertIn("99% used · 1% left", output.getvalue())
         self.assertNotIn("Spark", output.getvalue())
         with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as full:
             manager.show_accounts(include_spark=True)
         self.assertIn("Spark", full.getvalue())
-        self.assertIn("로그인 필요", output.getvalue())
+        self.assertIn("sign-in required", output.getvalue())
 
     def test_offline_never_starts_a_usage_server(self):
         manager = self.manager()

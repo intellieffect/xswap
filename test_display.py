@@ -1,5 +1,14 @@
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
 import unittest
-from xswap_display import render, summary, policy_label
+from unittest.mock import patch
+
+from xswap_display import STRINGS, dashboard, policy_label, render, resolve_lang, summary
 from xswap_usage import normalize_limits
 
 
@@ -10,23 +19,55 @@ def row(name='work', left=94, weekly=True):
                 'resetsAt': 100000}}})}
 
 
-class DisplayTests(unittest.TestCase):
+class StringsTableTests(unittest.TestCase):
+    def test_en_and_ko_cover_the_same_string_ids(self):
+        self.assertEqual(set(STRINGS['en']), set(STRINGS['ko']))
+
+    def test_ko_values_are_verbatim_originals(self):
+        original_ko = {
+            'no_accounts': '등록된 계정이 없습니다. xswap register main',
+            'header': 'xswap · 주간 사용량',
+            'legend': '█ 사용  ░ 남음',
+            'selected': '선택됨',
+            'exhausted': '한도 도달',
+            'disabled': '비활성화 (disabled)',
+            'signin_required': '로그인 필요',
+            'offline': '오프라인',
+            'unavailable': '조회 불가',
+            'no_weekly_data': '주간 사용량 미제공',
+            'used_left': '{used:g}% 사용 · {left:g}% 남음',
+            'reset_pending': '초기화 대기 중',
+            'resets_in': '초기화 {duration} 후',
+            'duration_days_hours': '{days}일 {hours}시간',
+            'duration_hours_mins': '{hours}시간 {mins}분',
+            'duration_mins': '{mins}분',
+            'autoswitch_off': '새 세션 자동전환 OFF',
+            'autoswitch_on_threshold': '새 세션 자동전환 ON · {pct:g}% 사용 시 전환',
+            'autoswitch_on_limit': '새 세션 자동전환 ON · 한도 도달 시 전환',
+            'footer': '선택됨 = 새 실행의 기본 계정 · 기존 세션 계정은 xswap auto-status',
+        }
+        self.assertEqual(STRINGS['ko'], original_ko)
+
+
+class DisplayKoreanTests(unittest.TestCase):
+    """Existing behavior, unchanged, when the caller explicitly asks for Korean."""
+
     def test_weekly_never_uses_short_window_as_fallback(self):
-        value = summary(row(weekly=False))
+        value = summary(row(weekly=False), lang='ko')
         self.assertIsNone(value['remaining'])
         self.assertEqual(value['summary'], '주간 사용량 미제공')
         self.assertNotIn('0%', value['summary'])
 
     def test_percent_bar_edges_and_colors(self):
         for left,tone,filled in [(100,'green',0),(94,'green',1),(15,'yellow',17),(0,'red',20)]:
-            value = summary(row(left=left))
+            value = summary(row(left=left), lang='ko')
             self.assertEqual(value['tone'],tone)
             self.assertEqual(value['bar'].count('█'),filled)
             self.assertEqual(value['used'],100-left)
 
     def test_default_is_private_selected_first_and_no_ansi_in_pipe(self):
         other = row('other');other['active']=False
-        text = render([other,row()],{'enabled':True,'weeklyRemainingThreshold':10},color=False,now=0)
+        text = render([other,row()],{'enabled':True,'weeklyRemainingThreshold':10},color=False,now=0,lang='ko')
         self.assertLess(text.index('work'),text.index('other'))
         self.assertNotIn('private@example.test',text)
         self.assertNotIn('\033',text)
@@ -35,13 +76,13 @@ class DisplayTests(unittest.TestCase):
         self.assertNotIn('사용 중',text)
 
     def test_stale_reset_does_not_restore_quota(self):
-        result = summary(row(left=0),now=200000)
+        result = summary(row(left=0),now=200000,lang='ko')
         self.assertEqual(result['remaining'],0)
         self.assertEqual(result['reset'],'초기화 대기 중')
 
     def test_disabled_policy_and_explicit_details(self):
-        self.assertIn('OFF',policy_label({}))
-        self.assertIn('private@example.test',render([row()],{},details=True,color=False))
+        self.assertIn('OFF',policy_label({},lang='ko'))
+        self.assertIn('private@example.test',render([row()],{},details=True,color=False,lang='ko'))
 
     def test_switch_alias_parses_default_selection(self):
         from codex_swap import parser
@@ -54,8 +95,168 @@ class DisplayTests(unittest.TestCase):
         value['status'] = 'ok (cached)'
         value['cached'] = True
         value['fetchedAt'] = 40
-        item = summary(value, now=100)
+        item = summary(value, now=100, lang='ko')
         self.assertEqual(item['summary'], '6% 사용 · 94% 남음')
-        text = render([value], {}, color=False, now=100)
+        text = render([value], {}, color=False, now=100, lang='ko')
         self.assertIn('work (cached 60s ago)', text)
         self.assertNotIn('조회 불가', text)
+
+
+class DisplayEnglishTests(unittest.TestCase):
+    """English is the default language for every string id."""
+
+    def test_default_lang_with_no_argument_is_english(self):
+        value = summary(row(weekly=False))
+        self.assertEqual(value['summary'], 'weekly usage unavailable')
+
+    def test_weekly_never_uses_short_window_as_fallback(self):
+        value = summary(row(weekly=False), lang='en')
+        self.assertIsNone(value['remaining'])
+        self.assertEqual(value['summary'], 'weekly usage unavailable')
+
+    def test_percent_bar_edges_and_colors(self):
+        for left,tone,filled in [(100,'green',0),(94,'green',1),(15,'yellow',17),(0,'red',20)]:
+            value = summary(row(left=left), lang='en')
+            self.assertEqual(value['tone'],tone)
+            self.assertEqual(value['bar'].count('█'),filled)
+            self.assertEqual(value['used'],100-left)
+
+    def test_used_left_summary_text(self):
+        value = row()
+        value['status'] = 'ok (cached)'
+        value['cached'] = True
+        value['fetchedAt'] = 40
+        item = summary(value, now=100, lang='en')
+        self.assertEqual(item['summary'], '6% used · 94% left')
+
+    def test_status_notes(self):
+        for status, expected in [('disabled', 'disabled'), ('not signed in', 'sign-in required'),
+                                  ('offline', 'offline'), ('usage unavailable: boom', 'unavailable')]:
+            value = {'name': 'x', 'active': False, 'identity': 'i', 'status': status, 'buckets': []}
+            item = summary(value, lang='en')
+            self.assertEqual(item['summary'], expected)
+
+    def test_no_weekly_window_note(self):
+        value = {'name': 'x', 'active': False, 'identity': 'i', 'status': 'ok', 'buckets': []}
+        item = summary(value, lang='en')
+        self.assertEqual(item['summary'], 'weekly usage unavailable')
+
+    def test_reset_durations(self):
+        cases = [
+            ((6*1440 + 4*60) * 60, 'resets in 6d 4h'),
+            ((2*60 + 13) * 60, 'resets in 2h 13m'),
+            (5 * 60, 'resets in 5m'),
+        ]
+        for remaining_seconds, expected in cases:
+            value = row(left=50)
+            value['buckets'][0]['windows'][0]['resetsAt'] = remaining_seconds
+            item = summary(value, now=0, lang='en')
+            self.assertEqual(item['reset'], expected)
+
+    def test_reset_pending_when_due(self):
+        result = summary(row(left=0), now=200000, lang='en')
+        self.assertEqual(result['remaining'], 0)
+        self.assertEqual(result['reset'], 'reset pending')
+
+    def test_policy_label_variants(self):
+        self.assertEqual(policy_label({}, lang='en'), 'New-session auto-switch OFF')
+        self.assertEqual(policy_label({'enabled': True, 'weeklyRemainingThreshold': 10}, lang='en'),
+                          'New-session auto-switch ON · switches at 90% used')
+        self.assertEqual(policy_label({'enabled': True}, lang='en'),
+                          'New-session auto-switch ON · switches at limit')
+
+    def test_render_header_badges_and_footer(self):
+        other = row('other'); other['active'] = False
+        text = render([other, row(left=0)], {'enabled': True, 'weeklyRemainingThreshold': 10}, color=False, now=0, lang='en')
+        self.assertIn('xswap · weekly usage', text)
+        self.assertIn('used', text)
+        self.assertIn('left', text)
+        self.assertIn('selected', text)
+        self.assertIn('limit reached', text)
+        self.assertIn('switches at 90% used', text)
+        self.assertIn('selected = default account for new runs · existing session accounts: xswap auto-status', text)
+
+    def test_render_no_accounts_message(self):
+        self.assertEqual(render([], {}, lang='en'), 'No accounts registered. xswap register main')
+
+    def test_details_still_shows_identity_and_english_usage_lines(self):
+        text = render([row()], {}, details=True, color=False, lang='en')
+        self.assertIn('private@example.test', text)
+
+
+class ResolveLangTests(unittest.TestCase):
+    def test_explicit_ko_wins(self):
+        self.assertEqual(resolve_lang('ko', {'LANG': 'en_US.UTF-8'}), 'ko')
+
+    def test_explicit_en_beats_korean_env(self):
+        self.assertEqual(resolve_lang('en', {'LANG': 'ko_KR.UTF-8'}), 'en')
+
+    def test_xswap_lang_ko(self):
+        self.assertEqual(resolve_lang(None, {'XSWAP_LANG': 'ko'}), 'ko')
+
+    def test_xswap_lang_en_overrides_lang_ko(self):
+        self.assertEqual(resolve_lang(None, {'XSWAP_LANG': 'en', 'LANG': 'ko_KR.UTF-8'}), 'en')
+
+    def test_lang_ko_kr_utf8_falls_back_when_xswap_lang_unset(self):
+        self.assertEqual(resolve_lang(None, {'LANG': 'ko_KR.UTF-8'}), 'ko')
+
+    def test_lang_en_us_utf8(self):
+        self.assertEqual(resolve_lang(None, {'LANG': 'en_US.UTF-8'}), 'en')
+
+    def test_unset_environment_is_english(self):
+        self.assertEqual(resolve_lang(None, {}), 'en')
+
+    def test_garbage_value_is_english(self):
+        self.assertEqual(resolve_lang(None, {'LANG': 'xx_XX.UTF-8'}), 'en')
+        self.assertEqual(resolve_lang(None, {'XSWAP_LANG': 'banana'}), 'en')
+
+    def test_lc_all_is_also_honored(self):
+        self.assertEqual(resolve_lang(None, {'LC_ALL': 'ko_KR.UTF-8'}), 'ko')
+
+
+class JsonOutputUnaffectedByLangTests(unittest.TestCase):
+    """`--json` output must stay byte-identical regardless of language."""
+
+    def test_list_json_rows_have_no_display_strings(self):
+        # --json prints account_rows() directly; summary()/render() (and their
+        # lang-dependent text) are never in that path, so the payload is the
+        # same regardless of --lang and carries no translated string at all.
+        rows = [row()]
+        payload = json.dumps(rows, ensure_ascii=False, indent=2)
+        self.assertFalse(re.search(r'[가-힣]', payload), payload)
+
+    def test_dashboard_default_language_has_no_korean_strings(self):
+        class FakeManager:
+            def account_rows(self):
+                return [row()]
+
+        with patch('xswap_cli.status_data', return_value={'sessions': [], 'enabled': True, 'weeklyRemainingThreshold': 10}):
+            data = dashboard(FakeManager())
+        payload = json.dumps(data, ensure_ascii=False)
+        self.assertFalse(re.search(r'[가-힣]', payload), payload)
+
+
+class OfflineListNoHangulUnderLangCTests(unittest.TestCase):
+    """`xswap list --offline` under LANG=C must contain no Hangul."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.codex_home = base / 'codex-home'
+        self.codex_home.mkdir()
+        self.swap_home = base / 'codex-swap'
+
+    def test_offline_list_has_no_hangul_under_lang_c(self):
+        from codex_swap import atomic_json, main
+        atomic_json(self.codex_home / 'auth.json',
+                    {'auth_mode': 'chatgpt', 'tokens': {'access_token': 'fake', 'refresh_token': 'fake'}})
+        env = dict(os.environ)
+        env.update({'CODEX_SWAP_HOME': str(self.swap_home), 'CODEX_HOME': str(self.codex_home), 'LANG': 'C'})
+        env.pop('LC_ALL', None)
+        env.pop('XSWAP_LANG', None)
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()) as out:
+            main(['register', 'main'])
+            main(['list', '--offline'])
+        output = out.getvalue()
+        self.assertFalse(re.search(r'[가-힣]', output), output)
