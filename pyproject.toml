@@ -31,7 +31,7 @@ xswap-codex = "xswap_cli:codex_main"
 Repository = "https://github.com/intellieffect/xswap"
 
 [tool.setuptools]
-py-modules = ["codex_swap", "xswap_usage", "xswap_live", "xswap_cli", "xswap_plugins", "xswap_credentials", "xswap_upgrade", "xswap_display", "xswap_menubar", "xswap_doctor", "xswap_switch", "xswap_init", "xswap_completion", "xswap_openclaw_state"]
+py-modules = ["codex_swap", "xswap_usage", "xswap_live", "xswap_cli", "xswap_plugins", "xswap_credentials", "xswap_upgrade", "xswap_display", "xswap_menubar", "xswap_doctor", "xswap_switch", "xswap_init", "xswap_completion", "xswap_openclaw_state", "xswap_alert"]
 packages = ["xswap_bridge"]
 
 [tool.setuptools.package-data]
