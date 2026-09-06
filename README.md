@@ -51,6 +51,25 @@ xswap run --best -- exec "summarize this repo"
 
 `codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot protect them. `--best` checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
 
+## Alerts
+
+```sh
+xswap list --warn 15   # Warn on any codex window with less than 15% remaining
+```
+
+`--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`.
+
+This is meant to be polled from `launchd` or `cron`, not run interactively. `launchd`'s `PATH` does not include `/opt/homebrew/bin`, so point a wrapper script at absolute paths:
+
+```sh
+#!/bin/sh
+# /Users/you/.local/bin/xswap-quota-check
+/Users/you/.local/bin/xswap list --warn 15 \
+  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+```
+
+Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does not schedule anything on its own.
+
 ## Automatic switching
 
 Start with an explicit pool of at least two signed-in accounts:
