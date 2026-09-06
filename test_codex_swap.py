@@ -369,6 +369,17 @@ class AccountTests(unittest.TestCase):
         self.assertTrue(second.exists())
         self.assertNotIn("second", self.manager.read()["accounts"])
 
+    def test_remove_drops_the_usage_cache_entry(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_usage("main", [], 1.0, "label-main")
+        self.manager.remember_usage("second", [], 1.0, "label-second")
+        self.manager.remove("second")
+        cache = json.loads(self.manager.usage_cache_path().read_text())
+        self.assertNotIn("second", cache)
+        self.assertIn("main", cache)
+
     def test_remove_managed_with_purge_deletes_directory(self):
         self.manager.register("main")
         second = self.manager.prepare("second")

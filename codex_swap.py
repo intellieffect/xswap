@@ -26,7 +26,7 @@ from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 
 class SwapError(Exception):
@@ -400,6 +400,7 @@ class Manager:
             if data["active"] == name:
                 data["active"] = None
             atomic_json(self.registry, data)
+            self._forget_usage(name)
             purged = False
             kept = entry["home"]
             if purge and entry.get("managed"):
@@ -462,6 +463,15 @@ class Manager:
         if time.time() - fetched_at > max_age:
             return None
         return {"buckets": buckets, "fetchedAt": fetched_at}
+
+    def _forget_usage(self, name):
+        """Drop a removed account's cache entry (label may be an email). Caller holds the lock."""
+        try:
+            data = json.loads(self.usage_cache_path().read_text())
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict) and data.pop(name, None) is not None:
+            atomic_json(self.usage_cache_path(), data)
 
     def remember_usage(self, name, buckets, fetched_at, label):
         """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
