@@ -61,7 +61,14 @@ def validate_name(name):
 
 
 def validate_warn_threshold(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 1 <= value <= 100:
+    if isinstance(value, bool):
+        raise SwapError("--warn must be a number from 1 to 100.")
+    if not isinstance(value, (int, float)):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise SwapError("--warn must be a number from 1 to 100.") from None
+    if not math.isfinite(value) or not 1 <= value <= 100:
         raise SwapError("--warn must be a number from 1 to 100.")
     return float(value)
 
@@ -495,7 +502,7 @@ def parser():
     listing = sub.add_parser("list", help="List accounts with live remaining quotas and reset times")
     listing.add_argument("--offline", action="store_true", help="Show local account labels without fetching usage")
     listing.add_argument("--json", action="store_true", dest="json_output")
-    listing.add_argument("--warn", type=float, metavar="PCT",
+    listing.add_argument("--warn", metavar="PCT",
                           help="Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
     listing.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")

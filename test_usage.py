@@ -200,6 +200,15 @@ for line in sys.stdin:
         self.assertEqual(code, 1)
         self.assertIn("--warn", stderr.getvalue())
 
+    def test_main_list_warn_non_numeric_pct_is_the_same_swap_error(self):
+        manager = self.manager()
+        env = {"CODEX_SWAP_HOME": str(manager.root), "CODEX_HOME": str(manager.source)}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = main(["list", "--warn", "abc"])
+        self.assertEqual(code, 1)
+        self.assertIn("xswap: --warn must be a number from 1 to 100.", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
