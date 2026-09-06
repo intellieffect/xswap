@@ -239,6 +239,66 @@ class Manager:
                 data["accounts"][name].pop("disabled", None)
             atomic_json(self.registry, data)
 
+    def _auto_session_running(self, name):
+        """Best effort: report whether a live auto bridge (desktop or CLI) currently uses this account."""
+        candidates = [self.root / "auto" / ".bridge.lock"]
+        cli_runs = self.root / "auto" / "cli-runs"
+        try:
+            if cli_runs.is_dir():
+                candidates += [run_dir / ".bridge.lock" for run_dir in cli_runs.iterdir() if run_dir.is_dir()]
+        except OSError:
+            return False
+        for lock_path in candidates:
+            try:
+                if not lock_path.exists():
+                    continue
+                fd = os.open(lock_path, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    try:
+                        state = json.loads((lock_path.parent / "status.json").read_text())
+                    except (OSError, ValueError):
+                        state = None
+                    if isinstance(state, dict) and state.get("account") == name:
+                        return True
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        return False
+
+    def remove(self, name, purge=False):
+        from xswap_cli import read_settings
+        with self.locked():
+            name, home = self.account(name)
+            settings = read_settings(self)
+            if settings.get("enabled") and name in settings.get("accounts", []):
+                raise SwapError(f"{name} is in the automatic switching pool. Run xswap auto-disable or auto-enable with a new pool first.")
+            if self._auto_session_running(name):
+                raise SwapError(f"{name} is used by a running auto session.")
+            data = self.read()
+            entry = data["accounts"].pop(name)
+            if data["active"] == name:
+                data["active"] = None
+            atomic_json(self.registry, data)
+            purged = False
+            kept = entry["home"]
+            if purge and entry.get("managed"):
+                target = self.root / "profiles" / name
+                resolved = target.resolve()
+                if (resolved != target or resolved.is_symlink() or not resolved.is_dir()
+                        or resolved.stat().st_uid != os.getuid()):
+                    raise SwapError(f"{name} was already removed from the registry. Refusing to purge an unexpected "
+                                     f"profile directory: its files were left untouched at {target}.")
+                shutil.rmtree(resolved)
+                purged = True
+                kept = None
+        return {"removed": name, "purged": purged, "kept": kept}
+
     def env(self, home):
         env = os.environ.copy()
         # A caller's API key or workload identity must not silently select another account.
@@ -534,6 +594,10 @@ def parser():
     d.add_argument("name")
     en = sub.add_parser("enable", help="Restore a disabled account to selection")
     en.add_argument("name")
+    rm = sub.add_parser("remove", help="Drop an account's registry entry; files are kept unless --purge")
+    rm.add_argument("name")
+    rm.add_argument("--purge", action="store_true", help="Also delete the managed profile directory (a registered home is never deleted)")
+    rm.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     o = sub.add_parser("openclaw", help="Sync an account to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
@@ -633,6 +697,26 @@ def main(argv=None):
         elif args.command == "enable":
             manager.set_disabled(args.name, False)
             print(f"Enabled {args.name}. Select it: xswap use {args.name}")
+        elif args.command == "remove":
+            name, _ = manager.account(args.name)
+            entry = manager.read()["accounts"][name]
+            target = manager.root / "profiles" / name
+            will_purge = args.purge and entry.get("managed")
+            if args.purge and not entry.get("managed"):
+                print(f"--purge is ignored for {name}: it is a registered home, not a managed profile.")
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    raise SwapError("Confirm with --yes.")
+                prompt = (f"Remove {name} from xswap and delete {target}? [y/N] " if will_purge
+                          else f"Remove {name} from xswap? [y/N] ")
+                if input(prompt).strip().lower() != "y":
+                    print("Aborted.")
+                    return 1
+            result = manager.remove(name, purge=args.purge)
+            if result["purged"]:
+                print(f"Removed {name}. Deleted the managed profile at {target}.")
+            else:
+                print(f"Removed {name} from xswap. Files kept at {result['kept']}.")
         elif args.command == "app":
             if args.auto:
                 if args.name:

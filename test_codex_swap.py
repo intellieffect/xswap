@@ -1,8 +1,10 @@
 import contextlib
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -334,6 +336,108 @@ class AccountTests(unittest.TestCase):
         self.manager.set_disabled("second", True)
         self.assertEqual([name for name, _ in self.manager.enabled_accounts()], ["main"])
 
+    def test_remove_managed_without_purge_keeps_directory(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        result = self.manager.remove("second")
+        self.assertEqual(result, {"removed": "second", "purged": False, "kept": str(second)})
+        self.assertTrue(second.exists())
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_managed_with_purge_deletes_directory(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        self.assertTrue(profile_dir.exists())
+        result = self.manager.remove("second", purge=True)
+        self.assertEqual(result, {"removed": "second", "purged": True, "kept": None})
+        self.assertFalse(profile_dir.exists())
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_registered_account_with_purge_leaves_source_home_untouched(self):
+        self.manager.register("main")
+        before = self.source.joinpath("auth.json").read_bytes()
+        result = self.manager.remove("main", purge=True)
+        self.assertEqual(result, {"removed": "main", "purged": False, "kept": str(self.source)})
+        self.assertTrue(self.source.exists())
+        self.assertEqual(self.source.joinpath("auth.json").read_bytes(), before)
+
+    def test_remove_active_account_clears_active(self):
+        self.manager.register("main")
+        self.assertEqual(self.manager.read()["active"], "main")
+        self.manager.remove("main")
+        self.assertIsNone(self.manager.read()["active"])
+
+    def test_remove_refuses_account_in_enabled_auto_pool(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "second"]})
+        with self.assertRaisesRegex(SwapError, "second is in the automatic switching pool"):
+            self.manager.remove("second")
+        self.assertIn("second", self.manager.read()["accounts"])
+
+    def test_remove_unknown_account_refuses(self):
+        with self.assertRaises(SwapError):
+            self.manager.remove("ghost")
+
+    def test_remove_purge_also_deletes_desktop_sibling(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        desktop_dir = profile_dir / "desktop"
+        desktop_dir.mkdir(parents=True)
+        (desktop_dir / "Cookies").write_text("fixture")
+        result = self.manager.remove("second", purge=True)
+        self.assertTrue(result["purged"])
+        self.assertFalse(desktop_dir.exists())
+        self.assertFalse(profile_dir.exists())
+
+    def test_remove_refuses_account_used_by_running_auto_session(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "second"}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with self.assertRaisesRegex(SwapError, "second is used by a running auto session"):
+                self.manager.remove("second")
+        finally:
+            os.close(fd)
+        self.assertIn("second", self.manager.read()["accounts"])
+
+    def test_remove_ignores_other_accounts_running_auto_session(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "main"}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            self.manager.remove("second")
+        finally:
+            os.close(fd)
+        self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_remove_purge_safety_failure_reports_registry_already_removed(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        shutil.rmtree(profile_dir)
+        external = self.base / "external-second"
+        external.mkdir()
+        profile_dir.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(SwapError, "second was already removed from the registry.*left untouched"):
+            self.manager.remove("second", purge=True)
+        self.assertNotIn("second", self.manager.read()["accounts"])
+        self.assertTrue(external.exists())
+
     def test_sync_openclaw_refuses_disabled_account_before_any_subprocess(self):
         self.manager.register("main")
         second = self.manager.prepare("second")
@@ -387,6 +491,51 @@ class MainCLITests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
         self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
+
+    def test_remove_subcommand_wires_through_main_with_yes(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second", "--yes"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_without_yes_in_non_tty_returns_error(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=False), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 1)
+        self.assertIn("Confirm with --yes", err.getvalue())
+        self.assertIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_accepts_lowercase_y(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+             patch("builtins.input", return_value="y"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_accepts_uppercase_y(self):
+        with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+             patch("builtins.input", return_value="Y"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "second"]), 0)
+        self.assertIn("Removed second", out.getvalue())
+        self.assertNotIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_interactive_prompt_rejects_non_y_answers(self):
+        for answer in ("n", "yes", ""):
+            with self.subTest(answer=answer):
+                with patch.object(self.codex_swap.sys.stdin, "isatty", return_value=True), \
+                     patch("builtins.input", return_value=answer), \
+                     contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(self.codex_swap.main(["remove", "second"]), 1)
+                self.assertIn("Aborted", out.getvalue())
+                self.assertIn("second", self.codex_swap.Manager().read()["accounts"])
+
+    def test_remove_purge_on_registered_home_prints_ignored_note(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["remove", "main", "--purge", "--yes"]), 0)
+        self.assertIn("--purge is ignored for main", out.getvalue())
+        self.assertTrue(self.source.exists())
 
 
 if __name__ == "__main__":
