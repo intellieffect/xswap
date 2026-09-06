@@ -18,6 +18,7 @@ from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_p
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
 from xswap_cli import read_settings
+from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 TOKEN_WARN_SECONDS = 24 * 3600
@@ -212,6 +213,84 @@ def check_openclaw():
     return [check("openclaw", OK, f"openclaw + node found; plugin-sdk resolvable ({package_root})")]
 
 
+def _codex_weekly_remaining_from_cache(cache_path, name, label):
+    """The codex bucket's weekly-window remainingPercent from usage-cache.json, or
+    None if there's no fresh cache entry for this exact identity. Never spawns a
+    process or makes a network call -- doctor stays fully offline.
+    """
+    try:
+        data = json.loads(Path(cache_path).read_text())
+    except (OSError, ValueError):
+        return None
+    entry = data.get(name) if isinstance(data, dict) else None
+    if not isinstance(entry, dict) or entry.get("identity") != label:
+        return None
+    buckets = entry.get("buckets")
+    if not isinstance(buckets, list):
+        return None
+    bucket = next((b for b in buckets if isinstance(b, dict) and str(b.get("id") or "").lower() == "codex"), None)
+    if not bucket:
+        return None
+    weekly = None
+    for window in bucket.get("windows") or []:
+        if not isinstance(window, dict):
+            continue
+        minutes = window.get("windowMinutes")
+        is_weekly = (window.get("position") == "secondary") if minutes is None else (isinstance(minutes, (int, float)) and not isinstance(minutes, bool) and minutes >= 1440)
+        if is_weekly and weekly is None:
+            weekly = window
+    if weekly is None:
+        return None
+    remaining = weekly.get("remainingPercent")
+    return remaining if isinstance(remaining, (int, float)) and not isinstance(remaining, bool) else None
+
+
+def check_openclaw_cooldown(name, home, disabled, cooldowns, cache_path):
+    """One row for an xswap account that has a computable OpenClaw profile id; an
+    account with no usable ChatGPT OAuth credential (API key, unreadable, disabled
+    with no login) has nothing to check and is omitted entirely (returns None),
+    the same way check_token_expiry only runs after credentials already read OK.
+    """
+    label = f"{name}: openclaw cooldown"
+    profile_id = profile_id_for_home(home)
+    if profile_id is None:
+        return None
+    cooldown = cooldowns.get(profile_id)
+    if cooldown is None:
+        return check(label, OK, "no cooldown")
+    until = format_until(cooldown["blockedUntil"])
+    reason = cooldown.get("blockedReason") or "unknown"
+    weekly = _codex_weekly_remaining_from_cache(cache_path, name, identity(home))
+    if weekly is not None and weekly > 0:
+        detail = f"blocked {until} ({reason}), but usage-cache shows {weekly:g}% weekly remaining; run: xswap openclaw --clear-cooldown {name}"
+        return _finish(label, FAIL, detail, disabled)
+    detail = f"blocked {until} ({reason}); run xswap list to verify"
+    return _finish(label, WARN, detail, disabled)
+
+
+def check_openclaw_cooldowns(accounts, cache_path):
+    """Skip entirely (no rows) when OpenClaw's state database is absent -- there is
+    nothing stale to report yet, matching check_openclaw()'s own WARN-not-FAIL
+    treatment of an optional integration that most installs never touch.
+    """
+    sqlite_path = default_sqlite_path()
+    if not sqlite_path.exists():
+        return []
+    try:
+        cooldowns = read_cooldowns(sqlite_path)
+    except OpenClawStateError as exc:
+        return [check("openclaw cooldowns", WARN, str(exc))]
+    rows = []
+    for name, value in accounts.items():
+        home = Path(value["home"])
+        if not home.is_dir():
+            continue
+        row = check_openclaw_cooldown(name, home, bool(value.get("disabled")), cooldowns, cache_path)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def check_storage(manager):
     try:
         info = manager.root.lstat()
@@ -265,6 +344,7 @@ def run(manager):
         results.append(check_auto_pool(settings, accounts))
     results.append(check_auto_runs(manager))
     results.extend(check_openclaw())
+    results.extend(check_openclaw_cooldowns(accounts, manager.usage_cache_path()))
     results.append(check_storage(manager))
     results.append(registry_check)
     return results

@@ -642,6 +642,87 @@ class Manager:
         print(f"OpenClaw now selects {label} for {len(output['completed'])} agents{rotates}; Gateway auth reloaded.\nBackup: {output['backup']}")
         return output
 
+    def clear_openclaw_cooldown(self, names=None, dry=False, yes=False, backup_dir=None):
+        """Clear a stale OpenClaw auth-profile cooldown (one 429 lasts until its reset
+        time even after the real limit is gone) for the given account(s), or every
+        registered account when none are named. Stops the local Gateway before writing
+        and restarts it after; a failed stop aborts before the database is touched.
+        """
+        from xswap_openclaw_state import OpenClawStateError, clear_cooldown, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+
+        data = self.read()
+        if names:
+            pool = names if isinstance(names, list) else [names]
+            entries = []
+            for entry in pool:
+                entry_name, entry_home = self.account(entry, mapped=False)
+                entries.append((entry_name, entry_home))
+        else:
+            entries = [(name, Path(value["home"])) for name, value in data["accounts"].items()]
+        if not entries:
+            raise SwapError("No registered accounts to check.")
+
+        sqlite_path = default_sqlite_path()
+        if not sqlite_path.exists():
+            raise SwapError(f"OpenClaw state database not found: {sqlite_path}")
+        try:
+            cooldowns = read_cooldowns(sqlite_path)
+        except OpenClawStateError as exc:
+            raise SwapError(str(exc)) from None
+
+        targets = []  # [(name, profile_id)]
+        for entry_name, entry_home in entries:
+            profile_id = profile_id_for_home(entry_home)
+            if profile_id and profile_id in cooldowns:
+                targets.append((entry_name, profile_id))
+
+        if not targets:
+            print("No stale OpenClaw cooldowns found.")
+            return {"cleared": []}
+
+        for entry_name, profile_id in targets:
+            info = cooldowns[profile_id]
+            reason = info.get("blockedReason") or "unknown"
+            print(f"{entry_name} ({profile_id}): blocked {format_until(info['blockedUntil'])} ({reason})")
+
+        if dry:
+            print("Dry run: no changes made; the Gateway was not stopped.")
+            return {"cleared": [], "dryRun": True}
+
+        executable = shutil.which("openclaw")
+        if not executable:
+            raise SwapError("OpenClaw sync requires openclaw in PATH.")
+
+        if not yes:
+            if not sys.stdin.isatty():
+                raise SwapError("Confirm with --yes.")
+            prompt = f"Stop the Gateway and clear {len(targets)} OpenClaw cooldown(s)? [y/N] "
+            if input(prompt).strip().lower() != "y":
+                print("Aborted.")
+                return {"cleared": [], "aborted": True}
+        backup_root = Path(backup_dir).expanduser().resolve() if backup_dir else self.root / "backups" / "openclaw-cooldown"
+
+        with self.locked():
+            stop = subprocess.run([executable, "gateway", "stop", "--force"],
+                                  capture_output=True, text=True, env=self.env(self.source), timeout=45)
+            if stop.returncode:
+                raise SwapError("OpenClaw Gateway stop failed; the database was not touched. "
+                                 f"{(stop.stderr or stop.stdout).strip() or 'unknown error'}")
+            try:
+                backup_path = clear_cooldown(sqlite_path, [pid for _, pid in targets], backup_root)
+            except OpenClawStateError as exc:
+                raise SwapError(f"Cooldown clear failed after the Gateway was stopped; restart it manually: "
+                                 f"openclaw gateway start. {exc}") from None
+            start = subprocess.run([executable, "gateway", "start"],
+                                   capture_output=True, text=True, env=self.env(self.source), timeout=45)
+            if start.returncode:
+                raise SwapError(f"Cleared the cooldown (backup: {backup_path}), but OpenClaw Gateway start failed; "
+                                 f"run: openclaw gateway start. {(start.stderr or start.stdout).strip() or 'unknown error'}")
+
+        cleared = [entry_name for entry_name, _ in targets]
+        print(f"Cleared {len(targets)} OpenClaw cooldown(s): {', '.join(cleared)}.\nBackup: {backup_path}")
+        return {"cleared": cleared, "backup": str(backup_path)}
+
     def login(self, name, device_auth=False):
         name, home = self.account(name)
         check_file_store(home)
@@ -815,6 +896,9 @@ def parser():
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
     o.add_argument("--dry-run", action="store_true")
     o.add_argument("--backup-dir", type=Path, help="Directory for small, private auth-state backups")
+    o.add_argument("--clear-cooldown", action="store_true",
+                    help="Clear a stale OpenClaw auth-profile cooldown for NAME/--pool (or every registered account), restarting the local Gateway")
+    o.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     r = sub.add_parser("run", help="Run Codex with the selected or named account")
     r.add_argument("--account"); r.add_argument("--dry-run", action="store_true")
     r.add_argument("--auto", action="store_true", help="Keep the interactive CLI session alive across quota account switches")
@@ -1008,7 +1092,16 @@ def main(argv=None):
             # Only split here; sync_openclaw's own parse_pool() call is the single place
             # that dedupes and enforces >=2 distinct names, so this list isn't re-validated.
             names = args.pool.split(",") if args.pool else args.name
-            manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
+            if args.clear_cooldown:
+                if args.allow_mixed:
+                    raise SwapError("--allow-mixed has no effect with --clear-cooldown.")
+                if args.agents:
+                    raise SwapError("--agent has no effect with --clear-cooldown.")
+                manager.clear_openclaw_cooldown(names, dry=args.dry_run, yes=args.yes, backup_dir=args.backup_dir)
+            else:
+                if args.yes:
+                    raise SwapError("--yes requires --clear-cooldown.")
+                manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
         elif args.command == "completion":
             from xswap_completion import generate
             sys.stdout.write(generate(parser(), args.shell))
