@@ -84,6 +84,19 @@ def check_file_store(home):
         raise SwapError(f"{home}: credential storage is {store!r}; this version supports file storage only. No credentials changed.")
 
 
+def resolve_openclaw_package_root(executable):
+    """Walk up from the openclaw executable to its package.json (name: "openclaw")."""
+    for directory in Path(executable).resolve().parents:
+        package = directory / "package.json"
+        if package.is_file():
+            try:
+                if json.loads(package.read_text()).get("name") == "openclaw":
+                    return directory
+            except (OSError, ValueError):
+                pass
+    return None
+
+
 def identity(home):
     path = home / "auth.json"
     if not path.exists():
@@ -407,16 +420,7 @@ class Manager:
         node = shutil.which("node")
         if not executable or not node:
             raise SwapError("OpenClaw sync requires openclaw and node in PATH.")
-        package_root = None
-        for directory in Path(executable).resolve().parents:
-            package = directory / "package.json"
-            if package.is_file():
-                try:
-                    if json.loads(package.read_text()).get("name") == "openclaw":
-                        package_root = directory
-                        break
-                except (OSError, ValueError):
-                    pass
+        package_root = resolve_openclaw_package_root(executable)
         if package_root is None:
             raise SwapError("Cannot locate OpenClaw's installed package through its executable. Use the standard npm installation.")
         helper = Path(__file__).resolve().parent / "xswap_bridge" / "openclaw.mjs"

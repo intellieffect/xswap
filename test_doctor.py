@@ -135,6 +135,83 @@ class DoctorTests(unittest.TestCase):
         row = find(doctor.run(manager), "credential store")
         self.assertEqual(row["status"], "FAIL")
 
+    # --- disabled accounts never fail the run ---
+
+    def test_disabled_account_missing_auth_warns_and_exit_is_0(self):
+        self.register_main()
+        self.manager.prepare("second")  # home created, no auth.json signed in
+        self.manager.set_disabled("second", True)
+        results = self.run_doctor()
+        row = find(results, "second: credentials")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("disabled", row["detail"])
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 0)
+
+    def test_disabled_account_expired_token_warns_not_fails(self):
+        self.register_main()
+        second_home = self.manager.prepare("second")
+        atomic_json(second_home / "auth.json", {"auth_mode": "chatgpt",
+            "tokens": {"access_token": fake_jwt(exp=time.time() - 3600), "refresh_token": "fixture-refresh"}})
+        self.manager.set_disabled("second", True)
+        results = self.run_doctor()
+        row = find(results, "second: token expiry")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("disabled", row["detail"])
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+
+    def test_disabled_account_missing_home_warns_not_fails(self):
+        self.register_main()
+        second_home = self.manager.prepare("second")
+        import shutil as shutil_module
+        shutil_module.rmtree(second_home)
+        self.manager.set_disabled("second", True)
+        results = self.run_doctor()
+        row = find(results, "second: home")
+        self.assertEqual(row["status"], "WARN")
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+
+    def test_enabled_account_missing_auth_still_fails(self):
+        self.register_main()
+        self.manager.prepare("second")
+        results = self.run_doctor()
+        row = find(results, "second: credentials")
+        self.assertEqual(row["status"], "FAIL")
+
+    # --- corrupted auto.json: one FAIL, not duplicated across wrapper/auto pool ---
+
+    def test_corrupted_auto_json_single_fail_and_skips_wrapper_and_pool(self):
+        self.register_main()
+        (self.manager.root / "auto.json").write_text("not json")
+        results = self.run_doctor()
+        names = [r["name"] for r in results]
+        self.assertEqual(find(results, "auto settings")["status"], "FAIL")
+        self.assertNotIn("wrapper", names)
+        self.assertNotIn("auto pool", names)
+        # Only one row reports this cause.
+        self.assertEqual(names.count("auto settings"), 1)
+
+    # --- check_wrapper ---
+
+    def test_check_wrapper_not_connected_is_ok(self):
+        row = doctor.check_wrapper({})
+        self.assertEqual(row["status"], "OK")
+
+    def test_check_wrapper_matches_proxy_is_ok(self):
+        link = self.base / "codex-link"
+        link.symlink_to("/fixture/xswap-codex")
+        settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
+        row = doctor.check_wrapper(settings)
+        self.assertEqual(row["status"], "OK")
+
+    def test_check_wrapper_changed_externally_warns(self):
+        link = self.base / "codex-link-2"
+        link.symlink_to("/something-else")
+        settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
+        row = doctor.check_wrapper(settings)
+        self.assertEqual(row["status"], "WARN")
+
     # --- auto pool ---
 
     def test_auto_pool_unknown_name_fails(self):
@@ -222,6 +299,48 @@ class DoctorTests(unittest.TestCase):
         for row in parsed:
             self.assertEqual(set(row), {"name", "status", "detail"})
             self.assertIn(row["status"], ("OK", "WARN", "FAIL"))
+
+    # --- secret env stripped before spawning probes ---
+
+    def test_codex_version_probe_strips_secret_env(self):
+        self.register_main()
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            class Result:
+                returncode = 0
+                stdout = "1.0.0"
+                stderr = ""
+            return Result()
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "leak", "CODEX_WORKLOAD_IDENTITY_X": "leak"}), \
+                patch("shutil.which", side_effect=lambda n: "/fixture/codex" if n == "codex" else None), \
+                patch("subprocess.run", side_effect=fake_run):
+            doctor.check_codex_binary()
+        self.assertNotIn("OPENAI_API_KEY", captured)
+        self.assertNotIn("CODEX_WORKLOAD_IDENTITY_X", captured)
+
+    def test_openclaw_probe_strips_secret_env(self):
+        package_root = self.base / "openclaw-pkg"
+        package_root.mkdir()
+        (package_root / "package.json").write_text(json.dumps({"name": "openclaw"}))
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs.get("env") or {})
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return Result()
+
+        with patch.dict(os.environ, {"CODEX_API_KEY": "leak"}), \
+                patch("shutil.which", side_effect=lambda n: str(self.base / n) if n in ("openclaw", "node") else None), \
+                patch("xswap_doctor.resolve_openclaw_package_root", return_value=package_root), \
+                patch("subprocess.run", side_effect=fake_run):
+            doctor.check_openclaw()
+        self.assertNotIn("CODEX_API_KEY", captured)
 
     def test_never_prints_raw_token(self):
         token = fake_jwt(exp=time.time() + 100000)
