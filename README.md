@@ -88,16 +88,13 @@ xswap list --warn 15   # Warn on any codex window with less than 15% remaining
 
 `--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`.
 
-This is meant to be polled from `launchd` or `cron`, not run interactively. `launchd`'s `PATH` does not include `/opt/homebrew/bin`, so point a wrapper script at absolute paths:
+This is meant to be polled from `launchd` or `cron`, not run interactively. `xswap alert --install` sets that up for you:
 
 ```sh
-#!/bin/sh
-# /Users/you/.local/bin/xswap-quota-check
-/Users/you/.local/bin/xswap list --warn 15 \
-  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+xswap alert --install --warn 15 --every 30
 ```
 
-Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does not schedule anything on its own.
+On macOS this writes `~/.local/share/codex-swap/alert/run.sh` (a wrapper that calls the absolute `xswap` path resolved at install time, since `launchd`'s `PATH` lacks `/opt/homebrew/bin`, and turns each `warn:` line into an `osascript` notification) and `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`, then loads it with `launchctl bootstrap`; each run's output lands in `alert/last.log`. Check it with `xswap alert --status` and remove it with `xswap alert --uninstall`. On non-macOS, `--install` prints an equivalent `cron` line instead of writing anything.
 
 ## Status line
 

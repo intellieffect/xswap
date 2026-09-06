@@ -26,6 +26,8 @@ from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
+from xswap_alert import AlertError
+from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
 __version__ = "0.6.3"
 
@@ -869,6 +871,14 @@ def parser():
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.1")
     up.add_argument("--dry-run", action="store_true")
+    al = sub.add_parser("alert", help="Install, remove, or inspect a launchd job that polls `list --warn` and posts macOS notifications")
+    al.add_argument("--install", action="store_true", help="Write the wrapper script and plist, then load it")
+    al.add_argument("--uninstall", action="store_true", help="Unload the job and delete the wrapper script and plist")
+    al.add_argument("--status", action="store_true", help="Show whether the job is installed and loaded, and the last log tail")
+    al.add_argument("--dry-run", action="store_true", help="Print what --install/--uninstall would do without changing anything")
+    al.add_argument("--warn", type=float, default=15, metavar="PCT", help="Threshold passed to `list --warn` (1-100, default 15)")
+    al.add_argument("--every", type=float, default=30, metavar="MINUTES", help="Polling interval in minutes (default 30; launchd merges under 60s)")
+    al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name", nargs="?")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
@@ -1001,6 +1011,14 @@ def main(argv=None):
             show_status(manager, args.prune)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
+        elif args.command == "alert":
+            if sum((args.install, args.uninstall, args.status)) != 1:
+                raise SwapError("Give exactly one of --install, --uninstall, or --status.")
+            if args.install:
+                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached, dry_run=args.dry_run)
+            if args.uninstall:
+                return alert_uninstall(manager.root, dry_run=args.dry_run)
+            return alert_status(manager.root)
         elif args.command in ("use", "switch"):
             if bool(args.name) == bool(args.best):
                 raise SwapError("Give an account name or --best.")
@@ -1136,7 +1154,7 @@ def main(argv=None):
                 raise SwapError("--accounts requires --auto.")
             return manager.launch_cli(getattr(args, "account", None), rest, getattr(args, "dry_run", False))
         return 0
-    except (SwapError, LiveError, UpgradeError, OSError) as exc:
+    except (SwapError, LiveError, UpgradeError, AlertError, OSError) as exc:
         print(f"xswap: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
