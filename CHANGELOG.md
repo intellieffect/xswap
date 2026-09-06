@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0
+
+Onboarding, unattended-operation safety, and shell ergonomics. No change to existing account, session, or auto-mode behavior unless a new command or flag is used; the only default that changes is the dashboard language (see below).
+
+- `xswap init [--yes] [--no-auto] [--weekly-remaining PCT]` walks first-run setup: registers the existing Codex login as `main`, offers to add accounts, enables automatic switching with the `codex` wrapper when two or more accounts exist, sets the weekly reserve, and finishes with `doctor`. Idempotent; commands run against an empty registry now hint at it (#29).
+- `xswap doctor` reports a per-account `openclaw cooldown` row: FAIL when OpenClaw holds a profile in cooldown while the usage cache shows weekly quota remaining, WARN when remaining is unknown, omitted when OpenClaw or its state database is absent. `xswap openclaw --clear-cooldown [NAME | --pool a,b] [--dry-run] [--yes]` stops the Gateway, takes a private WAL-aware sqlite backup, removes only the stale block, and restarts the Gateway; it never writes if the Gateway stop fails (#31).
+- `xswap alert --install [--warn PCT] [--every MINUTES] [--cached SECONDS]` writes a private wrapper and a `launchd` agent that runs `list --warn` on a schedule and posts a macOS notification per warning line; `--uninstall` and `--status` manage it; non-macOS prints the equivalent crontab line. All install-time paths are shell-quoted (#27).
+- `xswap list`, `usage`, and `dashboard` print English by default; `--lang ko` or `XSWAP_LANG=ko` (or a Korean `LC_ALL`/`LANG`) keeps the previous Korean text verbatim. The menu bar app resolves the same rule and passes it to its dashboard subprocess. `--json`, `--short`, and `--warn` output are unchanged (#28).
+- `xswap completion zsh|bash` prints a completion script generated from the parser; account-name positions complete from the local registry with `list --offline --json`, never touching the network (#30).
+- Packaging: a unit test now fails when a top-level module is missing from `py-modules`, after two of this release's modules were initially left out (#29).
+- GitHub Actions bumped: checkout 7.0.1, setup-python 7.0.0, setup-node 7.0.0 (#1, #2, #3).
+
 ## 0.6.3
 
 - `xswap --version` reported 0.6.1 on the 0.6.2 release because the version string is kept in both `pyproject.toml` and `codex_swap.__version__` and only one was bumped. Both now read 0.6.3, and a unit test fails whenever the two drift. `xswap upgrade` compares `__version__` with the newest tag, so a stale string could also make it skip a real update.
