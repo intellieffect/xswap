@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
 xswap --version
 ```
 
@@ -71,7 +71,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.0'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.5.1'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -257,4 +257,14 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 
 macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오.
 
-`xswap switch NAME` is an alias for `xswap use NAME`: it selects the default for new launches, not a live switch of existing sessions.
+`xswap switch NAME`(`xswap use NAME`과 동일)은 기본 계정을 선택하고 **실행 중인 호환 자동 모드 CLI·데스크톱 브리지 전체에 전환을 전달**합니다. 대기 중인 세션은 바로 적용하고, 응답 중인 세션은 모든 턴이 끝난 뒤 적용합니다. 서버 프로세스와 대화는 유지됩니다. 자동 풀 밖의 등록 계정도 수동 선택할 수 있으며, 이후 턴의 자동 전환 풀·잔여량 정책은 그대로 적용됩니다.
+
+```sh
+xswap switch work
+xswap auto-status                    # manualState: pending / applying / applied / failed
+xswap switch work --default-only      # 새 실행의 기본값만 변경
+```
+
+결과는 적용 완료(`applied`), 대기(`pending`), 미지원(`unsupported`), 실패(`failed`), 수신 미확인(`unconfirmed`) 건수로 표시합니다. 실제 인증 갱신 성공 응답이 있어야 적용 완료로 셉니다. 명령은 최대 2초 동안 응답을 확인하며, 대기 중인 요청의 후속 상태는 `auto-status`에서 확인합니다. 실패·수신 미확인은 종료 코드 1을 반환하며 저장된 기본 계정은 유지됩니다. 바쁜 세션에 반복 요청하면 마지막 선택이 대기 요청을 대체합니다.
+
+**이전 버전으로 이미 실행 중인 브리지와 일반 고정 계정 세션은 수신할 수 없습니다.** 업데이트된 설치본으로 자동 모드 세션을 한 번 열어야 합니다. `manualSwitchVersion: 1`이 지원 여부를 나타냅니다. 설치는 실행 중인 프로세스를 교체하거나 종료하지 않습니다. 계정별 인증 파일을 복사하지 않으며, 비공개 로컬 요청 파일에는 계정 이름과 프로세스별 식별자만 기록합니다.

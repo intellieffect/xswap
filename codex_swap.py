@@ -26,7 +26,7 @@ from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 class SwapError(Exception):
@@ -645,10 +645,11 @@ def parser():
     dr.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
-    up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.0")
+    up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.1")
     up.add_argument("--dry-run", action="store_true")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name")
+    u.add_argument("--default-only", action="store_true", help="Change only the default for future sessions")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
     d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
     d.add_argument("name")
@@ -762,7 +763,15 @@ def main(argv=None):
                 manager.sync_openclaw(args.name, select=True)
             else:
                 manager.use(args.name)
-            print(f"Selected {args.name}. CLI: xswap · Desktop: xswap app\nRunning sessions and plain codex keep their current account.")
+            print(f"Selected {args.name}.")
+            if not args.default_only:
+                from xswap_switch import switch_running
+                report = switch_running(manager, args.name)
+                print('Running bridges: ' + ', '.join(f'{key}={value}' for key, value in report.items()))
+                print('Pending requests apply when the current turn finishes. '
+                      'Older bridges and sessions without a bridge require reopening once.')
+                if report['failed'] or report['unconfirmed']:
+                    return 1
         elif args.command == "disable":
             manager.set_disabled(args.name, True)
             print(f"Disabled {args.name}. It is skipped by use, --auto pools, and live usage fetches. Restore it: xswap enable {args.name}")

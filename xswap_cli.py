@@ -340,7 +340,7 @@ def status_data(manager, prune=False, cleanup=True):
             continue
         result.append({'surface': 'desktop' if run_dir is None else 'cli',
             'running': running, **{key: state.get(key) for key in
-            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold')}})
+            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance', 'manualRequest', 'manualState')}})
     wrapper = settings.get('wrapper') or {}
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and

@@ -131,7 +131,12 @@ class AccountPool:
         return validate_threshold(read_settings(self.manager).get('weeklyRemainingThreshold', 0))
 
     def prepare(self, name):
-        home = self.homes[name]
+        # Manual selections may be outside the automatic fallback pool.
+        from codex_swap import check_file_store
+        if name not in {n for n, _ in self.manager.enabled_accounts()}:
+            raise LiveError('selected account is disabled or removed')
+        _, home = self.manager.account(name)
+        check_file_store(home)
         # Reject unsafe files before the official CLI can read/refresh them.
         try:
             read_auth(home)
@@ -173,6 +178,9 @@ class Bridge:
         self.stopping = False
         self.switches = 0
         self.policy_threshold = None
+        self.instance = uuid.uuid4().hex
+        self.manual_request = None
+        self.manual_state = None
 
     @staticmethod
     def stdout_message(message):
@@ -187,7 +195,9 @@ class Bridge:
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.5.0', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': '0.5.1', 'weeklyRemainingThreshold': self.threshold(),
+                'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
+                'manualRequest': self.manual_request, 'manualState': self.manual_state,
                 'updatedAt': time.time(), **extra})
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
 
@@ -220,6 +230,49 @@ class Bridge:
         self.last_quota = raw
         self.status('switched' if changed else 'ready')
 
+    async def apply_manual_switch(self):
+        """Called with gate held; only idle servers may change authentication."""
+        if not self.status_path or not self.initialized or self.stopping:
+            return False
+        from xswap_switch import read_private_json
+        try:
+            request = read_private_json(self.status_path.parent / 'switch.json')
+        except (OSError, ValueError):
+            return False
+        if (request.get('instance') != self.instance or
+                not isinstance(request.get('id'), str) or
+                not isinstance(request.get('account'), str)):
+            return False
+        if request['id'] == self.manual_request and self.manual_state != 'pending':
+            return False
+        new_request = request['id'] != self.manual_request
+        self.manual_request = request['id']
+        if self.active:
+            if new_request or self.manual_state != 'pending':
+                self.manual_state = 'pending'
+                self.status('manual-switch-pending')
+            return False
+        self.manual_state = 'applying'
+        self.status('manual-switch-applying')
+        try:
+            credentials, raw = await asyncio.to_thread(self.pool.prepare, request['account'])
+            await self.install(request['account'], credentials, raw)
+            self.manual_state = 'applied'
+            self.status('manual-switch-applied')
+            # Update the TUI's quota cache for the newly authenticated account.
+            self.emit({'method': 'account/rateLimits/updated', 'params': raw})
+            return True
+        except Exception:
+            self.manual_state = 'failed'
+            self.status('manual-switch-failed')
+            return False
+
+    async def manual_switch_reader(self):
+        while True:
+            async with self.gate:
+                await self.apply_manual_switch()
+            await asyncio.sleep(0.25)
+
     def threshold(self):
         return validate_threshold(getattr(self.pool, 'weekly_remaining', 0))
 
@@ -246,6 +299,8 @@ class Bridge:
         return False
 
     async def before_turn(self, model=None):
+        if await self.apply_manual_switch():
+            return
         if self.active:
             return
         threshold = self.threshold()
@@ -417,7 +472,8 @@ class Bridge:
         self.process = await asyncio.create_subprocess_exec(*self.argv, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             env=self.env, start_new_session=True, limit=32 * 1024 * 1024)
-        readers = [asyncio.create_task(self.server_reader()), asyncio.create_task(self.client_reader())]
+        readers = [asyncio.create_task(self.server_reader()), asyncio.create_task(self.client_reader()),
+                   asyncio.create_task(self.manual_switch_reader())]
         try:
             done, _ = await asyncio.wait(readers, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
