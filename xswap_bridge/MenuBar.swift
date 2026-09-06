@@ -1,5 +1,81 @@
 import AppKit
 
+// MARK: - Localization
+//
+// The menu bar app is launched from Finder/Dock/a login item, whose
+// environment usually carries no XSWAP_LANG/LANG at all (only PATH is
+// patched below for the subprocess call). It must not rely on the `xswap`
+// subprocess's own locale guess — it resolves language itself, the same
+// way `resolve_lang()` in xswap_display.py does, and passes `--lang`
+// explicitly to the subprocess so the JSON text always matches the chrome.
+//
+// Every Hangul-bearing string in this file lives in the STRINGS table
+// below; nothing outside this block may contain Hangul.
+// L10N_TABLE_BEGIN
+let STRINGS: [String: [String: String]] = [
+    "en": [
+        "header": "xswap · weekly usage",
+        "legend": "█ used  ░ left · selected = default for new runs",
+        "selected_badge": "  · selected",
+        "exhausted_badge": "  · limit reached",
+        "no_sessions": "no auto-switch sessions running",
+        "running_session": "running: %@ · %d sessions",
+        "checked_refreshes": "checked %@ · refreshes every 5 min",
+        "loading": "loading usage…",
+        "check_failed": "check failed · verify the CLI is installed and signed in",
+        "refresh_stale": "refresh failed · showing the last successful check",
+        "refreshing": "refreshing…",
+        "refresh": "Refresh",
+        "quit": "Quit menu bar",
+        "status_used": "XS %d%% used",
+        "status_checking": "XS · checking",
+        "status_needs_check": "XS · needs check",
+        "tooltip": "%@ · weekly %@ (default for new runs)",
+    ],
+    "ko": [
+        "header": "xswap · 주간 사용량",
+        "legend": "█ 사용  ░ 남음 · 선택됨 = 새 실행 기본 계정",
+        "selected_badge": "  · 선택됨",
+        "exhausted_badge": "  · 한도 도달",
+        "no_sessions": "실행 중인 자동전환 세션 없음",
+        "running_session": "실행 중: %@ · %d개 세션",
+        "checked_refreshes": "조회 %@ · 5분마다 갱신",
+        "loading": "사용량을 불러오는 중…",
+        "check_failed": "조회 실패 · CLI 설치와 로그인을 확인하세요",
+        "refresh_stale": "갱신 실패 · 표시된 수치는 마지막 조회 결과",
+        "refreshing": "새로고침 중…",
+        "refresh": "새로고침",
+        "quit": "메뉴바 종료",
+        "status_used": "XS %d%% 사용",
+        "status_checking": "XS · 조회 중",
+        "status_needs_check": "XS · 확인 필요",
+        "tooltip": "%@ · 주간 %@ (새 실행 기본 계정)",
+    ],
+]
+// L10N_TABLE_END
+
+/// "en" unless XSWAP_LANG starts with "ko", or (XSWAP_LANG unset) LC_ALL/LANG
+/// starts with "ko". Mirrors `resolve_lang()` in xswap_display.py exactly,
+/// since this process's own environment (not the subprocess's) is what a
+/// Finder/Dock/login-item launch actually carries.
+func resolveMenuLang(_ environment: [String: String]) -> String {
+    if let xswapLang = environment["XSWAP_LANG"], !xswapLang.isEmpty {
+        return xswapLang.lowercased().hasPrefix("ko") ? "ko" : "en"
+    }
+    for key in ["LC_ALL", "LANG"] {
+        if let value = environment[key], !value.isEmpty {
+            return value.lowercased().hasPrefix("ko") ? "ko" : "en"
+        }
+    }
+    return "en"
+}
+
+let menuLang = resolveMenuLang(ProcessInfo.processInfo.environment)
+
+func t(_ key: String) -> String {
+    STRINGS[menuLang]?[key] ?? STRINGS["en"]![key]!
+}
+
 struct Account: Decodable {
     let name: String
     let selected: Bool
@@ -29,7 +105,7 @@ final class MenuApp: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "XS · 조회 중"
+        item.button?.title = t("status_checking")
         rebuild()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
@@ -49,12 +125,12 @@ final class MenuApp: NSObject, NSApplicationDelegate {
     func rebuild() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.addItem(line("xswap · 주간 사용량"))
-        menu.addItem(line("█ 사용  ░ 남음 · 선택됨 = 새 실행 기본 계정"))
+        menu.addItem(line(t("header")))
+        menu.addItem(line(t("legend")))
         menu.addItem(.separator())
         if let data = snapshot {
             for account in data.accounts {
-                let badge = account.selected ? "  · 선택됨" : account.exhausted ? "  · 한도 도달" : ""
+                let badge = account.selected ? t("selected_badge") : account.exhausted ? t("exhausted_badge") : ""
                 menu.addItem(line((account.selected ? "▸ " : "") + account.name + badge))
                 let color: NSColor = account.tone == "red" ? .systemRed : account.tone == "yellow" ? .systemOrange : account.tone == "green" ? .systemGreen : .secondaryLabelColor
                 if !account.bar.isEmpty { menu.addItem(line(account.bar, color: color, mono: true)) }
@@ -64,30 +140,30 @@ final class MenuApp: NSObject, NSApplicationDelegate {
             }
             menu.addItem(line(data.policy))
             if data.sessions.isEmpty {
-                menu.addItem(line("실행 중인 자동전환 세션 없음"))
+                menu.addItem(line(t("no_sessions")))
             } else {
                 for name in Set(data.sessions.map { $0.account }).sorted() {
                     let count = data.sessions.filter { $0.account == name }.count
-                    menu.addItem(line("실행 중: \(name) · \(count)개 세션"))
+                    menu.addItem(line(String(format: t("running_session"), name, count)))
                 }
             }
             let formatter = DateFormatter(); formatter.dateFormat = "HH:mm:ss"
-            menu.addItem(line("조회 \(formatter.string(from: Date(timeIntervalSince1970: data.updatedAt))) · 5분마다 갱신"))
+            menu.addItem(line(String(format: t("checked_refreshes"), formatter.string(from: Date(timeIntervalSince1970: data.updatedAt)))))
         } else {
-            menu.addItem(line(failed ? "조회 실패 · CLI 설치와 로그인을 확인하세요" : "사용량을 불러오는 중…"))
+            menu.addItem(line(failed ? t("check_failed") : t("loading")))
         }
-        if failed && snapshot != nil { menu.addItem(line("갱신 실패 · 표시된 수치는 마지막 조회 결과", color: .systemOrange)) }
+        if failed && snapshot != nil { menu.addItem(line(t("refresh_stale"), color: .systemOrange)) }
         menu.addItem(.separator())
-        let refreshItem = NSMenuItem(title: busy ? "새로고침 중…" : "새로고침", action: #selector(refresh), keyEquivalent: "r")
+        let refreshItem = NSMenuItem(title: busy ? t("refreshing") : t("refresh"), action: #selector(refresh), keyEquivalent: "r")
         refreshItem.target = self; refreshItem.isEnabled = !busy
         menu.addItem(refreshItem)
-        let quit = NSMenuItem(title: "메뉴바 종료", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: t("quit"), action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self; menu.addItem(quit)
         item.menu = menu
         if let account = snapshot?.accounts.first(where: { $0.selected }), let remaining = account.remaining {
-            item.button?.title = "XS \(Int((100 - remaining).rounded()))% 사용" + (failed ? " !" : "")
-            item.button?.toolTip = "\(account.name) · 주간 \(account.summary) (새 실행 기본 계정)"
-        } else { item.button?.title = busy ? "XS · 조회 중" : "XS · 확인 필요" }
+            item.button?.title = String(format: t("status_used"), Int((100 - remaining).rounded())) + (failed ? " !" : "")
+            item.button?.toolTip = String(format: t("tooltip"), account.name, account.summary)
+        } else { item.button?.title = busy ? t("status_checking") : t("status_needs_check") }
     }
 
     @objc func refresh() {
@@ -97,7 +173,7 @@ final class MenuApp: NSObject, NSApplicationDelegate {
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = ["dashboard"]
+            process.arguments = ["dashboard", "--lang", menuLang]
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             // Persisted app launches may have a smaller PATH than the invoking shell.

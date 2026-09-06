@@ -15,7 +15,20 @@ xswap --version
 
 명령을 찾지 못하면 `uv tool update-shell` 실행 후 새 터미널을 여십시오. `codex-swap`도 동일한 명령입니다. Claude 전용 `cswap`은 변경하지 않습니다.
 
+## 셸 자동완성
+
+zsh는 `xswap completion zsh > "${fpath[1]}/_xswap"` 실행 또는 `.zshrc`에 `eval "$(xswap completion zsh)"` 추가, bash는 `.bashrc`에 `eval "$(xswap completion bash)"` 추가로 설정합니다. 서브커맨드·옵션·계정 이름(`xswap list --offline`으로 로컬에서만 조회, 네트워크 없음) 모두 자동완성됩니다.
+
 ## 처음 사용하기
+
+```sh
+codex login   # 아직 로그인하지 않았다면 먼저 실행
+xswap init    # 그 로그인을 등록하고, 계정을 추가로 물어보고, 자동 전환·정책을 설정한 뒤 doctor까지 실행
+```
+
+`xswap init`은 아래 네 단계를 대신 실행하는 얇은 마법사입니다: 현재 `codex login`이 아직 등록되지 않았다면 `main`으로 등록하고, 계정을 추가로 등록할지 물어보고(빈 값이면 건너뜀), 계정이 2개 이상이면 `auto-enable --wrap-codex`를 제안하고, `auto-policy --weekly-remaining 10`을 제안한 뒤 마지막으로 `xswap doctor`를 실행합니다. 각 단계는 건너뛸 수 있고 다시 실행해도 안전합니다. `--yes`를 주면 아무것도 묻지 않고 안전한 기본값만 적용하며(등록 대상이 있으면 `main`으로 등록, 계정 추가는 생략, 자동 전환은 켜지 않음), `--no-auto`는 자동 전환 단계를 건너뛰고, `--weekly-remaining PCT`는 정책 기본값을 덮어씁니다.
+
+또는 네 단계를 직접 실행할 수도 있습니다.
 
 ```sh
 xswap register main       # 현재 Codex 로그인 등록
@@ -55,16 +68,13 @@ xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 �
 
 `--warn PCT`는 1~100 사이 값만 받습니다. 기존 표(또는 `--json`) 출력은 그대로 stdout에 찍히고, 그 뒤 비활성화되지 않은(disabled 아닌) 계정 중 조회에 성공한 계정의 `codex` 한도 창을 검사해 기준치 미만인 창마다 `warn: 이름 창 N% left (resets ...)` 한 줄을 stderr로 출력합니다. 알 수 없는 잔여값은 절대 경고를 발생시키지 않습니다. 경고가 하나라도 발생하면 `xswap list --warn`은 종료코드 `3`을 반환하고, 아니면 `0`을 반환합니다. `--warn` 없는 평범한 `xswap list`는 영향받지 않고 항상 `0`을 반환합니다.
 
-대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없으므로, 절대경로로 된 래퍼 스크립트를 만들어 거기에 걸어야 합니다.
+대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `xswap alert --install`이면 그 등록까지 대신 해줍니다.
 
 ```sh
-#!/bin/sh
-# /Users/you/.local/bin/xswap-quota-check
-/Users/you/.local/bin/xswap list --warn 15 \
-  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+xswap alert --install --warn 15 --every 30
 ```
 
-`launchd`/`cron` 항목은 이 래퍼의 절대경로를 가리키게 하십시오. xswap 자체는 아무것도 스케줄링하지 않습니다.
+macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정한 절대경로의 `xswap`을 호출하는 래퍼 — `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없기 때문이며, `warn:` 줄마다 `osascript` 알림으로 바꿔줍니다)와 `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`를 만든 뒤 `launchctl bootstrap`으로 등록합니다. 매 실행 결과는 `alert/last.log`에 남습니다. 상태 확인은 `xswap alert --status`, 제거는 `xswap alert --uninstall`입니다. macOS가 아니면 `--install`은 아무것도 쓰지 않고 대신 동등한 `cron` 한 줄만 출력합니다.
 
 ### 상태 표시줄(status line)
 
@@ -142,6 +152,18 @@ OpenClaw 연결은 다음을 수행합니다.
 원래 인증 프로필은 보존합니다. 기존 모델·채널 설정이나 대화 기록은 변경하지 않으며, 테스트 메시지를 자동 전송하지도 않습니다. 정상 완료는 **저장·선택·Gateway 재적용 확인**을 뜻하며 모델의 실제 응답이나 잔여 사용량을 보장하지 않습니다.
 
 백업 경로를 바꾸려면 `xswap openclaw work --backup-dir /path/to/private-backups`를 사용하십시오. 전체 미디어·대화 DB를 백업하지 않습니다.
+
+### 죽은 OpenClaw 쿨다운
+
+OpenClaw는 429 한 번이면 해당 시각 기준 한도 초기화 시점까지 OpenAI 인증 프로필을 잠그고, 그 창이 끝나기 전에는 다시 확인하지 않습니다. 실제 한도가 그보다 먼저 풀려도(플랜 업그레이드, 상위에서의 수동 초기화 등) 프로필은 그대로 잠겨 있습니다 — 증상은 `xswap list`에서 `openai usage: 100% left`인데 `openclaw models status`에는 `[cooldown 6d]`가 나란히 뜨는 것입니다. `xswap doctor`는 이를 `이름: openclaw cooldown` 항목으로 보고합니다: 쿨다운 중인데 xswap 자체 사용량 캐시에 실제 잔여량이 보이면 `FAIL`, 쿨다운 중이지만 잔여량을 로컬에서 알 수 없으면 `WARN`이며, 비활성화된 계정은 절대 실패로 표시하지 않습니다.
+
+```sh
+xswap openclaw 이름 --clear-cooldown --dry-run
+xswap openclaw 이름 --clear-cooldown
+xswap openclaw --pool a,b --clear-cooldown --yes
+```
+
+로컬 Gateway를 멈추고(`openclaw gateway stop --force`) 상태 DB를 비공개로 백업한 뒤, 지정한 계정(들)의 — NAME/`--pool`을 생략하면 등록된 모든 계정의 — 죽은 `blockedUntil`/`blockedReason`/`blockedSource` 키만 지우고 오류 횟수를 0으로 되돌린 다음 Gateway를 다시 시작합니다. Gateway 정지가 실패하면 아무것도 쓰지 않고 중단하며, `--dry-run`은 지울 항목만 보여줄 뿐 Gateway도 DB도 건드리지 않습니다.
 
 ## 자주 쓰는 명령
 
@@ -272,7 +294,9 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 
 `xswap list`는 주간 사용량 막대, 사용/남은 비율, 초기화 시간을 보여줍니다. `--details`로 이메일·다른 시간대 잔여량을, `--include-spark`로 Spark를 추가 표시합니다. 선택됨은 새 실행의 기본 계정이며 기존 실행 세션의 계정은 아닙니다.
 
-macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오.
+텍스트 출력(및 `xswap dashboard`)은 기본값이 영어이며, `--lang ko` 또는 `XSWAP_LANG=ko`를 주면 한국어로 표시됩니다. 두 값을 모두 지정하지 않아도 `LANG=ko_KR.UTF-8`처럼 로케일이 한국어면 자동으로 한국어가 선택됩니다.
+
+macOS에서 `xswap menubar`를 실행하면 Apple Command Line Tools로 메뉴 앱을 빌드하고 엽니다. 설치가 필요하면 `xcode-select --install`을 실행하십시오. 메뉴바는 5분마다 갱신하며 새로고침·종료 버튼을 제공합니다. 로그인 시 자동시작은 설정하지 않습니다. 업데이트 후에는 메뉴바를 종료하고 `xswap menubar`를 다시 실행하십시오. 메뉴바 앱은 (실행한 셸이 아니라) 자신이 실행될 때의 환경에서 `--lang`/`XSWAP_LANG`과 같은 규칙으로 영어·한국어를 스스로 판정하며, 내부에서 호출하는 `xswap dashboard`에도 그 판정을 명시적으로 전달합니다.
 
 `xswap switch NAME`(`xswap use NAME`과 동일)은 기본 계정을 선택하고 **실행 중인 호환 자동 모드 CLI·데스크톱 브리지 전체에 전환을 전달**합니다. 대기 중인 세션은 바로 적용하고, 응답 중인 세션은 모든 턴이 끝난 뒤 적용합니다. 서버 프로세스와 대화는 유지됩니다. 자동 풀 밖의 등록 계정도 수동 선택할 수 있으며, 이후 턴의 자동 전환 풀·잔여량 정책은 그대로 적용됩니다.
 

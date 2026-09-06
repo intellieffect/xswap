@@ -19,7 +19,20 @@ xswap --version
 
 If the command isn't found, run `uv tool update-shell` and open a new terminal. The package name is `intellieffect-xswap`; this release is installed from GitHub, not PyPI.
 
+## Shell completion
+
+zsh: `xswap completion zsh > "${fpath[1]}/_xswap"`, or add `eval "$(xswap completion zsh)"` to `.zshrc`. Bash: add `eval "$(xswap completion bash)"` to `.bashrc`. Subcommands, options, and account names (read locally via `xswap list --offline`, no network) all complete.
+
 ## Quick start
+
+```sh
+codex login                 # Skip if already signed in
+xswap init                  # Register that login, optionally add more accounts, enable auto mode, then run doctor
+```
+
+`xswap init` is a thin wizard over the commands below: it registers your existing `codex login` as `main` if it isn't registered yet, asks whether to add another account (blank to skip), offers `auto-enable --wrap-codex` once at least two accounts exist, offers `auto-policy --weekly-remaining 10`, and finishes by running `xswap doctor`. Each step is skippable and safe to run again. Add `--yes` to accept every safe default without prompting (registers `main` if eligible, adds no accounts, leaves auto mode off); `--no-auto` skips the automatic-switching step, and `--weekly-remaining PCT` overrides the policy default.
+
+Or run the four steps by hand:
 
 ```sh
 codex login                 # Skip if already signed in
@@ -75,16 +88,13 @@ xswap list --warn 15   # Warn on any codex window with less than 15% remaining
 
 `--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`.
 
-This is meant to be polled from `launchd` or `cron`, not run interactively. `launchd`'s `PATH` does not include `/opt/homebrew/bin`, so point a wrapper script at absolute paths:
+This is meant to be polled from `launchd` or `cron`, not run interactively. `xswap alert --install` sets that up for you:
 
 ```sh
-#!/bin/sh
-# /Users/you/.local/bin/xswap-quota-check
-/Users/you/.local/bin/xswap list --warn 15 \
-  || /usr/bin/osascript -e 'display notification "Codex quota low" with title "xswap"'
+xswap alert --install --warn 15 --every 30
 ```
 
-Point your `launchd`/`cron` entry at that wrapper's absolute path; xswap does not schedule anything on its own.
+On macOS this writes `~/.local/share/codex-swap/alert/run.sh` (a wrapper that calls the absolute `xswap` path resolved at install time, since `launchd`'s `PATH` lacks `/opt/homebrew/bin`, and turns each `warn:` line into an `osascript` notification) and `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`, then loads it with `launchctl bootstrap`; each run's output lands in `alert/last.log`. Check it with `xswap alert --status` and remove it with `xswap alert --uninstall`. On non-macOS, `--install` prints an equivalent `cron` line instead of writing anything.
 
 ## Status line
 
@@ -194,6 +204,18 @@ This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, sel
 
 `--pool a,b,c` (two or more distinct registered names; mutually exclusive with a positional NAME) copies every listed account's credentials into OpenClaw and sets each target agent's OpenAI auth order to the given pool, in that order. OpenClaw then rotates within that order on its own cooldowns (`resolveAuthProfileOrder`, `isProfileInCooldown`, `markAuthProfileFailure`/`markAuthProfileCooldown`) — no human has to run `xswap openclaw other` to bring a rate-limited bot back. Because a pooled agent shares one conversation/task context across whichever account it is currently using, pooling only makes sense for accounts that may see each other's context; sync refuses to pool accounts from different ChatGPT organizations unless you pass `--allow-mixed`. If an account's organization can't even be determined (unreadable credential, no decodable claim), the pool is refused the same way an actual mismatch would be refused — an unknown organization is never treated as a match.
 
+### Stale OpenClaw cooldown
+
+OpenClaw blocks an OpenAI auth profile for the rest of its rate-limit window after a single 429, and never re-checks it before that window ends. If the underlying limit actually clears earlier (a plan upgrade, a manual reset upstream), the profile stays locked out anyway — the symptom is `openai usage: 100% left` in `xswap list` sitting next to `[cooldown 6d]` in `openclaw models status`. `xswap doctor` reports this as a `NAME: openclaw cooldown` check: `FAIL` when the cooldown is active but xswap's own usage cache shows real quota remaining, `WARN` when it's in cooldown but the remaining amount isn't known locally, and it never fails a disabled account.
+
+```sh
+xswap openclaw NAME --clear-cooldown --dry-run
+xswap openclaw NAME --clear-cooldown
+xswap openclaw --pool a,b --clear-cooldown --yes
+```
+
+This stops the local Gateway (`openclaw gateway stop --force`), backs up its state database privately, clears only the stale `blockedUntil`/`blockedReason`/`blockedSource` keys (resetting the error count to 0) for the named account(s) — or every registered account when NAME/`--pool` is omitted — and starts the Gateway again. A failed Gateway stop aborts before anything is written; `--dry-run` only lists what would be cleared and never touches the Gateway or the database.
+
 ## Update or uninstall
 
 ```sh
@@ -232,9 +254,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integrat
 
 ### Weekly dashboard and macOS menu bar
 
-`xswap list` and `xswap usage` show weekly used/remaining percentages as bars, selected account first. Colors are disabled for pipes, `NO_COLOR`, and dumb terminals. Missing weekly data stays unknown. `--details` shows identities and other quota windows; `--include-spark` adds Spark. `--json` preserves machine-readable quota data.
+`xswap list` and `xswap usage` show weekly used/remaining percentages as bars, selected account first. Colors are disabled for pipes, `NO_COLOR`, and dumb terminals. Missing weekly data stays unknown. `--details` shows identities and other quota windows; `--include-spark` adds Spark. `--json` preserves machine-readable quota data. Text output (and `xswap dashboard`) is English by default; pass `--lang ko` or set `XSWAP_LANG=ko` (or leave both unset with a Korean `LANG`/`LC_ALL`) for Korean.
 
-On macOS, run `xswap menubar` to compile and open `~/Applications/Xswap.app` using Apple Command Line Tools (`xcode-select --install` if missing). It shows the selected default account's weekly usage, all accounts, actual running bridge accounts, and the automatic-switch policy. It refreshes every five minutes and offers Refresh/Quit. Selection is not proof of a running session's account. Failed refreshes retain explicitly marked stale data. No login startup is configured. Quit the menu app before rebuilding after an upgrade, then run `xswap menubar` again. The app is built locally, not a notarized binary distribution.
+On macOS, run `xswap menubar` to compile and open `~/Applications/Xswap.app` using Apple Command Line Tools (`xcode-select --install` if missing). It shows the selected default account's weekly usage, all accounts, actual running bridge accounts, and the automatic-switch policy. It refreshes every five minutes and offers Refresh/Quit. Selection is not proof of a running session's account. Failed refreshes retain explicitly marked stale data. No login startup is configured. Quit the menu app before rebuilding after an upgrade, then run `xswap menubar` again. The app is built locally, not a notarized binary distribution. Its own launch environment (not the invoking shell's) decides English vs. Korean the same way `--lang`/`XSWAP_LANG` does, and it passes that choice explicitly to the `xswap dashboard` it calls internally.
 
 `xswap switch NAME` (alias: `xswap use NAME`) now selects the default and sends a manual account change to **all running compatible auto-mode CLI/desktop bridges**. Idle bridges apply it immediately; busy bridges wait for all active turns to finish. The server process and conversation stay alive. The chosen registered account can be outside the automatic pool; the configured fallback pool and quota policy remain in effect for later turns.
 

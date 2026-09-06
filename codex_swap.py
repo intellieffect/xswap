@@ -21,12 +21,15 @@ import time
 
 from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, usage_lines, window_label
 from xswap_usage import warnings as usage_warnings
+from xswap_display import resolve_lang
 from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
+from xswap_alert import AlertError
+from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 
 class SwapError(Exception):
@@ -214,7 +217,9 @@ class Manager:
         data = self.read()
         name = name or (self.default_account() if mapped else data["active"])
         if name not in data["accounts"]:
-            raise SwapError("No matching account. Run: xswap register main, or xswap add NAME")
+            # ASCII-only hint text: some terminals/log pipelines mangle non-ASCII dashes.
+            hint = " -- no accounts yet -- run xswap init" if not data["accounts"] else ""
+            raise SwapError(f"No matching account. Run: xswap register main, or xswap add NAME{hint}")
         return name, Path(data["accounts"][name]["home"])
 
     def _best_mapping(self, data, cwd=None):
@@ -527,7 +532,7 @@ class Manager:
             row["active"] = row["name"] == data["active"]
         return rows
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None):
+    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None, lang="en"):
         if short and json_output:
             raise SwapError("--short and --json are mutually exclusive.")
         rows = self.account_rows(name, offline, max_age)
@@ -541,7 +546,7 @@ class Manager:
             return rows
         from xswap_display import render
         from xswap_cli import read_settings
-        print(render(rows, read_settings(self), include_spark, details))
+        print(render(rows, read_settings(self), include_spark, details, lang=lang))
         return rows
 
     def best_account(self, model=None, exclude=(), max_age=None):
@@ -640,6 +645,87 @@ class Manager:
         print(f"OpenClaw now selects {label} for {len(output['completed'])} agents{rotates}; Gateway auth reloaded.\nBackup: {output['backup']}")
         return output
 
+    def clear_openclaw_cooldown(self, names=None, dry=False, yes=False, backup_dir=None):
+        """Clear a stale OpenClaw auth-profile cooldown (one 429 lasts until its reset
+        time even after the real limit is gone) for the given account(s), or every
+        registered account when none are named. Stops the local Gateway before writing
+        and restarts it after; a failed stop aborts before the database is touched.
+        """
+        from xswap_openclaw_state import OpenClawStateError, clear_cooldown, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+
+        data = self.read()
+        if names:
+            pool = names if isinstance(names, list) else [names]
+            entries = []
+            for entry in pool:
+                entry_name, entry_home = self.account(entry, mapped=False)
+                entries.append((entry_name, entry_home))
+        else:
+            entries = [(name, Path(value["home"])) for name, value in data["accounts"].items()]
+        if not entries:
+            raise SwapError("No registered accounts to check.")
+
+        sqlite_path = default_sqlite_path()
+        if not sqlite_path.exists():
+            raise SwapError(f"OpenClaw state database not found: {sqlite_path}")
+        try:
+            cooldowns = read_cooldowns(sqlite_path)
+        except OpenClawStateError as exc:
+            raise SwapError(str(exc)) from None
+
+        targets = []  # [(name, profile_id)]
+        for entry_name, entry_home in entries:
+            profile_id = profile_id_for_home(entry_home)
+            if profile_id and profile_id in cooldowns:
+                targets.append((entry_name, profile_id))
+
+        if not targets:
+            print("No stale OpenClaw cooldowns found.")
+            return {"cleared": []}
+
+        for entry_name, profile_id in targets:
+            info = cooldowns[profile_id]
+            reason = info.get("blockedReason") or "unknown"
+            print(f"{entry_name} ({profile_id}): blocked {format_until(info['blockedUntil'])} ({reason})")
+
+        if dry:
+            print("Dry run: no changes made; the Gateway was not stopped.")
+            return {"cleared": [], "dryRun": True}
+
+        executable = shutil.which("openclaw")
+        if not executable:
+            raise SwapError("OpenClaw sync requires openclaw in PATH.")
+
+        if not yes:
+            if not sys.stdin.isatty():
+                raise SwapError("Confirm with --yes.")
+            prompt = f"Stop the Gateway and clear {len(targets)} OpenClaw cooldown(s)? [y/N] "
+            if input(prompt).strip().lower() != "y":
+                print("Aborted.")
+                return {"cleared": [], "aborted": True}
+        backup_root = Path(backup_dir).expanduser().resolve() if backup_dir else self.root / "backups" / "openclaw-cooldown"
+
+        with self.locked():
+            stop = subprocess.run([executable, "gateway", "stop", "--force"],
+                                  capture_output=True, text=True, env=self.env(self.source), timeout=45)
+            if stop.returncode:
+                raise SwapError("OpenClaw Gateway stop failed; the database was not touched. "
+                                 f"{(stop.stderr or stop.stdout).strip() or 'unknown error'}")
+            try:
+                backup_path = clear_cooldown(sqlite_path, [pid for _, pid in targets], backup_root)
+            except OpenClawStateError as exc:
+                raise SwapError(f"Cooldown clear failed after the Gateway was stopped; restart it manually: "
+                                 f"openclaw gateway start. {exc}") from None
+            start = subprocess.run([executable, "gateway", "start"],
+                                   capture_output=True, text=True, env=self.env(self.source), timeout=45)
+            if start.returncode:
+                raise SwapError(f"Cleared the cooldown (backup: {backup_path}), but OpenClaw Gateway start failed; "
+                                 f"run: openclaw gateway start. {(start.stderr or start.stdout).strip() or 'unknown error'}")
+
+        cleared = [entry_name for entry_name, _ in targets]
+        print(f"Cleared {len(targets)} OpenClaw cooldown(s): {', '.join(cleared)}.\nBackup: {backup_path}")
+        return {"cleared": cleared, "backup": str(backup_path)}
+
     def login(self, name, device_auth=False):
         name, home = self.account(name)
         check_file_store(home)
@@ -737,6 +823,10 @@ def parser():
     p = argparse.ArgumentParser(description="Codex account switcher for CLI + macOS desktop. Bare xswap opens the selected CLI account.")
     p.add_argument("--version", action="version", version=f"xswap {__version__}")
     sub = p.add_subparsers(dest="command")
+    ini = sub.add_parser("init", help="First-run setup: register, add accounts, enable auto mode, set policy, then doctor")
+    ini.add_argument("--yes", action="store_true", help="Non-interactive: accept every safe default, prompt for nothing")
+    ini.add_argument("--no-auto", action="store_true", dest="no_auto", help="Skip the automatic-switching step")
+    ini.add_argument("--weekly-remaining", type=float, help="Weekly remaining percentage for auto-policy (default 10)")
     r = sub.add_parser("register", help="Register an existing signed-in Codex home without copying its tokens")
     r.add_argument("name"); r.add_argument("--home", type=Path)
     a = sub.add_parser("add", help="Sign in to an isolated account home")
@@ -753,16 +843,19 @@ def parser():
     listing.add_argument("--short", action="store_true", help="Print one line for a status line/prompt: `*name p5h/p7d · ...`")
     listing.add_argument("--warn", metavar="PCT",
                           help="Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3")
+    listing.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     usage = sub.add_parser("usage", help="Show live quota windows for the selected or named account")
     usage.add_argument("name", nargs="?")
     usage.add_argument("--json", action="store_true", dest="json_output")
     usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("--details", action="store_true", help="Show identity and all quota window details")
     usage.add_argument("--short", action="store_true", help="Print one line: `name p5h/p7d`")
+    usage.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     listing.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex (not with --offline)")
     usage.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
     sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
-    sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
+    dash = sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
+    dash.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     sub.add_parser("status", help="Show selected account and login status")
     st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
     st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
@@ -779,6 +872,14 @@ def parser():
     up = sub.add_parser("upgrade", help="Reinstall xswap from the latest (or a chosen) released Git tag")
     up.add_argument("--tag", help="Install this tag instead of the latest release, e.g. v0.5.1")
     up.add_argument("--dry-run", action="store_true")
+    al = sub.add_parser("alert", help="Install, remove, or inspect a launchd job that polls `list --warn` and posts macOS notifications")
+    al.add_argument("--install", action="store_true", help="Write the wrapper script and plist, then load it")
+    al.add_argument("--uninstall", action="store_true", help="Unload the job and delete the wrapper script and plist")
+    al.add_argument("--status", action="store_true", help="Show whether the job is installed and loaded, and the last log tail")
+    al.add_argument("--dry-run", action="store_true", help="Print what --install/--uninstall would do without changing anything")
+    al.add_argument("--warn", type=float, default=15, metavar="PCT", help="Threshold passed to `list --warn` (1-100, default 15)")
+    al.add_argument("--every", type=int, default=30, metavar="MINUTES", help="Polling interval in whole minutes (default 30; launchd merges under 60s)")
+    al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name", nargs="?")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
@@ -806,6 +907,9 @@ def parser():
     o.add_argument("--agent", action="append", dest="agents", help="Target only this agent (repeatable; default: all)")
     o.add_argument("--dry-run", action="store_true")
     o.add_argument("--backup-dir", type=Path, help="Directory for small, private auth-state backups")
+    o.add_argument("--clear-cooldown", action="store_true",
+                    help="Clear a stale OpenClaw auth-profile cooldown for NAME/--pool (or every registered account), restarting the local Gateway")
+    o.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     r = sub.add_parser("run", help="Run Codex with the selected or named account")
     r.add_argument("--account"); r.add_argument("--dry-run", action="store_true")
     r.add_argument("--auto", action="store_true", help="Keep the interactive CLI session alive across quota account switches")
@@ -818,6 +922,8 @@ def parser():
     a.add_argument("name", nargs="?"); a.add_argument("--app"); a.add_argument("--dry-run", action="store_true")
     a.add_argument("--auto", action="store_true", help="Keep one desktop session and switch accounts after quota exhaustion (experimental)")
     a.add_argument("--accounts", help="Explicit fallback order, e.g. work,main; requires --auto")
+    comp = sub.add_parser("completion", help="Print a shell completion script (see xswap_completion.py)")
+    comp.add_argument("shell", choices=["zsh", "bash"])
     return p
 
 
@@ -825,7 +931,10 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         manager = Manager()
-        if args.command == "register":
+        if args.command == "init":
+            from xswap_init import run_init
+            return run_init(manager, args)
+        elif args.command == "register":
             home = manager.register(args.name, args.home)
             print(f"Registered {args.name}: {identity(home)}. Credentials stay at {home}.")
         elif args.command == "add":
@@ -856,7 +965,8 @@ def main(argv=None):
             max_age = parse_cache_seconds(args.cached)
             if args.offline and max_age is not None:
                 raise SwapError("--offline and --cached cannot be combined.")
-            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age)
+            lang = resolve_lang(args.lang, os.environ)
+            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age, lang=lang)
             if threshold is not None:
                 messages = usage_warnings(rows, threshold)
                 for message in messages:
@@ -865,10 +975,12 @@ def main(argv=None):
         elif args.command == "usage":
             max_age = parse_cache_seconds(args.cached)
             name, _ = manager.account(args.name)
-            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age)
+            lang = resolve_lang(args.lang, os.environ)
+            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age, lang=lang)
         elif args.command == "dashboard":
             from xswap_display import dashboard
-            print(json.dumps(dashboard(manager), ensure_ascii=False))
+            lang = resolve_lang(args.lang, os.environ)
+            print(json.dumps(dashboard(manager, lang=lang), ensure_ascii=False))
         elif args.command == "menubar":
             from xswap_menubar import launch
             return launch()
@@ -900,6 +1012,14 @@ def main(argv=None):
             show_status(manager, args.prune)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
+        elif args.command == "alert":
+            if sum((args.install, args.uninstall, args.status)) != 1:
+                raise SwapError("Give exactly one of --install, --uninstall, or --status.")
+            if args.install:
+                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached, dry_run=args.dry_run)
+            if args.uninstall:
+                return alert_uninstall(manager.root, dry_run=args.dry_run)
+            return alert_status(manager.root)
         elif args.command in ("use", "switch"):
             if bool(args.name) == bool(args.best):
                 raise SwapError("Give an account name or --best.")
@@ -991,7 +1111,19 @@ def main(argv=None):
             # Only split here; sync_openclaw's own parse_pool() call is the single place
             # that dedupes and enforces >=2 distinct names, so this list isn't re-validated.
             names = args.pool.split(",") if args.pool else args.name
-            manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
+            if args.clear_cooldown:
+                if args.allow_mixed:
+                    raise SwapError("--allow-mixed has no effect with --clear-cooldown.")
+                if args.agents:
+                    raise SwapError("--agent has no effect with --clear-cooldown.")
+                manager.clear_openclaw_cooldown(names, dry=args.dry_run, yes=args.yes, backup_dir=args.backup_dir)
+            else:
+                if args.yes:
+                    raise SwapError("--yes requires --clear-cooldown.")
+                manager.sync_openclaw(names, args.agents, args.dry_run, args.backup_dir, allow_mixed=args.allow_mixed)
+        elif args.command == "completion":
+            from xswap_completion import generate
+            sys.stdout.write(generate(parser(), args.shell))
         else:
             rest = getattr(args, "args", [])
             if rest[:1] == ["--"]:
@@ -1023,7 +1155,7 @@ def main(argv=None):
                 raise SwapError("--accounts requires --auto.")
             return manager.launch_cli(getattr(args, "account", None), rest, getattr(args, "dry_run", False))
         return 0
-    except (SwapError, LiveError, UpgradeError, OSError) as exc:
+    except (SwapError, LiveError, UpgradeError, AlertError, OSError) as exc:
         print(f"xswap: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

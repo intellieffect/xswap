@@ -1,13 +1,16 @@
 import base64
 import contextlib
 import fcntl
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -307,7 +310,7 @@ class AccountTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.manager.show_accounts(offline=True)
         self.assertIn("second", out.getvalue())
-        self.assertIn("비활성화 (disabled)", out.getvalue())
+        self.assertIn("disabled", out.getvalue())
 
     def test_disable_refuses_unknown_account(self):
         with self.assertRaises(SwapError):
@@ -862,6 +865,198 @@ class SameOrgGuardTests(unittest.TestCase):
         (second_home / "auth.json").chmod(0o644)  # read_auth requires 0600/0400
         with self.assertRaisesRegex(SwapError, "cannot verify the ChatGPT organization for account second"):
             self.manager.sync_openclaw(["main", "second"])
+
+
+class ClearCooldownArgTests(unittest.TestCase):
+    """--clear-cooldown's interaction with the other openclaw flags, exercised through
+    codex_swap.main so a fixture never reaches this machine's real openclaw/node."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.store = self.base / "store"
+        self.source = self.base / "original"
+        self.source.mkdir()
+        self.source.joinpath("config.toml").write_text('model = "example"\n')
+        atomic_json(self.source / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": "fake-token", "refresh_token": "fake-refresh"}})
+        self.env = {"CODEX_SWAP_HOME": str(self.store), "CODEX_HOME": str(self.source),
+                    "OPENCLAW_STATE_DIR": str(self.base / "no-openclaw-here")}
+        with patch.dict(os.environ, self.env):
+            Manager().register("main")
+
+    def run_main(self, argv):
+        import codex_swap
+        with patch.dict(os.environ, self.env), patch("codex_swap.shutil.which", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = codex_swap.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_yes_requires_clear_cooldown(self):
+        code, _, err = self.run_main(["openclaw", "main", "--yes"])
+        self.assertEqual(code, 1)
+        self.assertIn("--yes requires --clear-cooldown", err)
+
+    def test_allow_mixed_rejected_with_clear_cooldown(self):
+        code, _, err = self.run_main(["openclaw", "--pool", "main,second", "--clear-cooldown", "--allow-mixed"])
+        self.assertEqual(code, 1)
+        self.assertIn("no effect with --clear-cooldown", err)
+
+    def test_agent_rejected_with_clear_cooldown(self):
+        code, _, err = self.run_main(["openclaw", "main", "--agent", "worker", "--clear-cooldown"])
+        self.assertEqual(code, 1)
+        self.assertIn("no effect with --clear-cooldown", err)
+
+    def test_clear_cooldown_without_a_database_reports_it(self):
+        code, _, err = self.run_main(["openclaw", "main", "--clear-cooldown"])
+        self.assertEqual(code, 1)
+        self.assertIn("OpenClaw state database not found", err)
+
+
+class ClearCooldownManagerTests(unittest.TestCase):
+    """Manager.clear_openclaw_cooldown against a fixture sqlite copy; never the real
+    ~/.openclaw/state/openclaw.sqlite (OPENCLAW_STATE_DIR always points into tmp)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "unused-source"
+        self.source.mkdir()
+        self.state_dir = self.base / "openclaw-state"
+        self.env_patch = patch.dict(os.environ, {"OPENCLAW_STATE_DIR": str(self.state_dir)})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.manager = Manager(self.base / "store", self.source)
+
+    def register(self, name, account_id, subject):
+        home = self.base / f"home-{name}"
+        home.mkdir()
+        token = _unsigned_jwt({"sub": subject, "https://api.openai.com/auth": {"chatgpt_account_id": account_id}})
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": token, "refresh_token": "fixture-refresh", "id_token": token}})
+        self.manager.register(name, home)
+        return home
+
+    def profile_id(self, account_id, subject):
+        digest = hashlib.sha256(f"{account_id}\0{subject}".encode()).hexdigest()[:24]
+        return f"openai:xswap-{digest}"
+
+    def write_db(self, usage_stats):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "openclaw.sqlite"
+        conn = sqlite3.connect(str(path))
+        conn.execute("""CREATE TABLE config_machine_state (
+              state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT""")
+        conn.execute("INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
+                     ("authProfiles.state", json.dumps({"version": 1, "usageStats": usage_stats}), 0))
+        conn.commit()
+        conn.close()
+        os.chmod(path, 0o600)
+        return path
+
+    def read_state(self, path):
+        conn = sqlite3.connect(str(path))
+        try:
+            row = conn.execute("SELECT value_json FROM config_machine_state WHERE state_key = ?", ("authProfiles.state",)).fetchone()
+        finally:
+            conn.close()
+        return json.loads(row[0])
+
+    def test_no_stale_cooldowns_reports_and_never_touches_the_gateway(self):
+        self.register("main", "acct-1", "sub-1")
+        self.write_db({})
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            result = self.manager.clear_openclaw_cooldown("main")
+        run.assert_not_called()
+        self.assertEqual(result, {"cleared": []})
+        self.assertIn("No stale OpenClaw cooldowns", out.getvalue())
+
+    def test_dry_run_never_stops_the_gateway_or_writes(self):
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        db = self.write_db({pid: {"blockedUntil": time.time() * 1000 + 6 * 86400 * 1000,
+                                    "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        before = db.read_bytes()
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            result = self.manager.clear_openclaw_cooldown("main", dry=True)
+        run.assert_not_called()
+        self.assertTrue(result["dryRun"])
+        self.assertEqual(db.read_bytes(), before)
+        self.assertIn("Dry run", out.getvalue())
+
+    def test_gateway_stop_failure_aborts_before_any_write(self):
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        db = self.write_db({pid: {"blockedUntil": time.time() * 1000 + 6 * 86400 * 1000,
+                                    "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        before = db.read_bytes()
+        stop_failure = subprocess.CompletedProcess([], 1, "", "gateway busy")
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run", return_value=stop_failure) as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SwapError, "database was not touched"):
+                self.manager.clear_openclaw_cooldown("main", yes=True)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(db.read_bytes(), before)
+
+    def test_successful_clear_stops_writes_and_restarts_the_gateway(self):
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        db = self.write_db({pid: {"blockedUntil": time.time() * 1000 + 6 * 86400 * 1000,
+                                    "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run", return_value=ok) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            result = self.manager.clear_openclaw_cooldown("main", yes=True)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][1:3], ["gateway", "stop"])
+        self.assertEqual(run.call_args_list[1].args[0][1:3], ["gateway", "start"])
+        self.assertEqual(result["cleared"], ["main"])
+        self.assertIn("Backup:", out.getvalue())
+        updated = self.read_state(db)
+        self.assertNotIn("blockedUntil", updated["usageStats"][pid])
+        self.assertEqual(updated["usageStats"][pid]["errorCount"], 0)
+        self.assertTrue(Path(result["backup"]).exists())
+
+    def test_without_yes_and_no_tty_requires_confirmation(self):
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        self.write_db({pid: {"blockedUntil": time.time() * 1000 + 6 * 86400 * 1000,
+                               "blockedReason": "subscription_limit", "errorCount": 1}})
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run") as run, patch("sys.stdin.isatty", return_value=False), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SwapError, "Confirm with --yes"):
+                self.manager.clear_openclaw_cooldown("main")
+        run.assert_not_called()
+
+    def test_gateway_start_failure_after_write_is_reported_with_backup_path(self):
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        self.write_db({pid: {"blockedUntil": time.time() * 1000 + 6 * 86400 * 1000,
+                               "blockedReason": "subscription_limit", "errorCount": 1}})
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        start_failure = subprocess.CompletedProcess([], 1, "", "start failed")
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run", side_effect=[ok, start_failure]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(SwapError, "openclaw gateway start"):
+                self.manager.clear_openclaw_cooldown("main", yes=True)
+
+    def test_omitted_name_checks_every_registered_account(self):
+        pid_main = self.profile_id("acct-1", "sub-1")
+        pid_second = self.profile_id("acct-2", "sub-2")
+        self.register("main", "acct-1", "sub-1")
+        self.register("second", "acct-2", "sub-2")
+        self.write_db({pid_second: {"blockedUntil": time.time() * 1000 + 60000, "blockedReason": "rate_limit", "errorCount": 1}})
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with patch("codex_swap.shutil.which", return_value="/fixture/openclaw"), \
+                patch("codex_swap.subprocess.run", return_value=ok), contextlib.redirect_stdout(io.StringIO()):
+            result = self.manager.clear_openclaw_cooldown(None, yes=True)
+        self.assertEqual(result["cleared"], ["second"])
 
 
 class CachedFlagCLITests(unittest.TestCase):

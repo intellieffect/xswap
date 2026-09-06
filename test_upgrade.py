@@ -1,6 +1,8 @@
 import contextlib
 import io
+import pathlib
 import subprocess
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -114,3 +116,27 @@ class UpgradeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionSingleSourceTests(unittest.TestCase):
+    def test_pyproject_and_module_version_match(self):
+        # `xswap --version` and `xswap upgrade` read codex_swap.__version__; uv installs
+        # pyproject's version. A release that bumps only one of them ships a wrong
+        # version string, or an upgrade that thinks it is already current.
+        import codex_swap
+        pyproject = pathlib.Path(__file__).with_name("pyproject.toml")
+        with pyproject.open("rb") as stream:
+            declared = tomllib.load(stream)["project"]["version"]
+        self.assertEqual(codex_swap.__version__, declared)
+
+
+class PackagedModulesTests(unittest.TestCase):
+    def test_every_top_level_module_is_in_py_modules(self):
+        # uv/pip install only the modules listed in pyproject's py-modules; a new
+        # xswap_*.py that is not listed imports fine from a checkout but raises
+        # ModuleNotFoundError from an installed wheel.
+        root = pathlib.Path(__file__).parent
+        with (root / "pyproject.toml").open("rb") as stream:
+            listed = set(tomllib.load(stream)["tool"]["setuptools"]["py-modules"])
+        present = {p.stem for p in root.glob("*.py") if not p.name.startswith("test_")}
+        self.assertEqual(sorted(present - listed), [])

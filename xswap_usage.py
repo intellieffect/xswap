@@ -237,8 +237,10 @@ def short_line(rows):
     """One line per account for a status line/prompt: `{*}{name} {p5h}/{p7d}`, joined by ' · '.
 
     Pure formatting over rows shaped like show_accounts' output (name, active, status,
-    buckets); no subprocess, no I/O. p5h/p7d are the codex bucket's primary/secondary
-    window remainingPercent, rounded half up to an integer; unknown or unavailable is "?".
+    buckets); no subprocess, no I/O. p5h/p7d are the codex bucket's short (under a day)
+    and weekly (a day or longer, by windowMinutes) window remainingPercent, rounded half
+    up to an integer; position is only a fallback when windowMinutes is absent. Unknown
+    or unavailable is "?".
     """
     parts = []
     for row in rows:
@@ -247,13 +249,23 @@ def short_line(rows):
         if is_ok(row.get("status")):
             bucket = next((b for b in row.get("buckets", []) if (b.get("id") or "").lower() == "codex"), None)
             if bucket:
-                windows = {w["position"]: w for w in bucket.get("windows", [])}
-                window = windows.get("primary")
-                if window and window.get("remainingPercent") is not None:
-                    primary = str(math.floor(window["remainingPercent"] + 0.5))
-                window = windows.get("secondary")
-                if window and window.get("remainingPercent") is not None:
-                    secondary = str(math.floor(window["remainingPercent"] + 0.5))
+                # Classify by duration, not position: the server may report only a
+                # seven-day window and still call it "primary".
+                short = weekly = None
+                for window in bucket.get("windows", []):
+                    minutes = window.get("windowMinutes")
+                    if minutes is None:
+                        is_weekly = window.get("position") == "secondary"
+                    else:
+                        is_weekly = minutes >= 1440
+                    if is_weekly:
+                        weekly = weekly or window
+                    else:
+                        short = short or window
+                if short and short.get("remainingPercent") is not None:
+                    primary = str(math.floor(short["remainingPercent"] + 0.5))
+                if weekly and weekly.get("remainingPercent") is not None:
+                    secondary = str(math.floor(weekly["remainingPercent"] + 0.5))
         parts.append(f"{marker}{row['name']} {primary}/{secondary}")
     return " · ".join(parts)
 

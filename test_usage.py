@@ -164,12 +164,12 @@ for line in sys.stdin:
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.args[1]["CODEX_HOME"], str(manager.source))
         self.assertEqual(manager.account()[0], "main")
-        self.assertIn("99% 사용 · 1% 남음", output.getvalue())
+        self.assertIn("99% used · 1% left", output.getvalue())
         self.assertNotIn("Spark", output.getvalue())
         with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as full:
             manager.show_accounts(include_spark=True)
         self.assertIn("Spark", full.getvalue())
-        self.assertIn("로그인 필요", output.getvalue())
+        self.assertIn("sign-in required", output.getvalue())
 
     def test_offline_never_starts_a_usage_server(self):
         manager = self.manager()
@@ -435,6 +435,24 @@ class ShortLineTests(unittest.TestCase):
 
     def test_no_accounts_is_an_empty_line(self):
         self.assertEqual(short_line([]), "")
+
+    def test_lone_weekly_window_reported_as_primary_lands_in_the_7d_slot(self):
+        # Live servers may return only a seven-day window and still call it "primary".
+        bucket = {"id": "codex", "name": "codex", "windows": [
+            {"position": "primary", "remainingPercent": 82, "windowMinutes": 10080}]}
+        rows = [{"name": "main", "active": True, "status": "ok", "buckets": [bucket]}]
+        self.assertEqual(short_line(rows), "*main ?/82")
+
+    def test_windows_are_classified_by_duration_regardless_of_position(self):
+        bucket = {"id": "codex", "name": "codex", "windows": [
+            {"position": "primary", "remainingPercent": 12, "windowMinutes": 10080},
+            {"position": "secondary", "remainingPercent": 77, "windowMinutes": 300}]}
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [bucket]}]
+        self.assertEqual(short_line(rows), "main 77/12")
+
+    def test_position_is_the_fallback_when_duration_is_missing(self):
+        rows = [{"name": "main", "active": False, "status": "ok", "buckets": [self.bucket(77, 12)]}]
+        self.assertEqual(short_line(rows), "main 77/12")
 
 
 if __name__ == "__main__":

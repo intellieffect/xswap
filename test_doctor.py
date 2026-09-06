@@ -1,9 +1,11 @@
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -38,6 +40,9 @@ class DoctorTests(unittest.TestCase):
         self.source.mkdir()
         self.source.joinpath("config.toml").write_text('model = "example"\n')
         self.manager = Manager(self.base / "store", self.source)
+        # A nonexistent-by-default state dir: doctor's openclaw-cooldown check must
+        # never fall through to this developer machine's real ~/.openclaw database.
+        self.enterContext(patch.dict(os.environ, {"OPENCLAW_STATE_DIR": str(self.base / "no-openclaw-here")}))
 
     def write_auth(self, token=None, exp=None, extra=None):
         data = {"tokens": {"access_token": token or fake_jwt(exp), "refresh_token": "fixture-refresh"}}
@@ -350,6 +355,148 @@ class DoctorTests(unittest.TestCase):
         blob = json.dumps(results)
         self.assertNotIn(token, blob)
         self.assertNotIn("fixture-refresh", blob)
+
+
+def expected_profile_id(account_id, subject):
+    """Independent re-implementation of xswap_openclaw_state.profile_id_for_home's
+    hash so a test comparing against it isn't just checking the module against itself."""
+    digest = hashlib.sha256(f"{account_id}\0{subject}".encode()).hexdigest()[:24]
+    return f"openai:xswap-{digest}"
+
+
+class OpenclawCooldownDoctorTests(unittest.TestCase):
+    """`xswap doctor`'s "NAME: openclaw cooldown" check, isolated to a fixture sqlite
+    database that mirrors OpenClaw's real config_machine_state DDL (verified read-only
+    against a real ~/.openclaw/state/openclaw.sqlite while writing this test)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / "source"
+        self.source.mkdir()
+        self.manager = Manager(self.base / "store", self.source)
+        self.state_dir = self.base / "openclaw-state"
+        self.enterContext(patch.dict(os.environ, {"OPENCLAW_STATE_DIR": str(self.state_dir)}))
+
+    def register_openclaw_account(self, name, account_id, subject, disabled=False, exp=None):
+        home = self.base / f"home-{name}"
+        home.mkdir()
+        token = fake_jwt(exp=exp if exp is not None else time.time() + 100000,
+                          claims={"sub": subject, "https://api.openai.com/auth": {"chatgpt_account_id": account_id}})
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {"access_token": token, "refresh_token": "fixture-refresh"}})
+        self.manager.register(name, home)
+        if disabled:
+            self.manager.set_disabled(name, True)
+        return home
+
+    def write_state_db(self, usage_stats, mode=0o600):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "openclaw.sqlite"
+        conn = sqlite3.connect(str(path))
+        conn.execute("""CREATE TABLE config_machine_state (
+              state_key TEXT NOT NULL PRIMARY KEY,
+              value_json TEXT NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            ) STRICT""")
+        state = {"version": 1, "usageStats": usage_stats}
+        conn.execute("INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, ?)",
+                     ("authProfiles.state", json.dumps(state), 0))
+        conn.commit()
+        conn.close()
+        os.chmod(path, mode)
+        return path
+
+    def run_doctor(self):
+        def run(cmd, **kwargs):
+            class Result:
+                returncode = 0
+                stdout = "1.2.3"
+                stderr = ""
+            return Result()
+
+        with patch("shutil.which", side_effect=lambda n: "/fixture/codex" if n == "codex" else None), \
+                patch("subprocess.run", side_effect=run):
+            return doctor.run(self.manager)
+
+    def test_db_missing_reports_no_row(self):
+        self.register_openclaw_account("main", "acct-1", "sub-1")
+        results = self.run_doctor()
+        self.assertFalse(any(r["name"] == "main: openclaw cooldown" for r in results))
+
+    def test_no_cooldown_is_ok(self):
+        self.register_openclaw_account("main", "acct-1", "sub-1")
+        self.write_state_db({})
+        row = find(self.run_doctor(), "main: openclaw cooldown")
+        self.assertEqual(row["status"], "OK")
+
+    def test_cooldown_with_remaining_quota_fails(self):
+        profile_id = expected_profile_id("acct-1", "sub-1")
+        self.register_openclaw_account("main", "acct-1", "sub-1")
+        self.write_state_db({profile_id: {
+            "blockedUntil": (time.time() + 6 * 86400) * 1000,
+            "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        buckets = [{"id": "codex", "name": "Codex", "reached": None, "credits": None, "windows": [
+            {"position": "secondary", "usedPercent": 0, "remainingPercent": 100, "windowMinutes": 10080, "resetsAt": None}]}]
+        self.manager.remember_usage("main", buckets, time.time(), "ChatGPT")
+        row = find(self.run_doctor(), "main: openclaw cooldown")
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("xswap openclaw --clear-cooldown main", row["detail"])
+
+    def test_cooldown_with_unknown_remaining_warns(self):
+        profile_id = expected_profile_id("acct-1", "sub-1")
+        self.register_openclaw_account("main", "acct-1", "sub-1")
+        self.write_state_db({profile_id: {
+            "blockedUntil": (time.time() + 6 * 86400) * 1000,
+            "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        # No usage-cache.json entry at all: doctor must not spawn a process to find out.
+        row = find(self.run_doctor(), "main: openclaw cooldown")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("xswap list", row["detail"])
+
+    def test_expired_cooldown_is_not_reported_as_blocked(self):
+        profile_id = expected_profile_id("acct-1", "sub-1")
+        self.register_openclaw_account("main", "acct-1", "sub-1")
+        self.write_state_db({profile_id: {
+            "blockedUntil": (time.time() - 3600) * 1000,
+            "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        row = find(self.run_doctor(), "main: openclaw cooldown")
+        self.assertEqual(row["status"], "OK")
+
+    def test_disabled_account_in_cooldown_never_fails(self):
+        profile_id = expected_profile_id("acct-1", "sub-1")
+        self.register_openclaw_account("main", "acct-1", "sub-1", disabled=True)
+        self.write_state_db({profile_id: {
+            "blockedUntil": (time.time() + 6 * 86400) * 1000,
+            "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        buckets = [{"id": "codex", "name": "Codex", "reached": None, "credits": None, "windows": [
+            {"position": "secondary", "usedPercent": 0, "remainingPercent": 100, "windowMinutes": 10080, "resetsAt": None}]}]
+        self.manager.remember_usage("main", buckets, time.time(), "ChatGPT")
+        results = self.run_doctor()
+        row = find(results, "main: openclaw cooldown")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("disabled", row["detail"])
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+
+    def test_api_key_account_has_no_row(self):
+        home = self.base / "home-keyed"
+        home.mkdir()
+        atomic_json(home / "auth.json", {"auth_mode": "apikey", "OPENAI_API_KEY": "fixture-key"})
+        self.manager.register("keyed", home)
+        self.write_state_db({})
+        results = self.run_doctor()
+        self.assertFalse(any(r["name"] == "keyed: openclaw cooldown" for r in results))
+
+    def test_other_profiles_and_accounts_are_independent(self):
+        profile_a = expected_profile_id("acct-a", "sub-a")
+        self.register_openclaw_account("main", "acct-a", "sub-a")
+        self.register_openclaw_account("second", "acct-b", "sub-b")
+        self.write_state_db({profile_a: {
+            "blockedUntil": (time.time() + 3600) * 1000,
+            "blockedReason": "subscription_limit", "blockedSource": "wham", "errorCount": 1}})
+        results = self.run_doctor()
+        self.assertEqual(find(results, "main: openclaw cooldown")["status"], "WARN")
+        self.assertEqual(find(results, "second: openclaw cooldown")["status"], "OK")
 
 
 if __name__ == "__main__":
