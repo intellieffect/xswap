@@ -853,6 +853,64 @@ class SameOrgGuardTests(unittest.TestCase):
             self.manager.sync_openclaw(["main", "second"])
 
 
+class CachedFlagCLITests(unittest.TestCase):
+    setUp = MainCLITests.setUp
+
+    def test_offline_and_cached_together_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["list", "--offline", "--cached", "30"])
+        self.assertEqual(code, 1)
+        self.assertIn("xswap: --offline and --cached cannot be combined.", err.getvalue())
+
+    def test_invalid_cached_seconds_is_rejected_for_list_and_usage(self):
+        for value in ["0", "-5", "abc", "inf", "nan"]:
+            for command in (["list", "--cached", value], ["usage", "--cached", value]):
+                with self.subTest(command=command):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        code = self.codex_swap.main(command)
+                    self.assertEqual(code, 1)
+                    self.assertIn("--cached SECONDS must be a positive number", err.getvalue())
+
+    def test_cached_without_best_on_run_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["run", "--cached", "30", "--", "resume"])
+        self.assertEqual(code, 1)
+        self.assertIn("--cached requires --best.", err.getvalue())
+
+    def test_cached_without_best_on_use_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["use", "main", "--cached", "30"])
+        self.assertEqual(code, 1)
+        self.assertIn("--cached requires --best.", err.getvalue())
+
+    def test_list_and_usage_accept_valid_cached_seconds(self):
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(self.codex_swap.Manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = self.codex_swap.main(["list", "--cached", "30", "--json"])
+        self.assertEqual(code, 0)
+        self.assertIn('"cached"', out.getvalue())
+
+    def test_use_best_cached_reuses_a_fresh_cache_entry_without_spawning_codex(self):
+        # Both main and second are signed in (MainCLITests.setUp), so the first live
+        # lookup fetches both before any cache entry exists.
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = self.codex_swap.main(["use", "--best", "--cached", "60"])
+        self.assertEqual(code, 0)
+        self.assertIn("Selected main", out.getvalue())
+        self.assertEqual(fetch.call_count, 2)
+        with patch("codex_swap.read_limits", return_value=response()) as fetch2, patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out2:
+            code2 = self.codex_swap.main(["use", "--best", "--cached", "60"])
+        self.assertEqual(code2, 0)
+        self.assertIn("Selected main", out2.getvalue())
+        fetch2.assert_not_called()  # Served entirely from the cache written by the first call.
+
+
+def response():
+    return {"rateLimitsByLimitId": {"codex": {"planType": "pro",
+            "primary": {"usedPercent": 23, "windowDurationMins": 300, "resetsAt": 10000}}}}
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1032,6 +1090,21 @@ class BestAccountTests(unittest.TestCase):
             code = main(["run", "--best", "--accounts", "main,second", "--", "resume"])
         self.assertEqual(code, 1)
         self.assertIn("--accounts requires --auto", stderr.getvalue())
+
+    def test_best_account_uses_cache_when_fresh_and_still_ranks_correctly(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": dual_window_raw(remaining5h=40, remaining7d=40),
+            "second": dual_window_raw(remaining5h=90, remaining7d=90),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake) as fetch, patch.object(Manager, "codex", return_value="codex"):
+            first, _ = self.manager.best_account(max_age=60)
+            self.assertEqual(fetch.call_count, 2)
+            second, reason = self.manager.best_account(max_age=60)
+        self.assertEqual(fetch.call_count, 2)  # second call served entirely from cache
+        self.assertEqual(first, "second")
+        self.assertEqual(second, "second")
+        self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
 
     def test_dry_run_prints_expected_json_shape(self):
         self.add("second")

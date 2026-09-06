@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, normalize_limits, read_limits, short_line, usage_lines, window_label
+from xswap_usage import UsageError, is_ok, normalize_limits, read_limits, short_line, usage_lines, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
@@ -71,6 +71,18 @@ def validate_warn_threshold(value):
     if not math.isfinite(value) or not 1 <= value <= 100:
         raise SwapError("--warn must be a number from 1 to 100.")
     return float(value)
+
+
+def parse_cache_seconds(value):
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise SwapError(f"--cached SECONDS must be a positive number, got {value!r}.") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise SwapError(f"--cached SECONDS must be a positive number, got {value!r}.")
+    return seconds
 
 
 def check_file_store(home):
@@ -426,9 +438,46 @@ class Manager:
             return real
         return executable
 
-    def account_usage(self, name, home, offline=False, disabled=False):
+    def usage_cache_path(self):
+        return self.root / "usage-cache.json"
+
+    def cached_usage(self, name, label, max_age):
+        """Return {"buckets", "fetchedAt"} from a still-fresh cache entry, or None.
+
+        A saved entry whose identity label no longer matches the account's current
+        login (a re-login under the same name) is treated as a miss, not reused.
+        """
+        if not max_age or max_age <= 0:
+            return None
+        try:
+            data = json.loads(self.usage_cache_path().read_text())
+        except (OSError, ValueError):
+            return None
+        entry = data.get(name) if isinstance(data, dict) else None
+        if not isinstance(entry, dict) or entry.get("identity") != label:
+            return None
+        fetched_at, buckets = entry.get("fetchedAt"), entry.get("buckets")
+        if not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool) or not isinstance(buckets, list):
+            return None
+        if time.time() - fetched_at > max_age:
+            return None
+        return {"buckets": buckets, "fetchedAt": fetched_at}
+
+    def remember_usage(self, name, buckets, fetched_at, label):
+        """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
+        with self.locked():
+            try:
+                data = json.loads(self.usage_cache_path().read_text())
+                if not isinstance(data, dict):
+                    data = {}
+            except (OSError, ValueError):
+                data = {}
+            data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label}
+            atomic_json(self.usage_cache_path(), data)
+
+    def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
         label = identity(home)
-        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "fetchedAt": None, "disabled": disabled}
+        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "fetchedAt": None, "disabled": disabled, "cached": False}
         if disabled:
             row["status"] = "disabled"
         elif label in ("not signed in", "unreadable auth cache"):
@@ -436,17 +485,23 @@ class Manager:
         elif label == "API key":
             row["status"] = "API key: subscription quota not available"
         elif not offline:
-            try:
-                check_file_store(home)
-                response = read_limits(self.codex(), self.env(home))
-                row.update(status="ok", buckets=normalize_limits(response), fetchedAt=time.time())
-            except (UsageError, SwapError) as error:
-                row["status"] = f"usage unavailable: {error}"
-            except OSError:
-                row["status"] = "usage unavailable: cannot start Codex CLI"
+            cached = self.cached_usage(name, label, max_age)
+            if cached is not None:
+                row.update(status="ok (cached)", buckets=cached["buckets"], fetchedAt=cached["fetchedAt"], cached=True)
+            else:
+                try:
+                    check_file_store(home)
+                    response = read_limits(self.codex(), self.env(home))
+                    buckets, fetched_at = normalize_limits(response), time.time()
+                    row.update(status="ok", buckets=buckets, fetchedAt=fetched_at)
+                    self.remember_usage(name, buckets, fetched_at, label)
+                except (UsageError, SwapError) as error:
+                    row["status"] = f"usage unavailable: {error}"
+                except OSError:
+                    row["status"] = "usage unavailable: cannot start Codex CLI"
         return row
 
-    def account_rows(self, name=None, offline=False):
+    def account_rows(self, name=None, offline=False, max_age=None):
         data = self.read()
         enabled_names = {n for n, _ in self.enabled_accounts()}
         if name is not None:
@@ -456,15 +511,15 @@ class Manager:
             accounts = [(key, Path(value["home"]), key not in enabled_names) for key, value in data["accounts"].items()]
         # Every server has its own account home; no global authentication switch is needed.
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
-            rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2]), accounts))
+            rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2], max_age=max_age), accounts))
         for row in rows:
             row["active"] = row["name"] == data["active"]
         return rows
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False):
+    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None):
         if short and json_output:
             raise SwapError("--short and --json are mutually exclusive.")
-        rows = self.account_rows(name, offline)
+        rows = self.account_rows(name, offline, max_age)
         if short:
             # An explicit `usage NAME --short` always shows that one account, even if
             # disabled; the aggregate `list --short` omits disabled accounts instead.
@@ -478,7 +533,7 @@ class Manager:
         print(render(rows, read_settings(self), include_spark, details))
         return rows
 
-    def best_account(self, model=None, exclude=()):
+    def best_account(self, model=None, exclude=(), max_age=None):
         """Pick the signed-in account with the most codex headroom right now.
 
         A one-shot choice for launchers (like `codex exec`) that have no
@@ -486,14 +541,14 @@ class Manager:
         """
         excluded = set(exclude)
         # Reuse the single parallel-fetch implementation; filter out disabled/excluded rows.
-        candidates = [row for row in self.account_rows() if not row["disabled"] and row["name"] not in excluded]
+        candidates = [row for row in self.account_rows(max_age=max_age) if not row["disabled"] and row["name"] not in excluded]
         if not candidates:
             return None, {"remaining": {}, "candidates": []}
         summary, ranked = [], []
         for row in candidates:
             summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
                              "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
-            if row["status"] == "ok" and buckets_available(row["buckets"], model) is True:
+            if is_ok(row["status"]) and buckets_available(row["buckets"], model) is True:
                 ranked.append(row)
         if not ranked:
             return None, {"remaining": {}, "candidates": summary}
@@ -693,6 +748,8 @@ def parser():
     usage.add_argument("--include-spark", action="store_true", help="Include Spark quotas in text output")
     usage.add_argument("--details", action="store_true", help="Show identity and all quota window details")
     usage.add_argument("--short", action="store_true", help="Print one line: `name p5h/p7d`")
+    listing.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex (not with --offline)")
+    usage.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
     sub.add_parser("menubar", help="Build and open the macOS weekly quota menu")
     sub.add_parser("dashboard", help="Private presentation JSON for the menu app")
     sub.add_parser("status", help="Show selected account and login status")
@@ -715,6 +772,7 @@ def parser():
     u.add_argument("name", nargs="?")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
     u.add_argument("--model", help="Model hint for --best; never passed to codex")
+    u.add_argument("--cached", metavar="SECONDS", help="With --best, reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
     u.add_argument("--default-only", action="store_true", help="Change only the default for future sessions")
     u.add_argument("--openclaw", action="store_true", help="Also update all local OpenClaw agents and reload Gateway auth")
     d = sub.add_parser("disable", help="Hold an account out of selection without deleting it")
@@ -743,6 +801,7 @@ def parser():
     r.add_argument("--accounts", help="Explicit automatic fallback order")
     r.add_argument("--best", action="store_true", help="Launch with the account with the most remaining quota right now (one-shot; not live switching)")
     r.add_argument("--model", help="Model hint for --best; never passed to codex")
+    r.add_argument("--cached", metavar="SECONDS", help="With --best, reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
     r.add_argument("args", nargs=argparse.REMAINDER)
     a = sub.add_parser("app", help="Open an account-specific desktop instance")
     a.add_argument("name", nargs="?"); a.add_argument("--app"); a.add_argument("--dry-run", action="store_true")
@@ -783,15 +842,19 @@ def main(argv=None):
             return manager.login(args.name, args.device_auth)
         elif args.command == "list":
             threshold = validate_warn_threshold(args.warn) if args.warn is not None else None
-            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short)
+            max_age = parse_cache_seconds(args.cached)
+            if args.offline and max_age is not None:
+                raise SwapError("--offline and --cached cannot be combined.")
+            rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age)
             if threshold is not None:
                 messages = usage_warnings(rows, threshold)
                 for message in messages:
                     print(message, file=sys.stderr)
                 return 3 if messages else 0
         elif args.command == "usage":
+            max_age = parse_cache_seconds(args.cached)
             name, _ = manager.account(args.name)
-            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short)
+            manager.show_accounts(name=name, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age)
         elif args.command == "dashboard":
             from xswap_display import dashboard
             print(json.dumps(dashboard(manager), ensure_ascii=False))
@@ -831,9 +894,12 @@ def main(argv=None):
                 raise SwapError("Give an account name or --best.")
             if args.model and not args.best:
                 raise SwapError("--model requires --best.")
+            if args.cached is not None and not args.best:
+                raise SwapError("--cached requires --best.")
             detail = ""
             if args.best:
-                name, reason = manager.best_account(args.model)
+                max_age = parse_cache_seconds(args.cached)
+                name, reason = manager.best_account(args.model, max_age=max_age)
                 if name is None:
                     raise SwapError("No account with known remaining quota; nothing selected.")
                 parts = [f"{label} {value:g}% left" for label, value in reason["remaining"].items() if value is not None]
@@ -924,7 +990,8 @@ def main(argv=None):
                     raise SwapError("--best cannot be combined with --account or --auto.")
                 if getattr(args, "accounts", None):
                     raise SwapError("--accounts requires --auto.")
-                name, reason = manager.best_account(getattr(args, "model", None))
+                max_age = parse_cache_seconds(getattr(args, "cached", None))
+                name, reason = manager.best_account(getattr(args, "model", None), max_age=max_age)
                 if name is None:
                     name, _ = manager.account()
                     print(f"xswap: no account with known remaining quota; using {name}", file=sys.stderr)
@@ -934,6 +1001,8 @@ def main(argv=None):
                                       "argv": [manager.codex(), *rest]}, indent=2))
                     return 0
                 return manager.launch_cli(name, rest, False)
+            if getattr(args, "cached", None) is not None:
+                raise SwapError("--cached requires --best.")
             if getattr(args, "auto", False):
                 if args.account or not args.accounts:
                     raise SwapError("Use --auto --accounts first,second without --account.")

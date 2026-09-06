@@ -48,3 +48,14 @@ class DisplayTests(unittest.TestCase):
         args = parser().parse_args(['switch', 'work'])
         self.assertEqual(args.command, 'switch')
         self.assertEqual(args.name, 'work')
+
+    def test_cached_status_reads_like_ok_and_shows_age_on_the_account_line(self):
+        value = row()
+        value['status'] = 'ok (cached)'
+        value['cached'] = True
+        value['fetchedAt'] = 40
+        item = summary(value, now=100)
+        self.assertEqual(item['summary'], '6% 사용 · 94% 남음')
+        text = render([value], {}, color=False, now=100)
+        self.assertIn('work (cached 60s ago)', text)
+        self.assertNotIn('조회 불가', text)
