@@ -38,7 +38,7 @@ def main():
   master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
   real=os.environ.get('XSWAP_SMOKE_CODEX',os.path.expanduser('~/.codex/packages/standalone/current/bin/codex'))
   process=subprocess.Popen([sys.executable,__file__,'--runner',tmp,real],stdin=slave,stdout=slave,stderr=slave,start_new_session=True);os.close(slave)
-  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None
+  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None;picker_done=False;picker_opened_at=0
   try:
    while time.monotonic()-started<60:
     if select.select([master],[],[],.1)[0]:
@@ -60,6 +60,13 @@ def main():
     completed=sum(e['message'].get('method')=='turn/completed' and e['message']['params']['turn']['status']=='completed' and e['message']['params'].get('threadId')==main_tid for e in events)
     if stage==0 and home.joinpath('status.json').exists() and time.monotonic()-started>4:
      os.write(master,b'\x1b[200~first turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=1;sent_at=time.monotonic()
+    elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_PICKER')=='1' and not picker_done:
+     time.sleep(1);os.write(master,b'/resume');time.sleep(.3);os.write(master,b'\r');stage=10;picker_opened_at=time.monotonic()
+    elif stage==10 and b'Resume a previous session' in output and time.monotonic()-picker_opened_at>3:
+     assert b'Failed to start TUI session picker' not in output
+     os.write(master,b'\r');stage=11;picker_opened_at=time.monotonic()
+    elif stage==11 and time.monotonic()-picker_opened_at>3:
+     picker_done=True;stage=1
     elif stage==1 and completed>=1:
      time.sleep(2);os.write(master,b'\x1b[200~second turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=2
     elif stage==2 and completed>=2:
@@ -82,6 +89,9 @@ def main():
     print(output.decode(errors='replace')[-2500:]);raise AssertionError(f'TUI failed: stage={stage}, calls={len(calls)}, completed={completed}')
    try:process.wait(timeout=10)
    except subprocess.TimeoutExpired:raise AssertionError('TUI/bridge did not shut down cleanly')
+   if os.environ.get('XSWAP_TEST_PICKER')=='1':
+    assert picker_done
+    print('PASS: /resume picker opens, resumes the saved session, and subsequent turns complete')
    if os.environ.get('XSWAP_TEST_RESERVE')=='1':print('PASS: proactive weekly reserve switch; no first-account second-turn request')
    print('PASS: real TUI remains alive, same TUI/server PIDs and thread through account switch and next user turn, Ctrl-C exits cleanly, no auth.json')
   finally:

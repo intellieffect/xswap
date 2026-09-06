@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1
+
+- Fix the in-session `/resume` picker in automatic CLI mode by sharing the running app server through isolated browsing connections. Preserve the main TUI, conversation, and account switching.
+- Show earned reset counts and available expiry dates in `list` and `usage`, including JSON and cached results. Missing availability remains unknown; reading usage never consumes a reset.
+- Existing CLI sessions need to be reopened once to load the updated bridge.
+
 ## 0.7.0
 
 Onboarding, unattended-operation safety, and shell ergonomics. No change to existing account, session, or auto-mode behavior unless a new command or flag is used; the only default that changes is the dashboard language (see below).
