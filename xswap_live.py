@@ -195,10 +195,13 @@ class Bridge:
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.7.1', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': '0.7.2', 'weeklyRemainingThreshold': self.threshold(),
                 'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
                 'manualRequest': self.manual_request, 'manualState': self.manual_state,
                 'updatedAt': time.time(), **extra})
+        self.status_log(event)
+
+    def status_log(self, event):
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
 
     async def send(self, message):

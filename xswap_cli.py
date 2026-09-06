@@ -61,6 +61,38 @@ def server_overrides(args):
     return result
 
 
+class BusyThreadError(LiveError):
+    pass
+
+
+def writer_busy(home, thread_id):
+    """Probe an existing writer lock without deleting or modifying it."""
+    try:
+        value = str(uuid.UUID(thread_id))
+        path = Path(home) / 'thread-writer-locks' / (value + '.lock')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except (ValueError, TypeError, AttributeError, FileNotFoundError):
+        return False
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def saved_thread(home, thread_id):
+    for folder in ('sessions', 'archived_sessions'):
+        if any((Path(home) / folder).glob(f'**/*-{thread_id}.jsonl')):
+            return True
+    return False
+
+
 class WebSocketBridge(Bridge):
     def __init__(self, *args, socket, **kwargs):
         self.socket = socket
@@ -69,8 +101,16 @@ class WebSocketBridge(Bridge):
         self.initialize_result = None
         self.resume_thread = None
         self.thread_requests = set()
+        self.list_requests = set()
+        self.loaded_threads = set()
+        self.resume_candidates = []
         super().__init__(*args, emit=self.outbox.put_nowait, **kwargs)
         self.picker_prefix = self.request_prefix + 'picker-'
+
+    def status_log(self, event):
+        # The foreground TUI owns the terminal, including stderr. Operational
+        # status is still written by Bridge.status for xswap auto-status.
+        pass
 
     async def rpc(self, method, params, timeout=20):
         result = await super().rpc(method, params, timeout)
@@ -109,6 +149,8 @@ class WebSocketBridge(Bridge):
                 try:
                     await self.send({**message, 'id': key})
                     result = await asyncio.wait_for(future, 20)
+                    if method == 'thread/list':
+                        result = self.available_threads(result)
                     reply.update({k: result[k] for k in ('result', 'error') if k in result})
                 finally:
                     self.requests.pop(key, None)
@@ -116,6 +158,8 @@ class WebSocketBridge(Bridge):
 
     async def on_client(self, message):
         method = message.get('method')
+        if method == 'thread/list' and 'id' in message:
+            self.list_requests.add(message['id'])
         if method in ('thread/start', 'thread/resume', 'thread/fork') and 'id' in message:
             self.thread_requests.add(message['id'])
         if method == 'turn/start':
@@ -127,18 +171,35 @@ class WebSocketBridge(Bridge):
     def remember_thread(self, value):
         try:
             self.resume_thread = str(uuid.UUID(value))
+            self.resume_candidates = [self.resume_thread, *[t for t in self.resume_candidates if t != self.resume_thread]][:100]
         except (ValueError, TypeError, AttributeError):
             pass
+
+    def available_threads(self, message):
+        result = message.get('result')
+        if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+            return message
+        home = self.env.get('CODEX_HOME')
+        if not home:
+            return message
+        rows = [row for row in result['data'] if row.get('id') in self.loaded_threads
+                or not writer_busy(home, row.get('id'))]
+        return {**message, 'result': {**result, 'data': rows}}
 
     async def on_server(self, message):
         key = message.get('id')
         if (isinstance(key, str) and key.startswith(self.picker_prefix)
                 and 'method' not in message and key not in self.requests):
             return  # A timed-out picker response must never reach the main TUI.
+        if key in self.list_requests and 'method' not in message:
+            self.list_requests.discard(key)
+            message = self.available_threads(message)
         if key in self.thread_requests and 'method' not in message:
             self.thread_requests.discard(key)
             if 'error' not in message:
-                self.remember_thread(((message.get('result') or {}).get('thread') or {}).get('id'))
+                thread_id = ((message.get('result') or {}).get('thread') or {}).get('id')
+                self.remember_thread(thread_id)
+                self.loaded_threads.add(thread_id)
         await super().on_server(message)
 
     async def client_reader(self):
@@ -168,9 +229,10 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
     connected = False
     active_bridge = None
     client_ready = asyncio.Event()
+    bridge_failed = False
 
     async def handle(socket):
-        nonlocal connected, active_bridge
+        nonlocal connected, active_bridge, bridge_failed
         if connected:
             try:
                 await active_bridge.picker_client(socket)
@@ -190,7 +252,7 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
             await active_bridge.run()
         except Exception:
             # Avoid writing RPC payloads or credentials into the terminal/logs.
-            print('xswap auto: CLI bridge disconnected; inspect xswap auto-status.', file=sys.stderr)
+            bridge_failed = True
         finally:
             os.close(lock)
 
@@ -225,6 +287,8 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 await cli.wait()
             listener.close()
             await listener.wait_closed()
+            if bridge_failed:
+                print('xswap auto: CLI bridge disconnected; inspect xswap auto-status.', file=sys.stderr)
             command = reconnect_command(pool, env, active_bridge)
             if command:
                 print('xswap: the temporary connection above is closed. '
@@ -237,6 +301,10 @@ def reconnect_command(pool, env, bridge):
     thread = getattr(bridge, 'resume_thread', None)
     manager = getattr(pool, 'manager', None)
     if not thread or not manager or not env.get('CODEX_HOME'):
+        return None
+    candidates = getattr(bridge, 'resume_candidates', [thread])
+    thread = next((t for t in candidates if saved_thread(env['CODEX_HOME'], t)), None)
+    if not thread:
         return None
     names = list(dict.fromkeys([bridge.current, *pool.names]))
     return shlex.join(['env', 'CODEX_SWAP_HOME=' + str(manager.root),
@@ -302,6 +370,13 @@ def launch_cli(manager, accounts, args, dry=False):
     pool = AccountPool(manager, names, real)
     runtime = manager.root / 'auto' / 'cli-codex'
     home = resume_home(manager, args, runtime)
+    for value in args:
+        try:
+            thread_id = str(uuid.UUID(value))
+        except (ValueError, TypeError):
+            continue
+        if 'resume' in args and writer_busy(home, thread_id):
+            raise BusyThreadError('This conversation is open in another Codex session. Return to that window or close it before resuming; its writer lock was left intact.')
     if dry:
         print(json.dumps({'mode': 'auto-cli', 'accounts': names, 'CODEX_HOME': str(home),
                           'transport': 'private Unix WebSocket', 'args': args}, indent=2))
@@ -425,6 +500,9 @@ def codex_main():
         if settings.get('enabled') and interactive_args(args) and os.environ.get('XSWAP_BYPASS') != '1':
             return launch_cli(manager, ','.join(settings['accounts']), args)
         os.execve(real, [real, *args], dict(os.environ))
+    except BusyThreadError as error:
+        print('xswap: ' + str(error), file=sys.stderr)
+        return 1
     except (LiveError, SwapError, OSError, ValueError):
         print('xswap: could not start automatic Codex CLI; inspect xswap auto-status or run xswap auto-disable.', file=sys.stderr)
         return 1

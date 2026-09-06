@@ -89,3 +89,40 @@ class PickerTests(IsolatedAsyncioTestCase):
         self.assertTrue(bridge.outbox.empty())
         await bridge.on_server({'id': 1, 'result': {'main': True}})
         self.assertEqual(bridge.outbox.get_nowait(), {'id': 1, 'result': {'main': True}})
+
+    async def test_filters_other_writers_but_keeps_own_loaded_threads(self):
+        import tempfile
+        import fcntl
+        from pathlib import Path
+        from xswap_cli import writer_busy
+        with tempfile.TemporaryDirectory() as home:
+            tid = '00000000-0000-4000-8000-000000000001'
+            directory = Path(home) / 'thread-writer-locks'
+            directory.mkdir()
+            path = directory / (tid + '.lock')
+            with path.open('w') as owner:
+                fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertTrue(writer_busy(home, tid))
+                bridge = self.bridge()
+                bridge.env['CODEX_HOME'] = home
+                message = {'id': 1, 'result': {'data': [{'id': tid}], 'nextCursor': 'next'}}
+                self.assertEqual(bridge.available_threads(message)['result'], {'data': [], 'nextCursor': 'next'})
+                bridge.loaded_threads.add(tid)
+                self.assertEqual(bridge.available_threads(message), message)
+                self.assertTrue(writer_busy(home, tid))
+            self.assertFalse(writer_busy(home, tid))
+            self.assertTrue(path.exists())
+
+    async def test_cli_status_updates_file_without_writing_into_tui(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        bridge = self.bridge()
+        with tempfile.TemporaryDirectory() as directory:
+            bridge.status_path = Path(directory) / 'status.json'
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                for event in ('manual-switch-applying', 'switched', 'manual-switch-applied', 'stopped'):
+                    bridge.status(event)
+                    self.assertEqual(json.loads(bridge.status_path.read_text())['event'], event)
+            self.assertEqual(stderr.getvalue(), '')

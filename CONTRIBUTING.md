@@ -26,6 +26,7 @@ uv run python tests/live_codex_smoke.py
 uv run python tests/live_cli_smoke.py
 XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
 XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
+XSWAP_TEST_MANUAL=1 uv run python tests/live_cli_smoke.py
 ```
 
 `XSWAP_SMOKE_CODEX=/absolute/path/to/codex` selects a binary. The CLI smoke test requires a PTY. macOS browser-runtime checks additionally require the locally installed app and browser plugin:
