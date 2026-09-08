@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.4
+
+- Keep automatic CLI sessions open when the usage service is unreachable at startup. Credentials are still validated; quota is re-read before the first turn (`quotaKnown: false` in `auto-status` until then). Previously the bridge exited and Codex showed only `remote app server ... closed during initialize`.
+- Record a short, non-secret `reason` on `stopped` bridge records and print it in the disconnect message after the TUI exits.
+
 ## 0.7.3
 
 - Show account emails, weekly remaining-quota gauges, local reset times, and detected running sessions in a compact account tree. The default list omits short quota windows; `--details` includes other windows and reset credits.

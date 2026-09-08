@@ -1,6 +1,7 @@
 """Opt-in integration test using a real Codex binary and fake local HTTP/auth only.
 Run: python3 tests/live_codex_smoke.py (optionally XSWAP_SMOKE_CODEX=/path/to/codex).
 """
+from xswap_usage import UsageError
 import asyncio,base64,contextlib,json,os,sys,tempfile,time,threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -37,7 +38,15 @@ class HTTP(BaseHTTPRequestHandler):
 class Pool:
  names=['first','second']
  weekly_remaining=10 if os.environ.get('XSWAP_TEST_RESERVE')=='1' else 0
- def prepare(self,name):return {'accessToken':token(name),'chatgptAccountId':name,'chatgptPlanType':'pro'},limits(10 if getattr(self,'reserve_reached',False) and name=='first' else 100)
+ outage=os.environ.get('XSWAP_TEST_OUTAGE')=='1'
+ def prepare(self,name,require_quota=True):
+  credentials={'accessToken':token(name),'chatgptAccountId':name,'chatgptPlanType':'pro'}
+  if self.outage:
+   # Usage service unreachable exactly once, at startup (2026-09-08 incident).
+   self.outage=False
+   if require_quota:raise UsageError('usage request timed out')
+   return credentials,None
+  return credentials,limits(10 if getattr(self,'reserve_reached',False) and name=='first' else 100)
  def refresh(self,name):return self.prepare(name)[0]
 
 async def main():

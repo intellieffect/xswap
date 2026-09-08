@@ -288,7 +288,8 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
             listener.close()
             await listener.wait_closed()
             if bridge_failed:
-                print('xswap auto: CLI bridge disconnected; inspect xswap auto-status.', file=sys.stderr)
+                reason = getattr(active_bridge, 'failure', None) or 'unknown'
+                print(f'xswap auto: CLI bridge disconnected ({reason}); inspect xswap auto-status.', file=sys.stderr)
             command = reconnect_command(pool, env, active_bridge)
             if command:
                 print('xswap: the temporary connection above is closed. '
@@ -570,7 +571,7 @@ def status_data(manager, prune=False, cleanup=True):
             continue
         result.append({'surface': 'desktop' if run_dir is None else 'cli',
             'running': running, **{key: state.get(key) for key in
-            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance', 'manualRequest', 'manualState')}})
+            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance', 'manualRequest', 'manualState', 'reason', 'quotaKnown')}})
     wrapper = settings.get('wrapper') or {}
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and

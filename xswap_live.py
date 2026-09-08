@@ -18,12 +18,25 @@ import sys
 import time
 import uuid
 
-from xswap_usage import normalize_limits, read_limits
+from xswap_usage import UsageError, normalize_limits, read_limits
 from xswap_credentials import CredentialError, read_auth
 
 
 class LiveError(Exception):
     pass
+
+
+def failure_reason(exc):
+    """Curated, non-secret one-liner for status.json and the disconnect message.
+
+    LiveError/UsageError carry hand-written constants only. Anything else may
+    wrap RPC payloads or paths, so expose just the exception type.
+    """
+    if isinstance(exc, (LiveError, UsageError)):
+        return str(exc)
+    if isinstance(exc, asyncio.TimeoutError):
+        return 'app-server request timed out'
+    return type(exc).__name__
 
 
 def jwt_claims(token):
@@ -130,7 +143,7 @@ class AccountPool:
         from xswap_cli import read_settings
         return validate_threshold(read_settings(self.manager).get('weeklyRemainingThreshold', 0))
 
-    def prepare(self, name):
+    def prepare(self, name, require_quota=True):
         # Manual selections may be outside the automatic fallback pool.
         from codex_swap import check_file_store
         if name not in {n for n, _ in self.manager.enabled_accounts()}:
@@ -143,7 +156,14 @@ class AccountPool:
         except CredentialError as exc:
             raise LiveError(str(exc)) from None
         # The official CLI refreshes its own source credentials if required.
-        raw = read_limits(self.codex, self.manager.env(home), timeout=8)
+        try:
+            raw = read_limits(self.codex, self.manager.env(home), timeout=8)
+        except UsageError:
+            # Credentials are already validated; a usage-service outage is not
+            # a login problem. Callers that can re-check later may continue.
+            if require_quota:
+                raise
+            raw = None
         return load_credentials(home), raw
 
     def refresh(self, name):
@@ -181,6 +201,7 @@ class Bridge:
         self.instance = uuid.uuid4().hex
         self.manual_request = None
         self.manual_state = None
+        self.failure = None
 
     @staticmethod
     def stdout_message(message):
@@ -229,9 +250,10 @@ class Bridge:
         changed = self.current_id is not None and self.current_id != credentials['chatgptAccountId']
         self.current, self.current_id = name, credentials['chatgptAccountId']
         self.switches += int(changed)
-        self.checked_at = time.monotonic()
+        # Unknown quota: leave checked_at at 0 so before_turn re-reads it first.
+        self.checked_at = time.monotonic() if raw is not None else 0
         self.last_quota = raw
-        self.status('switched' if changed else 'ready')
+        self.status('switched' if changed else 'ready', quotaKnown=raw is not None)
 
     async def apply_manual_switch(self):
         """Called with gate held; only idle servers may change authentication."""
@@ -421,7 +443,9 @@ class Bridge:
             params['capabilities'] = {**(params.get('capabilities') or {}), 'experimentalApi': True}
             result = await self.rpc('initialize', params)
             await self.send({'method': 'initialized', 'params': {}})
-            credentials, raw = await asyncio.to_thread(self.pool.prepare, self.current)
+            # A usage-service outage at startup must not close the session;
+            # quota is re-read before the first turn (2026-09-08 incident).
+            credentials, raw = await asyncio.to_thread(self.pool.prepare, self.current, require_quota=False)
             await self.install(self.current, credentials, raw)
             self.booting, self.initialized = False, True
             self.emit({'id': message['id'], 'result': result})
@@ -481,6 +505,9 @@ class Bridge:
             done, _ = await asyncio.wait(readers, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
+        except Exception as exc:
+            self.failure = failure_reason(exc)
+            raise
         finally:
             self.stopping = True
             for task in [*readers, *self.tasks]:
@@ -495,7 +522,7 @@ class Bridge:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(self.process.pid, signal.SIGKILL)
                     await self.process.wait()
-            self.status('stopped')
+            self.status('stopped', **({'reason': self.failure} if self.failure else {}))
 
 
 def proxy_main():
@@ -532,8 +559,9 @@ def proxy_main():
         finally:
             os.close(lock)
         return 0
-    except (LiveError, SwapError, OSError, ValueError, asyncio.TimeoutError):
-        print('xswap auto: bridge stopped; check source account login and CLI compatibility. Original account stores were not replaced.', file=sys.stderr)
+    except (LiveError, SwapError, OSError, ValueError, asyncio.TimeoutError) as exc:
+        reason = failure_reason(exc) if isinstance(exc, (LiveError, asyncio.TimeoutError)) else type(exc).__name__
+        print(f'xswap auto: bridge stopped ({reason}); check source account login and CLI compatibility. Original account stores were not replaced.', file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130
