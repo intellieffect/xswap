@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3
+
+- Show account emails, weekly remaining-quota gauges, local reset times, and detected running sessions in a compact account tree. The default list omits short quota windows; `--details` includes other windows and reset credits.
+- Keep list positions in registration order and accept `xswap switch NUMBER`. Account names remain supported; numeric names can be selected with `xswap use NAME`. Removing an account renumbers subsequent slots.
+- Default `xswap list` to English regardless of locale; `--lang ko` remains available.
+
 ## 0.7.2
 
 - Keep account-switch status logs out of the active Codex TUI; status remains available through `xswap auto-status`.

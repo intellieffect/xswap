@@ -136,13 +136,13 @@ for line in sys.stdin:
         self.assertEqual(first[0]["resetCredits"], cached[0]["resetCredits"])
         self.assertEqual(cached[0]["resetCredits"]["availableCount"], 2)
 
-    def test_list_and_json_include_reset_credits(self):
+    def test_detailed_list_and_json_include_reset_credits(self):
         manager = self.manager()
         payload = response()
         payload["rateLimitResetCredits"] = {"availableCount": 2, "credits": None}
         with patch("codex_swap.read_limits", return_value=payload), patch.object(manager, "codex", return_value="codex"):
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                manager.show_accounts()
+                manager.show_accounts(details=True)
             self.assertIn("codex reset credits: 2 available", output.getvalue())
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 manager.show_accounts(json_output=True)
@@ -164,7 +164,7 @@ for line in sys.stdin:
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.args[1]["CODEX_HOME"], str(manager.source))
         self.assertEqual(manager.account()[0], "main")
-        self.assertIn("99% used · 1% left", output.getvalue())
+        self.assertIn("1% remaining", output.getvalue())
         self.assertNotIn("Spark", output.getvalue())
         with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"), contextlib.redirect_stdout(io.StringIO()) as full:
             manager.show_accounts(include_spark=True)

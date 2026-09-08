@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 
 class SwapError(Exception):
@@ -212,6 +212,16 @@ class Manager:
             return data
         except (ValueError, OSError):
             raise SwapError("Invalid account registry; refusing to overwrite it.") from None
+
+    def switch_target(self, target):
+        """Resolve a 1-based list position; use NAME remains literal for numeric names."""
+        if re.fullmatch(r"[0-9]+", target):
+            names = list(self.read()["accounts"])
+            slot = int(target) if len(target) <= 40 else 0
+            if not 1 <= slot <= len(names):
+                raise SwapError("Invalid account slot. Run: xswap list")
+            return names[slot - 1]
+        return target
 
     def account(self, name=None, mapped=True):
         data = self.read()
@@ -535,7 +545,9 @@ class Manager:
         # Every server has its own account home; no global authentication switch is needed.
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
             rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2], max_age=max_age), accounts))
+        slots = {key: index for index, key in enumerate(data["accounts"], 1)}
         for row in rows:
+            row["slot"] = slots[row["name"]]
             row["active"] = row["name"] == data["active"]
         return rows
 
@@ -552,8 +564,9 @@ class Manager:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return rows
         from xswap_display import render
-        from xswap_cli import read_settings
-        print(render(rows, read_settings(self), include_spark, details, lang=lang))
+        from xswap_cli import status_data
+        state = status_data(self, cleanup=False)
+        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"]))
         return rows
 
     def best_account(self, model=None, exclude=(), max_age=None):
@@ -888,7 +901,7 @@ def parser():
     al.add_argument("--every", type=int, default=30, metavar="MINUTES", help="Polling interval in whole minutes (default 30; launchd merges under 60s)")
     al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
-    u.add_argument("name", nargs="?")
+    u.add_argument("name", nargs="?", help="Account name; switch also accepts a 1-based slot from xswap list")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
     u.add_argument("--model", help="Model hint for --best; never passed to codex")
     u.add_argument("--cached", metavar="SECONDS", help="With --best, reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
@@ -972,7 +985,7 @@ def main(argv=None):
             max_age = parse_cache_seconds(args.cached)
             if args.offline and max_age is not None:
                 raise SwapError("--offline and --cached cannot be combined.")
-            lang = resolve_lang(args.lang, os.environ)
+            lang = resolve_lang(args.lang or "en", os.environ)
             rows = manager.show_accounts(offline=args.offline, json_output=args.json_output, include_spark=args.include_spark, details=args.details, short=args.short, max_age=max_age, lang=lang)
             if threshold is not None:
                 messages = usage_warnings(rows, threshold)
@@ -1044,7 +1057,7 @@ def main(argv=None):
                 if parts:
                     detail = f" ({', '.join(parts)})"
             else:
-                name = args.name
+                name = manager.switch_target(args.name) if args.command == "switch" else args.name
             if args.openclaw:
                 manager.sync_openclaw(name, select=True)
             else:
