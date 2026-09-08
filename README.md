@@ -254,7 +254,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integrat
 
 ### Weekly dashboard and macOS menu bar
 
-`xswap list` and `xswap usage` show weekly used/remaining percentages as bars, selected account first. Colors are disabled for pipes, `NO_COLOR`, and dumb terminals. Missing weekly data stays unknown. `--details` shows identities and other quota windows; `--include-spark` adds Spark. `--json` preserves machine-readable quota data. Text output (and `xswap dashboard`) is English by default; pass `--lang ko` or set `XSWAP_LANG=ko` (or leave both unset with a Korean `LANG`/`LC_ALL`) for Korean.
+`xswap list` and `xswap usage` group each account into a tree with its email, a weekly remaining-quota gauge (`█` remaining, `░` used), and a local reset date/time with countdown. Slots stay in registration order; switching changes only the selection marker. Detected running xswap bridge sessions appear separately, grouped by account and surface. Colors are disabled for pipes, `NO_COLOR`, and dumb terminals. Missing weekly data stays unknown. `--details` adds other quota windows and reset credits; `--include-spark` adds Spark. `--json` preserves machine-readable quota data. `xswap list` defaults to English regardless of locale; use `--lang ko` explicitly for Korean. Other views retain their `--lang` / `XSWAP_LANG` / locale language settings.
 
 On macOS, run `xswap menubar` to compile and open `~/Applications/Xswap.app` using Apple Command Line Tools (`xcode-select --install` if missing). It shows the selected default account's weekly usage, all accounts, actual running bridge accounts, and the automatic-switch policy. It refreshes every five minutes and offers Refresh/Quit. Selection is not proof of a running session's account. Failed refreshes retain explicitly marked stale data. No login startup is configured. Quit the menu app before rebuilding after an upgrade, then run `xswap menubar` again. The app is built locally, not a notarized binary distribution. Its own launch environment (not the invoking shell's) decides English vs. Korean the same way `--lang`/`XSWAP_LANG` does, and it passes that choice explicitly to the `xswap dashboard` it calls internally.
 
@@ -274,7 +274,7 @@ Explicit `codex resume UUID` / `fork UUID` in automatic mode now locates that co
 
 When an auto-mode CLI exits, use the final xswap resume command printed below Codex’s temporary remote reconnect address. It starts a new bridge and preserves the account pool, current account, and original session home; the old Unix socket is closed.
 
-Earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
+With `--details`, earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
 
 The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After upgrading, restart existing CLI sessions once to load the updated bridge.
 
@@ -283,3 +283,5 @@ Automatic CLI session pickers omit conversations locked by another writer. Expli
 CLI bridge status events are recorded for `xswap auto-status` without writing into the active TUI. Connection-failure diagnostics are printed after the TUI exits.
 
 `xswap switch NAME` / `use NAME` also puts NAME first in the enabled automatic-mode pool, so new automatic CLI/app sessions follow the selection. Existing compatible bridges apply it when idle; active turns defer it. `--default-only` updates future launches without broadcasting.
+
+`xswap switch 1` / `xswap switch 2` selects the numbered account in `xswap list`; names such as `xswap switch main` still work. Disabled accounts keep their positions but cannot be selected. Removing an account renumbers subsequent positions. Use `xswap use NAME` for a numeric account name.

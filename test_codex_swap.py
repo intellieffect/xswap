@@ -30,6 +30,38 @@ class AccountTests(unittest.TestCase):
         atomic_json(self.source / "auth.json", self.auth)
         self.manager = Manager(self.base / "store", self.source)
 
+    def test_numbered_switch_keeps_slots_and_broadcasts_resolved_name(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        with patch("codex_swap.Manager", return_value=self.manager), patch("xswap_switch.switch_running", return_value={"failed": 0, "unconfirmed": 0}) as broadcast, contextlib.redirect_stdout(io.StringIO()):
+            for target, expected in [("2", "second"), ("1", "main"), ("second", "second")]:
+                self.assertEqual(main(["switch", target]), 0)
+                self.assertEqual(self.manager.read()["active"], expected)
+                broadcast.assert_called_with(self.manager, expected)
+                rows = self.manager.account_rows(offline=True)
+                self.assertEqual([(r["slot"], r["name"]) for r in rows], [(1, "main"), (2, "second")])
+                self.assertEqual([r["name"] for r in rows if r["active"]], [expected])
+            self.assertEqual(self.manager.account_rows("second", offline=True)[0]["slot"], 2)
+
+    def test_invalid_or_disabled_slot_does_not_change_selection(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.set_disabled("second", True)
+        with patch("codex_swap.Manager", return_value=self.manager), patch("xswap_switch.switch_running") as broadcast, contextlib.redirect_stderr(io.StringIO()):
+            for target in ("0", "3", "2", "9" * 5000):
+                self.assertEqual(main(["switch", target]), 1)
+                self.assertEqual(self.manager.read()["active"], "main")
+            broadcast.assert_not_called()
+        self.assertEqual(self.manager.switch_target("2"), "second")
+
+    def test_use_preserves_numeric_account_names(self):
+        self.manager.register("2")
+        with patch("codex_swap.Manager", return_value=self.manager), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["use", "2", "--default-only"]), 0)
+        self.assertEqual(self.manager.read()["active"], "2")
+
     def test_register_does_not_copy_or_modify_credentials(self):
         before = self.source.joinpath("auth.json").read_bytes()
         self.manager.register("main")
