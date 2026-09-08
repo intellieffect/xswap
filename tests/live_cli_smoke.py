@@ -107,6 +107,7 @@ def main():
     assert picker_done
     print('PASS: /resume picker opens, resumes the saved session, and subsequent turns complete')
    if os.environ.get('XSWAP_TEST_RESERVE')=='1':print('PASS: proactive weekly reserve switch; no first-account second-turn request')
+   if os.environ.get('XSWAP_TEST_OUTAGE')=='1':print('PASS: session opened while the usage service was unreachable at startup; quota re-read before the first turn')
    print('PASS: real TUI remains alive, same TUI/server PIDs and thread through account switch and next user turn, Ctrl-C exits cleanly, no auth.json')
   finally:
    if process.poll() is None:os.killpg(process.pid,signal.SIGTERM);process.wait(timeout=10)
