@@ -280,7 +280,7 @@ The in-session `/resume` picker shares the running app server through a separate
 
 Automatic CLI session pickers omit conversations locked by another writer. Explicit UUID resumes stop before starting the TUI if that conversation is still open elsewhere. Return to its existing window or close that session before resuming. Writer locks are never deleted. Reconnect hints use only conversation IDs with saved rollouts.
 
-CLI bridge status events are recorded for `xswap auto-status` without writing into the active TUI. Connection-failure diagnostics are printed after the TUI exits.
+CLI bridge status events are recorded for `xswap auto-status` without writing into the active TUI. Connection-failure diagnostics are printed after the TUI exits, and a `stopped` record carries a short `reason` (for example `app-server exited`); raw errors are never stored. If the usage service is unreachable while a session starts, the session still opens with `quotaKnown: false` and quota is re-read before the first turn.
 
 `xswap switch NAME` / `use NAME` also puts NAME first in the enabled automatic-mode pool, so new automatic CLI/app sessions follow the selection. Existing compatible bridges apply it when idle; active turns defer it. `--default-only` updates future launches without broadcasting.
 

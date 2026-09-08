@@ -3,7 +3,12 @@ import copy
 import time
 import unittest
 
-from xswap_live import Bridge, quota_available, usage_failure
+import contextlib
+import sys
+from unittest.mock import patch
+
+from xswap_live import AccountPool, Bridge, LiveError, failure_reason, quota_available, usage_failure
+from xswap_usage import UsageError
 
 
 def limits(left=100, reached=None):
@@ -44,7 +49,7 @@ class Pool:
     def __init__(self):
         self.quota = {'first': limits(), 'second': limits()}
 
-    def prepare(self, name):
+    def prepare(self, name, require_quota=True):
         return {'accessToken': 'fake-' + name, 'chatgptAccountId': name,
                 'chatgptPlanType': 'pro'}, self.quota[name]
 
@@ -183,3 +188,107 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.choose = choose
         await self.bridge.continue_failed()
         self.assertFalse(self.calls)
+
+
+class InitializeTests(unittest.IsolatedAsyncioTestCase):
+    """A usage-service outage at startup must not kill the session (2026-09-08 incident)."""
+
+    async def asyncSetUp(self):
+        await test_setup(self)
+        self.bridge.booting, self.bridge.initialized = True, False
+        self.bridge.current_id, self.bridge.last_quota = None, None
+        self.events = []
+        self.bridge.status = lambda event, **extra: self.events.append((event, extra))
+
+    asyncTearDown = BridgeTests.asyncTearDown
+
+    async def initialize(self):
+        await self.bridge.on_client({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'x'}}})
+
+    async def test_usage_outage_at_startup_keeps_session_and_rechecks_before_first_turn(self):
+        def prepare(name, require_quota=True):
+            if require_quota:
+                raise UsageError('usage request timed out')
+            return {'accessToken': 'fake-' + name, 'chatgptAccountId': name, 'chatgptPlanType': 'pro'}, None
+        self.pool.prepare = prepare
+        await self.initialize()
+        self.assertTrue(self.bridge.initialized)
+        self.assertEqual([c[0] for c in self.calls], ['initialize', 'account/login/start'])
+        self.assertEqual(self.emitted[-1]['id'], 1)
+        self.assertIsNone(self.bridge.last_quota)
+        self.assertEqual(self.bridge.checked_at, 0)
+        self.assertEqual(self.events[-1][0], 'ready')
+        self.assertFalse(self.events[-1][1].get('quotaKnown', True))
+
+    async def test_credential_problems_at_startup_still_stop_the_bridge(self):
+        def prepare(name, require_quota=True):
+            raise LiveError('ChatGPT access token needs refresh or sign-in')
+        self.pool.prepare = prepare
+        with self.assertRaises(LiveError):
+            await self.initialize()
+        self.assertFalse(self.bridge.initialized)
+
+    async def test_startup_with_quota_marks_it_known(self):
+        await self.initialize()
+        self.assertTrue(self.events[-1][1].get('quotaKnown'))
+        self.assertGreater(self.bridge.checked_at, 0)
+
+
+class PoolPrepareTests(unittest.TestCase):
+    def make_pool(self):
+        pool = object.__new__(AccountPool)
+        pool.codex = 'fixture-codex'
+
+        class Manager:
+            def enabled_accounts(self):
+                return [('main', None)]
+
+            def account(self, name):
+                return name, '/fixture/home'
+
+            def env(self, home):
+                return {}
+        pool.manager = Manager()
+        return pool
+
+    def test_quota_outage_is_optional_only_when_asked(self):
+        pool = self.make_pool()
+        with patch('xswap_live.check_file_store', create=True), \
+                patch('codex_swap.check_file_store'), patch('xswap_live.read_auth'), \
+                patch('xswap_live.load_credentials', return_value={'accessToken': 'x'}), \
+                patch('xswap_live.read_limits', side_effect=UsageError('usage request timed out')):
+            with self.assertRaises(UsageError):
+                pool.prepare('main')
+            credentials, raw = pool.prepare('main', require_quota=False)
+        self.assertEqual(credentials, {'accessToken': 'x'})
+        self.assertIsNone(raw)
+
+
+class FailureReasonTests(unittest.TestCase):
+    def test_only_curated_messages_are_exposed(self):
+        self.assertEqual(failure_reason(LiveError('app-server exited')), 'app-server exited')
+        self.assertEqual(failure_reason(UsageError('usage request timed out')), 'usage request timed out')
+        self.assertEqual(failure_reason(asyncio.TimeoutError()), 'app-server request timed out')
+        secret = RuntimeError('token=sk-secret payload')
+        self.assertEqual(failure_reason(secret), 'RuntimeError')
+        self.assertNotIn('secret', failure_reason(secret))
+
+
+class RunFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stopped_status_and_bridge_carry_the_reason(self):
+        events = []
+        bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {})
+        bridge.status = lambda event, **extra: events.append((event, extra))
+
+        async def idle():
+            await asyncio.Event().wait()
+        bridge.client_reader = idle
+        bridge.manual_switch_reader = idle
+        with self.assertRaises(LiveError):
+            await bridge.run()
+        self.assertEqual(events[-1], ('stopped', {'reason': 'app-server exited'}))
+        self.assertEqual(bridge.failure, 'app-server exited')
+
+
+async def test_setup(case):
+    await BridgeTests.asyncSetUp(case)

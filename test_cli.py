@@ -60,6 +60,15 @@ class CliTests(TestCase):
   else:
    os.close(fd);fd=None
   return run_dir,fd
+ def test_status_exposes_stop_reason_and_quota_flag(self):
+  run_dir,_=self.make_run('failed-init')
+  (run_dir/'status.json').write_text(json.dumps({'updatedAt':time.time(),'event':'stopped','reason':'usage request timed out','quotaKnown':False,'accessToken':'must-not-leak'}))
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  session=[s for s in json.loads(out.getvalue())['sessions'] if s['event']=='stopped'][0]
+  self.assertEqual(session['reason'],'usage request timed out')
+  self.assertIs(session['quotaKnown'],False)
+  self.assertNotIn('accessToken',session)
  def test_prune_never_removes_running_dir(self):
   run_dir,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
   try:
