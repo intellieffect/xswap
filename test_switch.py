@@ -38,6 +38,17 @@ class ManualBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.bridge.apply_manual_switch())
         self.assertEqual(len(self.calls), 1)
 
+    async def test_same_account_request_reauthenticates_without_counting_a_switch(self):
+        # `xswap login first` while this bridge is on first: new tokens, same account, quota republished.
+        self.request(name='first')
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertEqual(self.bridge.switches, 0)
+        self.assertEqual(self.bridge.manual_state, 'applied')
+        self.assertEqual([c[0] for c in self.calls], ['account/login/start'])
+        self.assertEqual(self.calls[0][1]['accessToken'], 'fake-first')
+        self.assertEqual(self.emitted[-1]['method'], 'account/rateLimits/updated')
+
     async def test_busy_switch_waits_for_all_turns(self):
         self.bridge.active.update(('a', 'b'))
         self.request()
@@ -91,7 +102,7 @@ class ManualBridgeTests(unittest.IsolatedAsyncioTestCase):
 class SwitchCommandTests(unittest.TestCase):
     setUp = test_codex_swap.AccountTests.setUp
 
-    def session(self, name, capable=True, running=True):
+    def session(self, name, capable=True, running=True, account='main'):
         directory = self.manager.root / 'auto' / 'cli-runs' / name
         for path in (directory.parent.parent, directory.parent, directory):
             private_dir(path)
@@ -99,7 +110,7 @@ class SwitchCommandTests(unittest.TestCase):
         self.addCleanup(os.close, fd)
         if running:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        state = {'account': 'main'}
+        state = {'account': account}
         if capable:
             state.update(manualSwitchVersion=1, bridgeInstance=name)
         atomic_json(directory / 'status.json', state)
@@ -119,6 +130,15 @@ class SwitchCommandTests(unittest.TestCase):
         self.assertEqual(request['account'], 'second')
         self.assertEqual((live / 'switch.json').stat().st_mode & 0o777, 0o600)
         self.assertNotIn('token', json.dumps(request))
+
+    def test_only_current_targets_bridges_already_on_that_account(self):
+        # A re-login re-authenticates sessions on that account; others are left alone.
+        on_main = self.session('on-main', account='main')
+        on_second = self.session('on-second', account='second')
+        result = switch_running(self.manager, 'main', timeout=0, only_current=True)
+        self.assertEqual(result['unconfirmed'], 1)
+        self.assertEqual(read_private_json(on_main / 'switch.json')['account'], 'main')
+        self.assertFalse((on_second / 'switch.json').exists())
 
     def test_unsafe_auto_directory_is_reported_not_silently_skipped(self):
         live = self.session('live')

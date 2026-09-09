@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.7
+
+A re-login now takes effect everywhere at once (INT-5099). Previously `xswap login NAME` only ran `codex login`: the quota cache kept the pre-login numbers for `list --cached`/the alert job (a same-email re-login looked like a cache hit), a bridged session on that account kept the old tokens until Codex itself asked for a refresh, and the menu bar showed the old state for up to five minutes.
+
+- `xswap login NAME` (and the first sign-in through `xswap add`) drops the account's cached quota, reads it live once, and prints the weekly line (`NAME weekly: 43% used · 57% left · resets in …`) or the short failure reason. The sign-in itself is reported either way.
+- Running bridged sessions **already on NAME** re-authenticate in place through the manual-switch channel (`account/login/start` with the new tokens, quota republished to the TUI, `switches` unchanged). Sessions on other accounts are left alone; they re-read the home the next time they consider it. `switch_running()` gained `only_current=`.
+- The menu bar app watches the xswap root (usage cache, registry, auto settings) and refreshes within a second of a login or `use` instead of waiting for the 5-minute timer. Its own refresh writes are absorbed, so no refresh loop.
+
 ## 0.7.6
 
 Audit follow-up after the 2026-09-09 account-switch incident (INT-5079/INT-5085). Display, guidance, and metadata only; no change to account, session, or automatic-switching behavior.
