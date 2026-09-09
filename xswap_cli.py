@@ -10,7 +10,6 @@ from pathlib import Path
 import shutil
 import shlex
 import signal
-import subprocess
 import sys
 import tempfile
 import time
@@ -238,7 +237,7 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 await active_bridge.picker_client(socket)
             except ConnectionClosed:
                 pass
-            except (ValueError, asyncio.TimeoutError, LiveError):
+            except (TimeoutError, ValueError, LiveError):
                 await socket.close(1008, 'picker connection failed')
             return
         connected = True
@@ -362,6 +361,23 @@ def resume_home(manager, args, default):
     return default
 
 
+def new_run_dir(manager):
+    """Create auto/cli-runs/<hex> with every level 0700, repairing an existing `auto`.
+
+    mkdir(parents=True, mode=0o700) applies the mode to the leaf only, so an `auto`
+    directory first created by a CLI launch took the umask (0755). switch_running
+    then treated the control directory as unsafe and signalled nothing, silently:
+    `xswap use` never reached running sessions on such a machine (INT-5085).
+    """
+    from codex_swap import private_dir
+    auto = manager.root / 'auto'
+    private_dir(auto)
+    private_dir(auto / 'cli-runs')
+    run_dir = auto / 'cli-runs' / uuid.uuid4().hex
+    private_dir(run_dir)
+    return run_dir
+
+
 def launch_cli(manager, accounts, args, dry=False):
     from codex_swap import private_dir
     names = [value.strip() for value in accounts.split(',') if value.strip()]
@@ -394,9 +410,7 @@ def launch_cli(manager, accounts, args, dry=False):
         ensure_plugins(home, source)
     else:
         print('xswap auto: resuming from the original session home', file=sys.stderr)
-    run_dir = manager.root / 'auto' / 'cli-runs' / uuid.uuid4().hex
-    private_dir(run_dir.parent)
-    private_dir(run_dir)
+    run_dir = new_run_dir(manager)
     env = manager.env(home)
     for key in list(env):
         if key.startswith('XSWAP_') or key in ('CODEX_CLI_PATH', 'CODEX_APP_SERVER_WS_URL', 'CODEX_APP_SERVER_USE_LOCAL_DAEMON'):

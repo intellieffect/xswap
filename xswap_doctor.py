@@ -76,16 +76,18 @@ def check_codex_binary():
 
 def check_wrapper(settings, accounts=()):
     wrapper = settings.get("wrapper")
+    names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
+    reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
     if not wrapper:
-        names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
         if len(names) >= 2:
             return check("wrapper", WARN, "codex command not connected; plain codex ignores the xswap "
-                         f"selection. Connect it: xswap auto-enable --accounts {','.join(names)} --wrap-codex")
+                         f"selection. Connect it: {reconnect}")
         return check("wrapper", OK, "codex command not connected")
     path = Path(wrapper.get("path", ""))
     if path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
         return check("wrapper", OK, f"{path} -> xswap-codex")
-    return check("wrapper", WARN, "codex entry changed outside xswap")
+    return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
+                 f"plain codex is disconnected. Reconnect it: {reconnect}")
 
 
 def check_credential_store(manager):
@@ -162,6 +164,22 @@ def check_auto_pool(settings, accounts):
     if bad:
         return check("auto pool", FAIL, f"pool references unavailable account(s): {', '.join(bad)}")
     return check("auto pool", OK, f"pool: {', '.join(names)}")
+
+
+def check_auto_dir(manager):
+    """The manual-switch control directory must be 0700 or `xswap use` skips running sessions."""
+    auto = manager.root / "auto"
+    try:
+        info = auto.lstat()
+    except FileNotFoundError:
+        return check("auto control dir", OK, "not created yet")
+    except OSError as exc:
+        return check("auto control dir", FAIL, str(exc))
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or mode != 0o700:
+        return check("auto control dir", WARN, f"{auto} mode={oct(mode)} uid={info.st_uid}; xswap use/switch "
+                     f"skips running sessions until: chmod 700 {auto}")
+    return check("auto control dir", OK, str(auto))
 
 
 def check_auto_runs(manager):
@@ -347,6 +365,7 @@ def run(manager):
 
     if settings_ok:
         results.append(check_auto_pool(settings, accounts))
+    results.append(check_auto_dir(manager))
     results.append(check_auto_runs(manager))
     results.extend(check_openclaw())
     results.extend(check_openclaw_cooldowns(accounts, manager.usage_cache_path()))

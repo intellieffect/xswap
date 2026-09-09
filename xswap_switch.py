@@ -4,7 +4,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from pathlib import Path
 import stat
 import time
 import uuid
@@ -41,7 +40,11 @@ def switch_running(manager, name, timeout=2):
     from codex_swap import atomic_json
     report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
     auto = manager.root / 'auto'
-    if not auto.exists() or not private_directory(auto):
+    if not auto.exists():
+        return report
+    if not private_directory(auto):
+        # Nothing is signalled through a directory other users could write to; say so.
+        report['unsafe'] = str(auto)
         return report
     paths = [auto]
     runs = auto / 'cli-runs'

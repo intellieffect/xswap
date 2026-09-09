@@ -15,7 +15,7 @@ class Socket:
         try:
             return json.dumps(next(self.messages))
         except StopIteration:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
     async def send(self, text):
         self.replies.append(json.loads(text))
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.6
+
+Audit follow-up after the 2026-09-09 account-switch incident (INT-5079/INT-5085). Display, guidance, and metadata only; no change to account, session, or automatic-switching behavior.
+
+- **`xswap use`/`switch` could silently never reach running sessions.** A CLI launch created the `auto` control directory through `mkdir(parents=True)`, so it took the umask (0755) unless a desktop session or a runtime-home launch had created it first; `switch_running` then treated it as unsafe and returned an empty report. Every level of `auto/cli-runs/<run>` is now created 0700 (an existing `auto` is repaired on the next launch), an unsafe directory is reported by `use` with the `chmod 700` fix and a non-zero exit, and `doctor` has an `auto control dir` row.
+- Bridge status records carried a hard-coded `bridgeVersion` of `0.7.2`; they now report the installed version, and `quotaKnown` persists across every status write instead of vanishing after the first `ready` (it showed as `null` in `auto-status`).
+- `xswap list`/`usage` name the fix instead of a bare "unavailable": a login the usage service rejects reads `sign-in required · xswap login NAME`, other failures keep their short reason (`unavailable · …`).
+- `xswap list` warns when automatic switching is on but no other pool account has weekly quota above the reserve, so an exhausted fallback is visible before it matters.
+- `xswap use`/`switch` no longer print a zero-filled bridge counter; with no live bridges they say so and name the account new sessions start as. Exit codes are unchanged.
+- `xswap doctor`'s wrapper row names the reconnect command when the `codex` link was replaced outside xswap (what a Codex update does).
+- `xswap upgrade` reports how many running bridged sessions still use the previous code and that reopening them loads the new tag.
+- README install/upgrade snippets had pinned `v0.6.1` since that release; they now pin the current tag and a unit test fails when they drift from `__version__`.
+- Lint: `ruff` (F, E9, B, UP) runs in CI; unused imports, a shadowed `setUp`, and `asyncio.TimeoutError` aliases were cleaned up.
+
 ## 0.7.5
 
 - `xswap use` / `switch` now say when the ordinary `codex` command is not connected to xswap: plain `codex` keeps using its own home (`~/.codex` unless `CODEX_HOME` is set) and the account signed in there, and the selection applies only to `xswap` and `xswap app`. The message names that home, its local account label, and the `xswap auto-enable --accounts … --wrap-codex` command that connects it. Nothing is printed when the wrapper is connected or when the selection already is that home.

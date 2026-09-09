@@ -45,6 +45,7 @@ class StringsTableTests(unittest.TestCase):
             'autoswitch_on_threshold': '새 세션 자동전환 ON · {pct:g}% 사용 시 전환',
             'autoswitch_on_limit': '새 세션 자동전환 ON · 한도 도달 시 전환',
             'footer': '선택됨 = 새 실행의 기본 계정 · 기존 세션 계정은 xswap auto-status',
+            'no_fallback': '경고: 풀의 예비 계정 중 주간 잔여량이 예비율 {reserve:g}%를 넘는 계정이 없습니다 ({names})',
         }
         for key, value in original_ko.items():
             self.assertEqual(STRINGS['ko'][key], value)
@@ -133,11 +134,33 @@ class DisplayEnglishTests(unittest.TestCase):
         self.assertEqual(item['summary'], '6% used · 94% left')
 
     def test_status_notes(self):
-        for status, expected in [('disabled', 'disabled'), ('not signed in', 'sign-in required'),
-                                  ('offline', 'offline'), ('usage unavailable: boom', 'unavailable')]:
+        for status, expected in [('disabled', 'disabled'), ('not signed in', 'sign-in required · xswap login x'),
+                                  ('offline', 'offline'), ('usage unavailable: boom', 'unavailable · boom'),
+                                  ('usage unavailable: sign in again to read usage', 'sign-in required · xswap login x'),
+                                  ('API key: subscription quota not available', 'unavailable · API key: subscription quota not available')]:
             value = {'name': 'x', 'active': False, 'identity': 'i', 'status': status, 'buckets': []}
             item = summary(value, lang='en')
             self.assertEqual(item['summary'], expected)
+
+    def test_status_notes_korean_keep_original_labels(self):
+        value = {'name': 'main', 'active': False, 'identity': 'i', 'status': 'usage unavailable: sign in again to read usage', 'buckets': []}
+        self.assertEqual(summary(value, lang='ko')['summary'], '로그인 필요 · xswap login main')
+        value['status'] = 'usage unavailable: boom'
+        self.assertEqual(summary(value, lang='ko')['summary'], '조회 불가 · boom')
+
+    def test_fallback_warning_only_when_every_pool_alternative_is_at_or_below_reserve(self):
+        settings = {'enabled': True, 'accounts': ['a', 'b', 'c'], 'weeklyRemainingThreshold': 10}
+        exhausted = [row('a', left=50), dict(row('b', left=0), active=False), dict(row('c', left=10), active=False)]
+        text = render(exhausted, settings, color=False, now=0)
+        self.assertIn('Warning: no fallback account in the pool has weekly quota above the 10% reserve (b, c)', text)
+        self.assertIn('예비율 10%를 넘는 계정이 없습니다 (b, c)', render(exhausted, settings, color=False, now=0, lang='ko'))
+        healthy = [exhausted[0], exhausted[1], dict(row('c', left=11), active=False)]
+        self.assertNotIn('Warning', render(healthy, settings, color=False, now=0))
+        unknown = [exhausted[0], exhausted[1], {'name': 'c', 'active': False, 'identity': 'i', 'status': 'offline', 'buckets': []}]
+        self.assertNotIn('Warning', render(unknown, settings, color=False, now=0))
+        self.assertNotIn('Warning', render(exhausted, dict(settings, enabled=False), color=False, now=0))
+        only_selected = [row('a', left=50), dict(row('b', left=0), active=False)]
+        self.assertNotIn('Warning', render(only_selected, {'enabled': True, 'accounts': ['a'], 'weeklyRemainingThreshold': 10}, color=False, now=0))
 
     def test_no_weekly_window_note(self):
         value = {'name': 'x', 'active': False, 'identity': 'i', 'status': 'ok', 'buckets': []}

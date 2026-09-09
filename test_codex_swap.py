@@ -274,6 +274,25 @@ class AccountTests(unittest.TestCase):
         self.assertIn("Selected work.", text)
         self.assertNotIn("not connected", text)
 
+    def test_use_without_bridges_says_so_instead_of_dumping_zero_counters(self):
+        from codex_swap import describe_switch_report
+        self.assertEqual(describe_switch_report({'applied': 0, 'pending': 0, 'unsupported': 0, 'failed': 0, 'unconfirmed': 0}, 'work'),
+                         'No running bridged sessions; new sessions start as work.')
+        self.assertEqual(describe_switch_report({'applied': 2, 'pending': 1, 'unsupported': 0, 'failed': 0, 'unconfirmed': 0}, 'work'),
+                         'Running bridged sessions: applied 2, pending 1. Pending requests apply when the current turn finishes.')
+        self.assertIn('Check xswap auto-status', describe_switch_report({'applied': 0, 'failed': 1, 'unconfirmed': 0}, 'work'))
+        self.assertIn('chmod 700 /x/auto', describe_switch_report({'applied': 0, 'unsafe': '/x/auto'}, 'work'))
+        self.manager.register("main")
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", side_effect=self._write_login), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["add", "work"]), 0)
+            self.assertEqual(main(["use", "work"]), 0)
+        self.assertIn("No running bridged sessions; new sessions start as work.", out.getvalue())
+        self.assertNotIn("applied=0", out.getvalue())
+
     def test_add_without_use_leaves_existing_active(self):
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
@@ -1119,7 +1138,6 @@ class ClearCooldownManagerTests(unittest.TestCase):
                 self.manager.clear_openclaw_cooldown("main", yes=True)
 
     def test_omitted_name_checks_every_registered_account(self):
-        pid_main = self.profile_id("acct-1", "sub-1")
         pid_second = self.profile_id("acct-2", "sub-2")
         self.register("main", "acct-1", "sub-1")
         self.register("second", "acct-2", "sub-2")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "intellieffect-xswap"
-version = "0.7.5"
+version = "0.7.6"
 description = "Account switching for Codex CLI, macOS desktop, and local OpenClaw"
 readme = "README.md"
 license = "MIT"
@@ -36,3 +36,9 @@ packages = ["xswap_bridge"]
 
 [tool.setuptools.package-data]
 xswap_bridge = ["*.mjs", "*.swift"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "UP"]

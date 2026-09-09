@@ -99,7 +99,7 @@ def main():
    if stage!=4:
     print(output.decode(errors='replace')[-2500:]);raise AssertionError(f'TUI failed: stage={stage}, calls={len(calls)}, completed={completed}')
    try:process.wait(timeout=10)
-   except subprocess.TimeoutExpired:raise AssertionError('TUI/bridge did not shut down cleanly')
+   except subprocess.TimeoutExpired:raise AssertionError('TUI/bridge did not shut down cleanly') from None
    if os.environ.get('XSWAP_TEST_MANUAL')=='1':
     assert manual_done
     print('PASS: manual account switch acknowledged, subsequent turns complete, no bridge stderr in TUI')

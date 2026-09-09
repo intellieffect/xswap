@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import sys
 import time
-from xswap_usage import is_ok, reset_credit_lines, reset_label, usage_lines
+from xswap_usage import is_ok, reset_credit_lines, usage_lines
 
 # Every user-visible string in this module lives here, keyed by a short id.
 # `ko` values are the original hard-coded strings, preserved verbatim.
@@ -38,6 +38,7 @@ STRINGS = {
         "autoswitch_on_threshold": "New-session auto-switch ON · switches at {pct:g}% used",
         "autoswitch_on_limit": "New-session auto-switch ON · switches at limit",
         "footer": "selected = default account for new runs · existing session accounts: xswap auto-status",
+        "no_fallback": "Warning: no fallback account in the pool has weekly quota above the {reserve:g}% reserve ({names})",
     },
     "ko": {
         "no_accounts": "등록된 계정이 없습니다. xswap register main",
@@ -68,6 +69,7 @@ STRINGS = {
         "autoswitch_on_threshold": "새 세션 자동전환 ON · {pct:g}% 사용 시 전환",
         "autoswitch_on_limit": "새 세션 자동전환 ON · 한도 도달 시 전환",
         "footer": "선택됨 = 새 실행의 기본 계정 · 기존 세션 계정은 xswap auto-status",
+        "no_fallback": "경고: 풀의 예비 계정 중 주간 잔여량이 예비율 {reserve:g}%를 넘는 계정이 없습니다 ({names})",
     },
 }
 
@@ -106,15 +108,51 @@ def weekly(row):
     return None
 
 
+UNAVAILABLE_PREFIX = 'usage unavailable: '
+
+
+def status_note(row, lang="en"):
+    """One line for a row without a usable weekly gauge, naming the fix when there is one.
+
+    `xswap list` used to collapse every failure to "unavailable"; a login that the
+    usage service rejects now reads as sign-in required with the login command.
+    """
+    status = row['status']
+    if status == 'disabled':
+        return _t(lang, 'disabled')
+    if status == 'offline':
+        return _t(lang, 'offline')
+    if is_ok(status):
+        return _t(lang, 'no_weekly_data')
+    reason = status[len(UNAVAILABLE_PREFIX):] if status.startswith(UNAVAILABLE_PREFIX) else status
+    if status == 'not signed in' or 'sign in' in reason:
+        return _t(lang, 'signin_required') + f" · xswap login {row['name']}"
+    return _t(lang, 'unavailable') + (f' · {reason}' if reason else '')
+
+
+def fallback_warning(rows, settings, now=None, lang="en"):
+    """Say when automatic switching is on but no other pool account could take over."""
+    if not settings.get('enabled'):
+        return None
+    reserve = settings.get('weeklyRemainingThreshold') or 0
+    by_name = {r['name']: r for r in rows}
+    selected = next((r['name'] for r in rows if r.get('active')), None)
+    others = [n for n in settings.get('accounts') or [] if n != selected and n in by_name]
+    if not others:
+        return None
+    for name in others:
+        left = summary(by_name[name], now, lang)['remaining']
+        if left is None or left > reserve:  # Unknown quota is not proof of exhaustion.
+            return None
+    return _t(lang, 'no_fallback', reserve=reserve, names=', '.join(others))
+
+
 def summary(row, now=None, lang="en"):
     now = time.time() if now is None else now
     window = weekly(row)
     left = window['remainingPercent'] if window else None
     used = 100 - left if left is not None else None
-    status = row['status']
-    note = (_t(lang, 'disabled') if status == 'disabled' else _t(lang, 'signin_required') if status == 'not signed in' else
-            _t(lang, 'offline') if status == 'offline' else
-            _t(lang, 'unavailable') if not is_ok(status) else _t(lang, 'no_weekly_data'))
+    note = status_note(row, lang)
     bar = ''
     if used is not None:
         filled = min(20, max(0, int(used / 5 + .5)))
@@ -201,6 +239,9 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
         lines.append('')
     lines.append(_t(lang, 'switch_hint'))
     lines.append(policy_label(settings, lang))
+    warning = fallback_warning(rows, settings, now, lang)
+    if warning:
+        lines.append(warning)
     lines.append(_t(lang, 'footer'))
     return '\n'.join(lines)
 

@@ -1,4 +1,3 @@
-import asyncio
 import fcntl
 import json
 import os
@@ -120,6 +119,17 @@ class SwitchCommandTests(unittest.TestCase):
         self.assertEqual(request['account'], 'second')
         self.assertEqual((live / 'switch.json').stat().st_mode & 0o777, 0o600)
         self.assertNotIn('token', json.dumps(request))
+
+    def test_unsafe_auto_directory_is_reported_not_silently_skipped(self):
+        live = self.session('live')
+        auto = self.manager.root / 'auto'
+        auto.chmod(0o755)
+        result = switch_running(self.manager, 'second', timeout=0)
+        self.assertEqual(result['unsafe'], str(auto))
+        self.assertEqual(result['unconfirmed'], 0)
+        self.assertFalse((live / 'switch.json').exists())
+        auto.chmod(0o700)
+        self.assertNotIn('unsafe', switch_running(self.manager, 'second', timeout=0))
 
     def test_acknowledgement_is_required_for_success(self):
         live = self.session('live')

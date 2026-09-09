@@ -3,7 +3,6 @@ import copy
 import time
 import unittest
 
-import contextlib
 import sys
 from unittest.mock import patch
 
@@ -219,6 +218,7 @@ class InitializeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.checked_at, 0)
         self.assertEqual(self.events[-1][0], 'ready')
         self.assertFalse(self.events[-1][1].get('quotaKnown', True))
+        self.assertIs(self.bridge.quota_known, False)
 
     async def test_credential_problems_at_startup_still_stop_the_bridge(self):
         def prepare(name, require_quota=True):
@@ -231,6 +231,7 @@ class InitializeTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_with_quota_marks_it_known(self):
         await self.initialize()
         self.assertTrue(self.events[-1][1].get('quotaKnown'))
+        self.assertIs(self.bridge.quota_known, True)
         self.assertGreater(self.bridge.checked_at, 0)
 
 
@@ -268,7 +269,7 @@ class FailureReasonTests(unittest.TestCase):
     def test_only_curated_messages_are_exposed(self):
         self.assertEqual(failure_reason(LiveError('app-server exited')), 'app-server exited')
         self.assertEqual(failure_reason(UsageError('usage request timed out')), 'usage request timed out')
-        self.assertEqual(failure_reason(asyncio.TimeoutError()), 'app-server request timed out')
+        self.assertEqual(failure_reason(TimeoutError()), 'app-server request timed out')
         secret = RuntimeError('token=sk-secret payload')
         self.assertEqual(failure_reason(secret), 'RuntimeError')
         self.assertNotIn('secret', failure_reason(secret))
@@ -288,6 +289,22 @@ class RunFailureTests(unittest.IsolatedAsyncioTestCase):
             await bridge.run()
         self.assertEqual(events[-1], ('stopped', {'reason': 'app-server exited'}))
         self.assertEqual(bridge.failure, 'app-server exited')
+
+
+class StatusRecordTests(unittest.TestCase):
+    def test_status_record_carries_installed_version_and_persists_quota_known(self):
+        # 0.7.5 wrote a hard-coded bridgeVersion and dropped quotaKnown after 'ready' (INT-5085).
+        from codex_swap import __version__
+        import json, pathlib, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'status.json'
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=path)
+            bridge.quota_known = True
+            bridge.status('policy-applied')
+            state = json.loads(path.read_text())
+        self.assertEqual(state['bridgeVersion'], __version__)
+        self.assertIs(state['quotaKnown'], True)
+        self.assertEqual(state['event'], 'policy-applied')
 
 
 async def test_setup(case):

@@ -41,7 +41,7 @@ async def bootstrap(home, relative, imported_client, repair_source=None):
  finally:
   with contextlib.suppress(ProcessLookupError):os.killpg(process.pid,signal.SIGTERM)
   try:await asyncio.wait_for(process.wait(),5)
-  except asyncio.TimeoutError:process.kill();await process.wait()
+  except TimeoutError:process.kill();await process.wait()
   await asyncio.sleep(.2)
   with contextlib.suppress(ProcessLookupError):os.killpg(process.pid,signal.SIGKILL)
 
