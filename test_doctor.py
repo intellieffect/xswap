@@ -202,6 +202,14 @@ class DoctorTests(unittest.TestCase):
     def test_check_wrapper_not_connected_is_ok(self):
         row = doctor.check_wrapper({})
         self.assertEqual(row["status"], "OK")
+        self.assertEqual(doctor.check_wrapper({}, {"main": {}})["status"], "OK")
+        # A disabled account does not count toward the two needed for switching.
+        self.assertEqual(doctor.check_wrapper({}, {"main": {}, "old": {"disabled": True}})["status"], "OK")
+
+    def test_check_wrapper_not_connected_with_two_accounts_warns(self):
+        row = doctor.check_wrapper({}, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
 
     def test_check_wrapper_matches_proxy_is_ok(self):
         link = self.base / "codex-link"

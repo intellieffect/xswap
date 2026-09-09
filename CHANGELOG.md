@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+- `xswap use` / `switch` now say when the ordinary `codex` command is not connected to xswap: plain `codex` keeps using its own home (`~/.codex` unless `CODEX_HOME` is set) and the account signed in there, and the selection applies only to `xswap` and `xswap app`. The message names that home, its local account label, and the `xswap auto-enable --accounts … --wrap-codex` command that connects it. Nothing is printed when the wrapper is connected or when the selection already is that home.
+- `xswap doctor` reports the `wrapper` row as WARN instead of OK when two or more accounts are registered and the `codex` command is not connected.
+- Background: a running Codex CLI (0.153.4) does not re-read `auth.json`, so a plain session cannot change accounts without restarting; only sessions started through xswap (or the connected `codex` command) switch in place. See the "Already-running ordinary sessions" row under Automatic switching.
+
 ## 0.7.4
 
 - Keep automatic CLI sessions open when the usage service is unreachable at startup. Credentials are still validated; quota is re-read before the first turn (`quotaKnown: false` in `auto-status` until then). Previously the bridge exited and Codex showed only `remote app server ... closed during initialize`.

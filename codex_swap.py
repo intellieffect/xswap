@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 
 class SwapError(Exception):
@@ -175,6 +175,36 @@ def identity(home):
         raise SwapError(str(exc)) from None
     except (ValueError, OSError, IndexError, TypeError):
         return "unreadable auth cache"
+
+
+def plain_codex_notice(manager, selected_home):
+    """Explain when the ordinary `codex` command still bypasses the xswap selection.
+
+    Returns None when the codex wrapper is connected or when plain codex already
+    uses the selected home. Only local labels and paths; never tokens.
+    """
+    from xswap_cli import read_settings
+    from xswap_live import LiveError
+    try:
+        wrapper = read_settings(manager).get("wrapper") or {}
+    except LiveError:
+        wrapper = {}
+    try:
+        path = Path(wrapper.get("path", ""))
+        if wrapper and path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
+            return None
+    except OSError:
+        pass
+    if Path(selected_home).expanduser().resolve() == manager.source:
+        return None
+    try:
+        label = identity(manager.source)
+    except SwapError:
+        label = "unreadable auth cache"
+    names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
+    return ("Note: the codex command is not connected to xswap. Plain `codex` keeps using "
+            f"{manager.source} ({label}); this selection applies only to xswap and xswap app. "
+            f"Connect it: xswap auto-enable --accounts {names} --wrap-codex")
 
 
 def codex_windows(buckets):
@@ -1063,6 +1093,9 @@ def main(argv=None):
             else:
                 manager.use(name)
             print(f"Selected {name}{detail}. CLI: xswap · Desktop: xswap app")
+            notice = plain_codex_notice(manager, manager.account(name)[1])
+            if notice:
+                print(notice)
             if not args.default_only:
                 from xswap_switch import switch_running
                 report = switch_running(manager, name)
