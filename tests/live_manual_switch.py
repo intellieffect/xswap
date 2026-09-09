@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from codex_swap import Manager, private_dir, atomic_json
+from codex_swap import Manager, private_dir
 from xswap_live import AccountPool, Bridge
 from xswap_switch import switch_running
 

@@ -1,4 +1,4 @@
-import contextlib, io, os, tempfile, unittest
+import contextlib, io, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from codex_swap import Manager, SwapError

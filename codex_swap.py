@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, usage_lines, window_label
+from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_display import resolve_lang
 from xswap_live import LiveError, buckets_available, jwt_claims
@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 
 
 class SwapError(Exception):
@@ -205,6 +205,25 @@ def plain_codex_notice(manager, selected_home):
     return ("Note: the codex command is not connected to xswap. Plain `codex` keeps using "
             f"{manager.source} ({label}); this selection applies only to xswap and xswap app. "
             f"Connect it: xswap auto-enable --accounts {names} --wrap-codex")
+
+
+def describe_switch_report(report, name):
+    """One line for `use`/`switch`: which live bridges took the selection, without a zero-filled dump."""
+    unsafe = report.get("unsafe")
+    if unsafe:
+        return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
+                f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
+    counts = {key: value for key, value in report.items() if value}
+    if not counts:
+        return f"No running bridged sessions; new sessions start as {name}."
+    text = "Running bridged sessions: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
+    if counts.get("pending"):
+        text += " Pending requests apply when the current turn finishes."
+    if counts.get("unsupported"):
+        text += " Bridges older than 0.7.2 need reopening once."
+    if counts.get("failed") or counts.get("unconfirmed"):
+        text += " Check xswap auto-status for the sessions that did not confirm."
+    return text
 
 
 def codex_windows(buckets):
@@ -1099,10 +1118,8 @@ def main(argv=None):
             if not args.default_only:
                 from xswap_switch import switch_running
                 report = switch_running(manager, name)
-                print('Running bridges: ' + ', '.join(f'{key}={value}' for key, value in report.items()))
-                print('Pending requests apply when the current turn finishes. '
-                      'Older bridges and sessions without a bridge require reopening once.')
-                if report['failed'] or report['unconfirmed']:
+                print(describe_switch_report(report, name))
+                if report.get('failed') or report.get('unconfirmed') or report.get('unsafe'):
                     return 1
         elif args.command == "disable":
             manager.set_disabled(args.name, True)

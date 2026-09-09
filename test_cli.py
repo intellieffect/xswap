@@ -3,7 +3,6 @@ import fcntl
 import io
 import json
 import os
-from pathlib import Path
 import time
 from unittest import TestCase
 from unittest.mock import patch
@@ -45,6 +44,16 @@ class CliTests(TestCase):
    cli.unlink();cli.symlink_to('external-update')
    disable(self.manager)
    self.assertEqual(os.readlink(cli),'external-update')
+ def test_new_run_dir_makes_every_level_private_and_repairs_auto(self):
+  # A CLI launch used to create `auto` through mkdir(parents=True), i.e. with the umask (INT-5085).
+  import os,stat
+  from xswap_cli import new_run_dir
+  old=os.umask(0o022);self.addCleanup(os.umask,old)
+  auto=self.manager.root/'auto';auto.mkdir(parents=True);auto.chmod(0o755)
+  run_dir=new_run_dir(self.manager)
+  for path in (auto,auto/'cli-runs',run_dir):
+   self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o700,path)
+  self.assertEqual(run_dir.parent,auto/'cli-runs')
  def test_dry_run_does_not_create_runtime(self):
   self.setup_pool()
   with patch.object(self.manager,'codex',return_value='/fixture/codex'),contextlib.redirect_stdout(io.StringIO()):
@@ -124,7 +133,6 @@ class CliTests(TestCase):
   self.assertEqual(json.loads(out.getvalue())['pruned'],0)
 
 class ResumeHomeTests(TestCase):
- setUp=test_codex_swap.AccountTests.setUp
  session_id='00000000-0000-4000-8000-000000000001'
  def setUp(self):
   test_codex_swap.AccountTests.setUp(self)

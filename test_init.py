@@ -154,7 +154,7 @@ class InitTests(unittest.TestCase):
 
         out = io.StringIO()
         with patch("shutil.which", side_effect=which), contextlib.redirect_stdout(out):
-            code = run_init(self.manager, init_args(), ask=scripted("", "y", "n"), interactive=True)
+            run_init(self.manager, init_args(), ask=scripted("", "y", "n"), interactive=True)
         self.assertTrue(xswap_cli.read_settings(self.manager)["enabled"])
         self.assertIn("auto: enabled across main, work", out.getvalue())
         self.assertEqual(cli.resolve(), proxy)

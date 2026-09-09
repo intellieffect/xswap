@@ -25,7 +25,6 @@ class HTTP(BaseHTTPRequestHandler):
    self.send_response(404);self.end_headers();return
   name=self.headers.get('ChatGPT-Account-ID','missing')
   calls.append({'path':self.path,'account':name,'body':body})
-  n=sum(c['account']=='first' for c in calls)
   if name=='first' and 'second turn' in json.dumps(body.get('input', [])):
    data={'error':{'type':'usage_limit_reached','message':'fixture limit','plan_type':'pro','resets_at':int(time.time())+3600}}
    self.send_response(429);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(data).encode());return
@@ -66,7 +65,7 @@ async def main():
   bridge.process=await asyncio.create_subprocess_exec(*bridge.argv,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE,env=env,limit=32*1024*1024)
   reader=asyncio.create_task(bridge.server_reader())
   async def stderr():
-   while line:=await bridge.process.stderr.readline():
+   while await bridge.process.stderr.readline():
     pass  # Fixture backend intentionally lacks optional remote plugin APIs.
   err=asyncio.create_task(stderr())
   try:

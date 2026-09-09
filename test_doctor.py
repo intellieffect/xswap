@@ -197,6 +197,21 @@ class DoctorTests(unittest.TestCase):
         # Only one row reports this cause.
         self.assertEqual(names.count("auto settings"), 1)
 
+    # --- check_auto_dir ---
+
+    def test_check_auto_dir_reports_umask_mode_with_fix(self):
+        import types
+        manager = types.SimpleNamespace(root=self.base / "store")
+        self.assertEqual(doctor.check_auto_dir(manager)["status"], "OK")
+        auto = manager.root / "auto"
+        auto.mkdir(parents=True)
+        auto.chmod(0o755)
+        row = doctor.check_auto_dir(manager)
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn(f"chmod 700 {auto}", row["detail"])
+        auto.chmod(0o700)
+        self.assertEqual(doctor.check_auto_dir(manager)["status"], "OK")
+
     # --- check_wrapper ---
 
     def test_check_wrapper_not_connected_is_ok(self):
@@ -217,6 +232,14 @@ class DoctorTests(unittest.TestCase):
         settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
         row = doctor.check_wrapper(settings)
         self.assertEqual(row["status"], "OK")
+
+    def test_check_wrapper_changed_externally_names_the_reconnect_command(self):
+        link = self.base / "codex-link-3"
+        link.symlink_to("/something-else")
+        settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
 
     def test_check_wrapper_changed_externally_warns(self):
         link = self.base / "codex-link-2"

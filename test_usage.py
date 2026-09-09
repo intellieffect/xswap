@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, SwapError, atomic_json, main
-from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, reset_credit_lines, reset_label, short_line, usage_lines, warnings
+from xswap_usage import UsageError, normalize_limits, normalize_reset_credits, read_limits, reset_credit_lines, reset_label, short_line, usage_lines, warnings
 
 
 def response():

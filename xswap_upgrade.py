@@ -47,6 +47,16 @@ def install_command(tag):
     return ["uv", "tool", "install", "--force", f"git+{REPO}@{tag}"]
 
 
+def count_running_sessions():
+    """Bridged sessions that keep running the previous code after a reinstall; 0 when unknown."""
+    try:
+        from codex_swap import Manager
+        from xswap_cli import status_data
+        return sum(1 for session in status_data(Manager(), cleanup=False)["sessions"] if session.get("running"))
+    except Exception:
+        return 0
+
+
 def upgrade(current_version, tag=None, dry=False):
     version, chosen = choose(list_tags(), tag)
     if version == tuple(int(part) for part in current_version.split(".")):
@@ -60,6 +70,10 @@ def upgrade(current_version, tag=None, dry=False):
         print(" ".join(command))
         return 1
     result = subprocess.run(command)
+    if result.returncode == 0:
+        running = count_running_sessions()
+        if running:
+            print(f"{running} running xswap session(s) still use the previous bridge; reopen them to load {chosen}.")
     executable = shutil.which("xswap")
     if executable:
         check = subprocess.run([executable, "--version"], capture_output=True, text=True)

@@ -201,6 +201,7 @@ class Bridge:
         self.instance = uuid.uuid4().hex
         self.manual_request = None
         self.manual_state = None
+        self.quota_known = None  # Persisted in every status write, not only 'ready'.
         self.failure = None
 
     @staticmethod
@@ -211,12 +212,13 @@ class Bridge:
     def status(self, event, **extra):
         # Whitelist operational metadata only. No prompts, tokens, raw RPC errors.
         if self.status_path:
-            from codex_swap import atomic_json
+            from codex_swap import __version__, atomic_json
             atomic_json(self.status_path, {'bridgePid': os.getpid(),
                 'serverPid': self.process.pid if self.process else None,
                 'cliPid': getattr(self, 'client_pid', None),
                 'account': self.current, 'event': event, 'switches': self.switches,
-                'bridgeVersion': '0.7.2', 'weeklyRemainingThreshold': self.threshold(),
+                'bridgeVersion': __version__, 'weeklyRemainingThreshold': self.threshold(),
+                'quotaKnown': self.quota_known,
                 'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
                 'manualRequest': self.manual_request, 'manualState': self.manual_state,
                 'updatedAt': time.time(), **extra})
@@ -253,7 +255,8 @@ class Bridge:
         # Unknown quota: leave checked_at at 0 so before_turn re-reads it first.
         self.checked_at = time.monotonic() if raw is not None else 0
         self.last_quota = raw
-        self.status('switched' if changed else 'ready', quotaKnown=raw is not None)
+        self.quota_known = raw is not None
+        self.status('switched' if changed else 'ready', quotaKnown=self.quota_known)
 
     async def apply_manual_switch(self):
         """Called with gate held; only idle servers may change authentication."""
@@ -518,7 +521,7 @@ class Bridge:
                     os.killpg(self.process.pid, signal.SIGTERM)
                 try:
                     await asyncio.wait_for(self.process.wait(), 2)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(self.process.pid, signal.SIGKILL)
                     await self.process.wait()
@@ -559,7 +562,7 @@ def proxy_main():
         finally:
             os.close(lock)
         return 0
-    except (LiveError, SwapError, OSError, ValueError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, LiveError, SwapError, OSError, ValueError) as exc:
         reason = failure_reason(exc) if isinstance(exc, (LiveError, asyncio.TimeoutError)) else type(exc).__name__
         print(f'xswap auto: bridge stopped ({reason}); check source account login and CLI compatibility. Original account stores were not replaced.', file=sys.stderr)
         return 1

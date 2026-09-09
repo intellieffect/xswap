@@ -107,11 +107,32 @@ class UpgradeTests(unittest.TestCase):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
              patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=responses) as run, \
+             patch("xswap_upgrade.count_running_sessions", return_value=0), \
              contextlib.redirect_stdout(io.StringIO()) as out:
             result = upgrade("0.4.2")
         self.assertEqual(result, 0)
         self.assertEqual(run.call_count, 2)
         self.assertIn("xswap 0.5.0", out.getvalue())
+        self.assertNotIn("previous bridge", out.getvalue())
+
+    def test_install_tells_how_many_running_sessions_keep_the_old_bridge(self):
+        responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")]
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("xswap_upgrade.subprocess.run", side_effect=responses), \
+             patch("xswap_upgrade.count_running_sessions", return_value=3), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(upgrade("0.4.2"), 0)
+        self.assertIn("3 running xswap session(s) still use the previous bridge; reopen them to load v0.5.0.", out.getvalue())
+
+    def test_readme_install_snippets_pin_the_current_release(self):
+        # README pinned v0.6.1 through four releases; keep the snippets on __version__ (INT-5085).
+        import re
+        from codex_swap import __version__
+        root = pathlib.Path(__file__).parent
+        for name in ("README.md", "README.ko.md"):
+            tags = set(re.findall(r"xswap\.git@v(\d+\.\d+\.\d+)", (root / name).read_text()))
+            self.assertEqual(tags, {__version__}, name)
 
 
 if __name__ == "__main__":
