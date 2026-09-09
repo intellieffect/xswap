@@ -14,8 +14,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, SwapError, atomic_json, main
+from codex_swap import Manager, SwapError, atomic_json, identity, main
 from xswap_live import AccountPool, LiveError
+from xswap_usage import UsageError
 
 
 class AccountTests(unittest.TestCase):
@@ -207,6 +208,50 @@ class AccountTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             self.manager.login("main", device_auth=True)
         self.assertEqual(call.call_args.args[0], ["/usr/bin/codex", "login", "--device-auth"])
+
+    def test_login_refreshes_quota_cache_and_reauthenticates_sessions_on_that_account(self):
+        self.manager.register("main")
+        label = identity(self.source)
+        stale = {"main": {"buckets": [], "fetchedAt": 1000, "identity": label, "resetCredits": None}}
+        atomic_json(self.manager.usage_cache_path(), stale)
+        report = dict(applied=1, pending=0, unsupported=0, failed=0, unconfirmed=0)
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", return_value=response()), \
+             patch("xswap_switch.switch_running", return_value=report) as signal, \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        cached = json.loads(self.manager.usage_cache_path().read_text())["main"]
+        self.assertGreater(cached["fetchedAt"], 1000)
+        self.assertEqual(cached["identity"], label)
+        signal.assert_called_once_with(self.manager, "main", only_current=True)
+        text = out.getvalue()
+        self.assertIn("main weekly:", text)
+        self.assertIn("Running bridged sessions on main: applied 1.", text)
+
+    def test_login_reports_usage_failure_without_hiding_the_signin(self):
+        self.manager.register("main")
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", side_effect=UsageError("usage service unavailable")), \
+             patch("xswap_switch.switch_running", return_value=dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        text = out.getvalue()
+        self.assertIn("Signed in main:", text)
+        self.assertIn("main usage: usage unavailable: usage service unavailable", text)
+        self.assertIn("No running bridged session is on main", text)
+
+    def test_failed_login_does_not_touch_cache_or_sessions(self):
+        self.manager.register("main")
+        with patch("codex_swap.subprocess.call", return_value=1), \
+             patch("codex_swap.read_limits") as fetch, \
+             patch("xswap_switch.switch_running") as signal, \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.manager.login("main"), 1)
+        fetch.assert_not_called()
+        signal.assert_not_called()
 
     def test_add_refusal_points_to_login(self):
         self.manager.register("main")

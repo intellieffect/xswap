@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
 
 class SwapError(Exception):
@@ -219,6 +219,25 @@ def describe_switch_report(report, name):
     text = "Running bridged sessions: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
     if counts.get("pending"):
         text += " Pending requests apply when the current turn finishes."
+    if counts.get("unsupported"):
+        text += " Bridges older than 0.7.2 need reopening once."
+    if counts.get("failed") or counts.get("unconfirmed"):
+        text += " Check xswap auto-status for the sessions that did not confirm."
+    return text
+
+
+def describe_login_report(report, name):
+    """One line for `login`: which live bridges on NAME re-authenticated."""
+    unsafe = report.get("unsafe")
+    if unsafe:
+        return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
+                f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
+    counts = {key: value for key, value in report.items() if value}
+    if not counts:
+        return f"No running bridged session is on {name}; sessions on other accounts re-read it when needed."
+    text = f"Running bridged sessions on {name}: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
+    if counts.get("pending"):
+        text += " Pending requests re-authenticate when the current turn finishes."
     if counts.get("unsupported"):
         text += " Bridges older than 0.7.2 need reopening once."
     if counts.get("failed") or counts.get("unconfirmed"):
@@ -795,14 +814,34 @@ class Manager:
         print(f"Cleared {len(targets)} OpenClaw cooldown(s): {', '.join(cleared)}.\nBackup: {backup_path}")
         return {"cleared": cleared, "backup": str(backup_path)}
 
-    def login(self, name, device_auth=False):
+    def login(self, name, device_auth=False, lang="en"):
         name, home = self.account(name)
         check_file_store(home)
         command = [self.codex(), "login"] + (["--device-auth"] if device_auth else [])
         result = subprocess.call(command, env=self.env(home))
         if not result:
             print(f"Signed in {name}: {identity(home)}")
+            self.after_login(name, home, lang=lang)
         return result
+
+    def after_login(self, name, home, lang="en"):
+        """A (re-)login changes what the usage service says and what running
+        bridges hold. Drop the cached quota entry and read it live once, then
+        ask bridges already on this account to re-authenticate in place.
+        Sessions on other accounts are untouched: they read the home again the
+        next time they consider it. Bridges before 0.7.2 need reopening once."""
+        from xswap_display import summary
+        from xswap_switch import switch_running
+        with self.locked():
+            self._forget_usage(name)
+        row = self.account_usage(name, home)
+        if row["status"] == "ok":
+            item = summary(row, lang=lang)
+            print(f"{name} weekly: {item['summary']}" + (f" · {item['reset']}" if item['reset'] else ""))
+        else:
+            print(f"{name} usage: {row['status']}")
+        report = switch_running(self, name, only_current=True)
+        print(describe_login_report(report, name))
 
     def launch_cli(self, name, args, dry=False):
         from xswap_cli import read_settings, interactive_args, launch_cli
@@ -1021,6 +1060,7 @@ def main(argv=None):
             if label in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"codex login exited successfully, but {args.name} has no readable login at {home}. The sign-in may have been cancelled; run xswap add {args.name} again.")
             print(f"Saved {args.name}: {label}. Select it: xswap use {args.name}")
+            manager.after_login(args.name, home, lang=resolve_lang(getattr(args, "lang", None), os.environ))
             # The account must be signed in before it can become active, so this only runs after login succeeds.
             if args.use:
                 manager.use(args.name)
@@ -1028,7 +1068,7 @@ def main(argv=None):
             elif manager.select_if_unset(args.name):
                 print(f"Selected {args.name} (first account).")
         elif args.command == "login":
-            return manager.login(args.name, args.device_auth)
+            return manager.login(args.name, args.device_auth, lang=resolve_lang(getattr(args, "lang", None), os.environ))
         elif args.command == "list":
             threshold = validate_warn_threshold(args.warn) if args.warn is not None else None
             max_age = parse_cache_seconds(args.cached)

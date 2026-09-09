@@ -31,11 +31,14 @@ def private_directory(path):
             stat.S_IMODE(info.st_mode) == 0o700)
 
 
-def switch_running(manager, name, timeout=2):
+def switch_running(manager, name, timeout=2, only_current=False):
     """Broadcast once; a request is bound to one live bridge instance.
 
     No source credentials are copied. Acknowledgements distinguish acceptance
     from completed login, and old processes are never signalled or restarted.
+    With only_current, bridges whose current account is not NAME are left
+    alone (a re-login re-authenticates the sessions already on that account;
+    the others re-read the home when they next consider it).
     """
     from codex_swap import atomic_json
     report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
@@ -69,6 +72,8 @@ def switch_running(manager, name, timeout=2):
                 instance = state.get('bridgeInstance')
                 if state.get('manualSwitchVersion') != 1 or not isinstance(instance, str):
                     report['unsupported'] += 1
+                    continue
+                if only_current and state.get('account') != name:
                     continue
                 request_id = uuid.uuid4().hex
                 atomic_json(directory / 'switch.json', {

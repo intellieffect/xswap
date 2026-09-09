@@ -100,6 +100,8 @@ final class MenuApp: NSObject, NSApplicationDelegate {
     var busy = false
     var failed = false
     var timer: Timer?
+    var watcher: DispatchSourceFileSystemObject?
+    var stateSignature = ""
     let executable: String
     init(_ executable: String) { self.executable = executable }
 
@@ -107,8 +109,51 @@ final class MenuApp: NSObject, NSApplicationDelegate {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = t("status_checking")
         rebuild()
+        stateSignature = currentStateSignature()
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.refresh() }
+        watchState()
+    }
+
+    // MARK: - Immediate refresh on xswap state changes
+    //
+    // `xswap login`, `use`, and `auto-*` rewrite files in the xswap root (usage
+    // cache, registry, auto settings). Watching that directory lets the menu
+    // follow a re-login within a second instead of waiting for the 5-minute
+    // timer. Only these files count; the watch compares their modification
+    // times so unrelated writes in the directory do nothing. Writes made by
+    // this app's own `dashboard` call happen while `busy` is set and are
+    // absorbed when the refresh completes, so no refresh loop can start.
+    var stateRoot: String {
+        let env = ProcessInfo.processInfo.environment
+        if let home = env["CODEX_SWAP_HOME"], !home.isEmpty { return (home as NSString).expandingTildeInPath }
+        return NSHomeDirectory() + "/.local/share/codex-swap"
+    }
+
+    func currentStateSignature() -> String {
+        ["usage-cache.json", "accounts.json", "auto.json"].map { name -> String in
+            let path = stateRoot + "/" + name
+            let date = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+            return name + "=" + String(date?.timeIntervalSince1970 ?? 0)
+        }.joined(separator: ";")
+    }
+
+    func watchState() {
+        let fd = open(stateRoot, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write], queue: .main)
+        source.setEventHandler { [weak self] in self?.stateChanged() }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        watcher = source
+    }
+
+    func stateChanged() {
+        guard !busy else { return }
+        let signature = currentStateSignature()
+        guard signature != stateSignature else { return }
+        stateSignature = signature
+        refresh()
     }
 
     func line(_ title: String, color: NSColor? = nil, mono: Bool = false) -> NSMenuItem {
@@ -193,6 +238,7 @@ final class MenuApp: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [self] in
                 busy = false; failed = received == nil
                 if let received = received { snapshot = received }
+                stateSignature = currentStateSignature()
                 rebuild()
             }
         }
