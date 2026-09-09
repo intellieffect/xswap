@@ -74,9 +74,13 @@ def check_codex_binary():
     return check("codex binary", OK, f"{executable} ({output})" if output else executable)
 
 
-def check_wrapper(settings):
+def check_wrapper(settings, accounts=()):
     wrapper = settings.get("wrapper")
     if not wrapper:
+        names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
+        if len(names) >= 2:
+            return check("wrapper", WARN, "codex command not connected; plain codex ignores the xswap "
+                         f"selection. Connect it: xswap auto-enable --accounts {','.join(names)} --wrap-codex")
         return check("wrapper", OK, "codex command not connected")
     path = Path(wrapper.get("path", ""))
     if path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
@@ -306,10 +310,19 @@ def run(manager):
     """Return a list of read-only check results. Never mutates state or touches the network."""
     results = [check_codex_binary()]
 
+    # Registry first: the wrapper row needs the account count. Output order is unchanged.
+    try:
+        data = manager.read()
+        registry_check = check("registry", OK, str(manager.registry))
+    except SwapError as exc:
+        data = {"accounts": {}}
+        registry_check = check("registry", FAIL, str(exc))
+    accounts = data.get("accounts", {})
+
     try:
         settings = read_settings(manager)
         settings_ok = True
-        results.append(check_wrapper(settings))
+        results.append(check_wrapper(settings, accounts))
     except LiveError as exc:
         settings, settings_ok = {}, False
         # One FAIL for the corrupted file; wrapper/auto-pool would only repeat the same cause.
@@ -317,14 +330,6 @@ def run(manager):
 
     results.append(check_credential_store(manager))
 
-    try:
-        data = manager.read()
-        registry_check = check("registry", OK, str(manager.registry))
-    except SwapError as exc:
-        data = {"accounts": {}}
-        registry_check = check("registry", FAIL, str(exc))
-
-    accounts = data.get("accounts", {})
     if not accounts:
         results.append(check("accounts", WARN, "no accounts registered; run: xswap register main"))
     for name, value in accounts.items():

@@ -130,6 +130,8 @@ Optionally connect the ordinary `codex` command too:
 xswap auto-enable --accounts work,main --wrap-codex
 ```
 
+Until the `codex` command is connected, `xswap use` prints which home and account plain `codex` still uses, and `xswap doctor` warns once two or more accounts are registered.
+
 Wrapping requires a user-owned `codex` symlink and saves its original target. A regular executable isn't overwritten. If wrapping isn't supported by your installation, use `xswap` directly. Codex updates may replace the symlink, requiring you to reconnect it.
 
 ### What happens during a session

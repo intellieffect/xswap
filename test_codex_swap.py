@@ -234,6 +234,46 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(self.manager.account(), ("work", self.manager.root / "profiles" / "work" / "codex"))
         self.assertIn("Selected work.", out.getvalue())
 
+    def _add_work_and_use(self, target, before=None):
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        with patch.dict(os.environ, env), \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             patch("codex_swap.subprocess.call", side_effect=self._write_login), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(["add", "work"]), 0)
+            if before:
+                before()
+            self.assertEqual(main(["use", target, "--default-only"]), 0)
+        return out.getvalue()
+
+    def test_use_warns_when_plain_codex_keeps_another_account(self):
+        # No wrapper, selection differs from the plain `codex` home: say so, with the home's label.
+        self.manager.register("main")
+        text = self._add_work_and_use("work")
+        self.assertIn("Selected work.", text)
+        self.assertIn("codex command is not connected", text)
+        self.assertIn(f"{self.source} (ChatGPT)", text)
+        self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertNotIn("fake-token", text)
+
+    def test_use_stays_quiet_when_selection_is_the_plain_codex_home(self):
+        self.manager.register("main")
+        text = self._add_work_and_use("main")
+        self.assertIn("Selected main.", text)
+        self.assertNotIn("not connected", text)
+
+    def test_use_stays_quiet_when_codex_wrapper_is_connected(self):
+        self.manager.register("main")
+        link = self.base / "codex-link"
+        link.symlink_to("/fixture/xswap-codex")
+        def connect():
+            atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex",
+                                    "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
+        text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertNotIn("not connected", text)
+
     def test_add_without_use_leaves_existing_active(self):
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
