@@ -87,7 +87,8 @@ def check_wrapper(settings, accounts=()):
     if path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
         return check("wrapper", OK, f"{path} -> xswap-codex")
     return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
-                 f"plain codex is disconnected. Reconnect it: {reconnect}")
+                 f"plain codex is disconnected until the next xswap launch, list, or use reconnects it. "
+                 f"Reconnect it now: {reconnect}")
 
 
 def check_credential_store(manager):

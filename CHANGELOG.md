@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.8
+
+A Codex update no longer disconnects plain `codex` from xswap (INT-5121). Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install script) re-points the user-owned `~/.local/bin/codex` symlink at its new release, silently undoing `--wrap-codex`: the next plain `codex` ran the new binary against `~/.codex` and its own account, and only `xswap doctor` noticed (2026-09-10 on a 0.153.4 → 0.154.0 update, the session hit that account's exhausted weekly limit).
+
+- While automatic switching is enabled, every `xswap` launch, `xswap list`/`usage` (including the `alert` job), and `xswap use`/`switch` checks the wrapped entry; if a Codex update replaced it with another executable, xswap records that release as the real Codex (`realCodex`/`originalTarget` in `auto.json`) and points the entry back at `xswap-codex`, printing one line. A bridged CLI session also reconnects it when it ends, since ctrl+u runs the updater inside that session.
+- Dangling or non-executable targets and a disabled auto mode are left alone; `xswap auto-disable` now restores the entry to the release the update installed rather than the one wrapped originally.
+- `xswap doctor`'s wrapper row says the gap closes on the next launch, list, or use, and still names the manual `auto-enable --wrap-codex` command.
+
 ## 0.7.7
 
 A re-login now takes effect everywhere at once (INT-5099). Previously `xswap login NAME` only ran `codex login`: the quota cache kept the pre-login numbers for `list --cached`/the alert job (a same-email re-login looked like a cache hit), a bridged session on that account kept the old tokens until Codex itself asked for a refresh, and the menu bar showed the old state for up to five minutes.

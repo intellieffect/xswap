@@ -29,7 +29,7 @@ from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 
 class SwapError(Exception):
@@ -183,9 +183,10 @@ def plain_codex_notice(manager, selected_home):
     Returns None when the codex wrapper is connected or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import read_settings
+    from xswap_cli import read_settings, reconnect_wrapper
     from xswap_live import LiveError
     try:
+        reconnect_wrapper(manager)
         wrapper = read_settings(manager).get("wrapper") or {}
     except LiveError:
         wrapper = {}
@@ -520,7 +521,8 @@ class Manager:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap_cli import read_settings
+        from xswap_cli import read_settings, reconnect_wrapper
+        reconnect_wrapper(self)
         wrapper = read_settings(self).get("wrapper")
         if wrapper and Path(executable).resolve() == Path(wrapper["proxy"]).resolve():
             real = wrapper["realCodex"]

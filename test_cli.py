@@ -7,7 +7,7 @@ import time
 from unittest import TestCase
 from unittest.mock import patch
 import test_codex_swap
-from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status
+from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper
 
 class CliTests(TestCase):
  setUp=test_codex_swap.AccountTests.setUp
@@ -36,6 +36,64 @@ class CliTests(TestCase):
    self.assertEqual(cli.resolve(),real)
    self.assertFalse(read_settings(self.manager)['enabled'])
   self.assertEqual(len(list(self.manager.root.rglob('auth.json'))),0)
+ def wrapped_fixture(self):
+  # A user-owned codex symlink wrapped by xswap, plus the release directory a Codex update would install.
+  self.setup_pool()
+  real=self.base/'real-codex';real.write_text('fixture');real.chmod(0o700)
+  updated=self.base/'packages'/'standalone'/'releases'/'0.155.0'/'bin';updated.mkdir(parents=True)
+  updated=updated/'codex';updated.write_text('fixture');updated.chmod(0o700)
+  proxy=self.base/'xswap-codex';proxy.write_text('fixture');proxy.chmod(0o700)
+  cli=self.base/'codex';cli.symlink_to(real)
+  return real,updated,proxy,cli
+ def test_codex_update_that_replaced_the_link_is_reconnected_on_next_use(self):
+  # Codex's standalone updater (ctrl+u, `codex upgrade`, install.sh) re-points ~/.local/bin/codex at its
+  # new release, so plain `codex` silently bypassed xswap until someone re-ran auto-enable --wrap-codex.
+  real,updated,proxy,cli=self.wrapped_fixture()
+  from codex_swap import plain_codex_notice
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   enable(self.manager,'main,second',wrap=True)
+   cli.unlink();cli.symlink_to(updated)  # what the updater does
+   self.assertEqual(self.manager.codex(),str(updated))  # any launch / usage read reconnects
+   self.assertEqual(cli.resolve(),proxy)
+   wrapper=read_settings(self.manager)['wrapper']
+   self.assertEqual(wrapper['realCodex'],str(updated));self.assertEqual(wrapper['originalTarget'],str(updated))
+   self.assertIn('reconnected',err.getvalue())
+   err.truncate(0);err.seek(0)
+   self.assertEqual(self.manager.codex(),str(updated));self.assertEqual(err.getvalue(),'')  # quiet once connected
+   cli.unlink();cli.symlink_to(updated)
+   self.assertIsNone(plain_codex_notice(self.manager,str(self.base/'elsewhere')))  # use/switch reconnect too
+   self.assertEqual(cli.resolve(),proxy)
+   disable(self.manager)
+   self.assertEqual(cli.resolve(),updated)  # rollback lands on the updated release, not the stale one
+ def test_reconnect_leaves_dangling_foreign_or_disabled_links_alone(self):
+  real,updated,proxy,cli=self.wrapped_fixture()
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+   enable(self.manager,'main,second',wrap=True)
+   cli.unlink();cli.symlink_to(self.base/'missing')
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(self.base/'missing'))
+   plain=self.base/'notes.txt';plain.write_text('fixture');cli.unlink();cli.symlink_to(plain)
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(plain))
+   cli.unlink();cli.symlink_to(proxy)
+   disable(self.manager)
+   cli.unlink();cli.symlink_to(updated)  # executable, but automatic switching is off
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(updated))
+   self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'],str(real))
+ def test_bridged_session_end_reconnects_after_in_session_update(self):
+  # ctrl+u runs the updater inside the bridged TUI; the link must be back before the next plain `codex`.
+  real,updated,proxy,cli=self.wrapped_fixture()
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  async def fake_serve(pool,real_path,args,env,status_path,socket_path):
+   cli.unlink();cli.symlink_to(updated)
+   return 0
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   enable(self.manager,'main,second',wrap=True)
+   with patch('xswap_cli.serve_cli',fake_serve),patch('xswap_plugins.ensure_plugins'):
+    self.assertEqual(launch_cli(self.manager,'main,second',[]),0)
+  self.assertEqual(cli.resolve(),proxy)
+  self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'],str(updated))
+  self.assertIn('reconnected',err.getvalue())
  def test_disable_preserves_external_change(self):
   self.setup_pool()
   real=self.base/'real';real.touch();proxy=self.base/'proxy';proxy.touch();cli=self.base/'codex';cli.symlink_to(real)

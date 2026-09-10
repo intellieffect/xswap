@@ -418,8 +418,14 @@ def launch_cli(manager, accounts, args, dry=False):
     # macOS Unix socket names have a short length limit. A random 0700 /tmp
     # directory avoids long user paths and prevents access by other users.
     with tempfile.TemporaryDirectory(prefix='xs-', dir='/tmp') as temporary:
-        return asyncio.run(serve_cli(pool, real, args, env, run_dir / 'status.json',
-                                     Path(temporary) / 'rpc.sock'))
+        try:
+            return asyncio.run(serve_cli(pool, real, args, env, run_dir / 'status.json',
+                                         Path(temporary) / 'rpc.sock'))
+        finally:
+            # A Codex update started from inside this session (ctrl+u) re-points
+            # the codex entry; reconnect it before the next plain `codex`.
+            with contextlib.suppress(LiveError, OSError):
+                reconnect_wrapper(manager)
 
 
 def read_settings(manager):
@@ -433,6 +439,84 @@ def read_settings(manager):
         return value
     except (OSError, ValueError):
         raise LiveError('invalid auto-mode settings; refusing to overwrite') from None
+
+
+def link_target_path(link, target):
+    """Absolute path of a symlink's target, resolving a relative target against the link's directory."""
+    return str(link.parent / target) if not Path(target).is_absolute() else target
+
+
+def swap_symlink(path, target):
+    """Atomically point `path` at `target` without a window where the entry is missing."""
+    temporary = path.with_name('.xswap-codex-' + uuid.uuid4().hex)
+    try:
+        temporary.symlink_to(target)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def wrapper_drift(settings):
+    """The link target a Codex update left behind on the wrapped codex entry, or None.
+
+    Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install
+    script) re-points the user-owned `codex` symlink at its new release and so
+    silently disconnects plain `codex` from xswap. Only a user-owned symlink whose
+    current target is an existing executable other than xswap-codex counts; a
+    dangling or foreign link is left for the user.
+    """
+    wrapper = settings.get('wrapper') or {}
+    proxy = wrapper.get('proxy')
+    path = Path(wrapper.get('path', ''))
+    if not proxy or not wrapper.get('path'):
+        return None
+    try:
+        if not path.is_symlink() or path.lstat().st_uid != os.getuid():
+            return None
+        target = os.readlink(path)
+        if target == proxy:
+            return None
+        real = Path(link_target_path(path, target))
+        if not real.is_file() or not os.access(real, os.X_OK) or real.resolve() == Path(proxy).resolve():
+            return None
+    except OSError:
+        return None
+    return target
+
+
+def reconnect_wrapper(manager):
+    """Reconnect the wrapped codex entry after a Codex update replaced it.
+
+    Runs on every xswap launch, usage read, and selection, and when a bridged
+    session ends (the update usually happens inside one). Records the updated
+    release as the real Codex and points the entry back at xswap-codex. Returns
+    the new real path, or None when nothing was changed. Only acts while
+    automatic switching is enabled; `xswap auto-disable` restores the entry.
+    """
+    from codex_swap import atomic_json
+    with manager.locked():
+        settings = read_settings(manager)
+        if not settings.get('enabled'):
+            return None
+        target = wrapper_drift(settings)
+        if target is None:
+            return None
+        wrapper = settings['wrapper']
+        path = Path(wrapper['path'])
+        real = link_target_path(path, target)
+        wrapper.update(originalTarget=target, realCodex=real)
+        try:
+            # Persist the new rollback target before the atomic symlink swap.
+            atomic_json(manager.root / 'auto.json', settings)
+            swap_symlink(path, wrapper['proxy'])
+        except OSError as error:
+            print(f'xswap: a Codex update replaced {path} but it could not be reconnected ({error.strerror or error}); '
+                  f'run: xswap auto-enable --accounts {",".join(settings.get("accounts", []))} --wrap-codex',
+                  file=sys.stderr)
+            return None
+    print(f'xswap: a Codex update had replaced {path}; reconnected it to xswap-codex. '
+          f'Codex is now {real}.', file=sys.stderr)
+    return real
 
 
 def enable(manager, accounts, wrap=False):
@@ -452,17 +536,12 @@ def enable(manager, accounts, wrap=False):
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
                     raise LiveError('codex wrapper installation requires a user-owned codex symlink; use xswap instead')
                 original = os.readlink(target)
-                real = str(target.parent / original) if not Path(original).is_absolute() else original
-                settings['wrapper'] = {'path': str(target), 'originalTarget': original, 'realCodex': real,
+                settings['wrapper'] = {'path': str(target), 'originalTarget': original,
+                                       'realCodex': link_target_path(target, original),
                                        'proxy': str(Path(proxy).absolute())}
                 # Persist rollback information before the atomic symlink swap.
                 atomic_json(manager.root / 'auto.json', settings)
-                temporary = target.with_name('.xswap-codex-' + uuid.uuid4().hex)
-                try:
-                    temporary.symlink_to(Path(proxy).absolute())
-                    os.replace(temporary, target)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                swap_symlink(target, Path(proxy).absolute())
             elif not settings.get('wrapper'):
                 raise LiveError('existing codex wrapper has no recovery information')
         atomic_json(manager.root / 'auto.json', settings)
@@ -490,12 +569,7 @@ def disable(manager):
         if wrapper:
             path = Path(wrapper['path'])
             if path.is_symlink() and os.readlink(path) == wrapper['proxy']:
-                temporary = path.with_name('.xswap-restore-' + uuid.uuid4().hex)
-                try:
-                    temporary.symlink_to(wrapper['originalTarget'])
-                    os.replace(temporary, path)
-                finally:
-                    temporary.unlink(missing_ok=True)
+                swap_symlink(path, wrapper['originalTarget'])
             else:
                 print('codex entry changed outside xswap; left it untouched.', file=sys.stderr)
         settings['enabled'] = False
