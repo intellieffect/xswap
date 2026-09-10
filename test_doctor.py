@@ -240,6 +240,7 @@ class DoctorTests(unittest.TestCase):
         row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
         self.assertEqual(row["status"], "WARN")
         self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
+        self.assertIn("next xswap launch, list, or use reconnects it", row["detail"])
 
     def test_check_wrapper_changed_externally_warns(self):
         link = self.base / "codex-link-2"

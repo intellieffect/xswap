@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.7.7'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
 xswap --version
 ```
 
@@ -132,7 +132,7 @@ xswap auto-enable --accounts work,main --wrap-codex
 
 Until the `codex` command is connected, `xswap use` prints which home and account plain `codex` still uses, and `xswap doctor` warns once two or more accounts are registered.
 
-Wrapping requires a user-owned `codex` symlink and saves its original target. A regular executable isn't overwritten. If wrapping isn't supported by your installation, use `xswap` directly. Codex updates may replace the symlink, requiring you to reconnect it.
+Wrapping requires a user-owned `codex` symlink and saves its original target. A regular executable isn't overwritten. If wrapping isn't supported by your installation, use `xswap` directly. A Codex update (ctrl+u in the TUI, `codex upgrade`, or the install script) re-points that symlink at the new release, which would leave plain `codex` bypassing xswap. While automatic switching is enabled, the next `xswap` launch, `xswap list`/`usage`, or `xswap use`/`switch` reconnects it and records the new release as the real Codex; the bridged session the update ran in also reconnects it when it ends. Until then `xswap doctor` shows the gap and names the manual command. `xswap auto-disable` restores the entry to the current release.
 
 ### What happens during a session
 
@@ -228,7 +228,7 @@ xswap upgrade --dry-run          # Print the command without running it
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.7.7'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
 ```
 
 Before uninstalling, restore the optional wrapper:

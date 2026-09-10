@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.7.7'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
 xswap --version
 ```
 
@@ -94,7 +94,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.7.7'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -127,7 +127,7 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 
 `codex` 명령이 아직 연결되지 않았으면 `xswap use`가 일반 `codex`가 계속 쓰는 홈과 계정을 출력하고, 계정이 2개 이상이면 `xswap doctor`가 경고합니다.
 
-구현은 데스크톱의 `CODEX_CLI_PATH`, CLI의 `--remote unix://` 연결과 App Server의 실험적 `chatgptAuthTokens` 인터페이스를 사용합니다. 앱 바이너리/설치 파일은 수정하지 않습니다. 이 인터페이스들의 호환성이 바뀔 수 있으며, 오류 시 자동 모드가 중단됩니다. `--wrap-codex`는 사용자 소유 심볼릭 링크만 교체합니다. Codex 업데이트가 링크를 변경하면 다시 연결해야 할 수 있습니다. 일반 모드로 돌아가려면 `xswap auto-disable`을 실행하십시오. 이미 실행 중인 자동 세션은 계속 유지됩니다.
+구현은 데스크톱의 `CODEX_CLI_PATH`, CLI의 `--remote unix://` 연결과 App Server의 실험적 `chatgptAuthTokens` 인터페이스를 사용합니다. 앱 바이너리/설치 파일은 수정하지 않습니다. 이 인터페이스들의 호환성이 바뀔 수 있으며, 오류 시 자동 모드가 중단됩니다. `--wrap-codex`는 사용자 소유 심볼릭 링크만 교체합니다. Codex 업데이트(TUI의 ctrl+u, `codex upgrade`, 설치 스크립트)는 이 링크를 새 릴리스로 되돌려 일반 `codex`가 xswap을 우회하게 만듭니다. 자동 전환이 켜져 있으면 다음 `xswap` 실행, `xswap list`/`usage`, `xswap use`/`switch`가 링크를 다시 연결하고 새 릴리스를 실제 Codex로 기록하며, 업데이트를 실행한 브리지 세션도 종료 시 다시 연결합니다. 그 전까지는 `xswap doctor`가 끊김을 표시하고 수동 명령을 안내합니다. `xswap auto-disable`은 현재 릴리스로 링크를 되돌립니다. 일반 모드로 돌아가려면 `xswap auto-disable`을 실행하십시오. 이미 실행 중인 자동 세션은 계속 유지됩니다.
 
 실제 Codex CLI 0.153.4와 macOS 앱 내장 바이너리에 가짜 계정/로컬 HTTP 서버를 연결하여 검증했습니다. `첫 계정 응답 → 한도 오류 → 두 번째 계정 응답`에서 서버 PID·대화 ID가 유지되고 3개 턴이 보존됐습니다. 실제 TUI를 PTY로 실행한 검사에서도 TUI/서버 PID와 대화 ID가 유지되며 자동 전환 후 다음 사용자 요청을 처리하고 Ctrl-C로 정상 종료됐습니다. 실제 구독 한도를 소진시키는 테스트는 하지 않습니다.
 
