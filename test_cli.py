@@ -692,6 +692,22 @@ class PassthroughTests(TestCase):
   self.assertEqual(env['CODEX_HOME'],str(second))
   self.assertEqual(os.readlink(second/'packages'),str(self.source/'packages'))
 
+class PassthroughDocsTests(TestCase):
+ # Classifying `upgrade` as non-interactive changed `xswap run -- upgrade` too: it leaves the
+ # bridge and installs through the profile's `packages` link. A user asking where the release
+ # lands reads the pass-through paragraph, not the CHANGELOG, so that paragraph has to say it.
+ cases=(('README.md','Once connected, non-interactive commands follow the selection too.',
+         ('`xswap run -- upgrade`','`packages` link','reference Codex home')),
+        ('README.ko.md','xswap: running codex exec as work',
+         ('`xswap run -- upgrade`','`packages` 링크','기준 Codex 홈')))
+ def test_both_readmes_say_where_run_upgrade_installs_the_release(self):
+  from pathlib import Path
+  for name,marker,required in self.cases:
+   blocks=[block for block in (Path(__file__).parent/name).read_text().split('\n\n') if marker in block]
+   self.assertEqual(len(blocks),1,name)  # the anchor moved or was duplicated; re-find the paragraph
+   for phrase in required:
+    self.assertIn(phrase,blocks[0],name)
+
 class ResumeHomeTests(TestCase):
  session_id='00000000-0000-4000-8000-000000000001'
  def setUp(self):
