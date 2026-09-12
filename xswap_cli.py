@@ -15,7 +15,7 @@ import tempfile
 import time
 import uuid
 
-from xswap_live import AccountPool, Bridge, LiveError, validate_threshold
+from xswap_live import BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError, validate_threshold
 
 
 # `upgrade` is Codex's own name for the standalone updater and was in neither set, so
@@ -320,9 +320,16 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 await cli.wait()
             listener.close()
             await listener.wait_closed()
+            log_path = status_path.parent / BRIDGE_LOG_NAME
             if bridge_failed:
                 reason = getattr(active_bridge, 'failure', None) or 'unknown'
-                print(f'xswap auto: CLI bridge disconnected ({reason}); inspect xswap auto-status.', file=sys.stderr)
+                print(f'xswap auto: CLI bridge disconnected ({reason}); see {log_path} or xswap auto-status.', file=sys.stderr)
+            elif getattr(active_bridge, 'last_failure', None):
+                # A session that recovered on its own still ended with something wrong in it;
+                # on 2026-09-10 nothing pointed the operator at the record afterwards.
+                failure = active_bridge.last_failure
+                print(f'xswap auto: last failure in this session: {failure["event"]} ({failure["reason"]}); '
+                      f'see {log_path}.', file=sys.stderr)
             command = reconnect_command(pool, env, active_bridge)
             if command:
                 print('xswap: the temporary connection above is closed. '
@@ -970,7 +977,8 @@ PRUNED_RECORD_KEYS = ('account', 'event', 'bridgeVersion', 'reason')
 # name is what keeps `auto-status` free of tokens.
 SESSION_KEYS = ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt',
     'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance',
-    'manualRequest', 'manualState', 'reason', 'quotaKnown')
+    'manualRequest', 'manualState', 'reason', 'quotaKnown',
+    'manualReason', 'candidate', 'lastFailure')
 
 
 def run_dir_empty(run_dir):
@@ -1089,7 +1097,9 @@ def scan_runs(manager, prune=False, cleanup=True):
                 os.close(fd)
         if state is None:
             continue
+        log_path = path.parent / BRIDGE_LOG_NAME
         sessions.append({'surface': 'desktop' if run_dir is None else 'cli', 'running': running,
+                         'log': str(log_path) if log_path.is_file() and not log_path.is_symlink() else None,
                          **{key: state.get(key) for key in SESSION_KEYS}})
     return sessions, pruned
 

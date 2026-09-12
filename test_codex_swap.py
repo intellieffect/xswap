@@ -423,6 +423,13 @@ class AccountTests(unittest.TestCase):
                          'Running bridged sessions: applied 2, pending 1. Pending requests apply when the current turn finishes.')
         self.assertIn('Check xswap auto-status', describe_switch_report({'applied': 0, 'failed': 1, 'unconfirmed': 0}, 'work'))
         self.assertIn('chmod 700 /x/auto', describe_switch_report({'applied': 0, 'unsafe': '/x/auto'}, 'work'))
+        failed = {'applied': 0, 'failed': 2, 'unconfirmed': 0, 'reasons': ['usage service unavailable', 'usage service unavailable']}
+        self.assertEqual(describe_switch_report(failed, 'work'),
+                         'Running bridged sessions: failed 2. Failed: usage service unavailable. '
+                         'Check xswap auto-status for the sessions that did not confirm.')
+        from codex_swap import describe_login_report
+        self.assertIn(' Failed: usage service unavailable.', describe_login_report({'failed': 1, 'reasons': ['usage service unavailable']}, 'work'))
+        self.assertNotIn('reasons', describe_login_report({'failed': 1, 'reasons': ['usage service unavailable']}, 'work'))
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
         with patch.dict(os.environ, env), \

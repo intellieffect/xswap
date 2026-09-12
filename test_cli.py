@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import fcntl
 import io
@@ -7,7 +8,9 @@ import time
 from unittest import TestCase
 from unittest.mock import patch
 import test_codex_swap
-from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper, codex_main, passthrough_subcommand
+import test_live
+from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper, codex_main, passthrough_subcommand, serve_cli
+from xswap_live import LiveError
 
 class CliTests(TestCase):
  setUp=test_codex_swap.AccountTests.setUp
@@ -386,6 +389,22 @@ class CliTests(TestCase):
   self.assertEqual(session['reason'],'usage request timed out')
   self.assertIs(session['quotaKnown'],False)
   self.assertNotIn('accessToken',session)
+ def test_status_exposes_manual_reason_last_failure_and_log_path(self):
+  # 2026-09-10: three records ended manualState "failed" with reason null and nothing pointed at a log.
+  run_dir,_=self.make_run('failed-switch')
+  failure={'event':'manual-switch-failed','account':'main','candidate':'second','reason':'usage service unavailable','at':time.time()}
+  (run_dir/'status.json').write_text(json.dumps({'updatedAt':time.time(),'event':'stopped','account':'main','manualState':'failed','manualReason':'usage service unavailable','lastFailure':failure}))
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  session=[s for s in json.loads(out.getvalue())['sessions'] if s['manualState']=='failed'][0]
+  self.assertEqual(session['manualReason'],'usage service unavailable')
+  self.assertEqual(session['lastFailure'],failure)
+  self.assertIsNone(session['log'])
+  (run_dir/'bridge.log').write_text('fixture\n')
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  session=[s for s in json.loads(out.getvalue())['sessions'] if s['manualState']=='failed'][0]
+  self.assertEqual(session['log'],str(run_dir/'bridge.log'))
  def test_prune_never_removes_running_dir(self):
   run_dir,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
   try:
@@ -707,6 +726,63 @@ class PassthroughDocsTests(TestCase):
    self.assertEqual(len(blocks),1,name)  # the anchor moved or was duplicated; re-find the paragraph
    for phrase in required:
     self.assertIn(phrase,blocks[0],name)
+
+class DisconnectNoticeTests(TestCase):
+ """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
+ setUp=test_codex_swap.AccountTests.setUp
+ def serve(self,run):
+  # Drives serve_cli's real handler and exit path with a fake listener, CLI process, and bridge class.
+  run_dir=self.manager.root/'auto'/'cli-runs'/'notice';run_dir.mkdir(parents=True)
+  socket_path=self.base/'rpc.sock';socket_path.touch()
+  finished=None
+  class FakeSocket:
+   def __aiter__(self):return self
+   async def __anext__(self):raise StopAsyncIteration
+   async def send(self,text):pass
+  class FakeServe:
+   def __init__(self,handle,*args,**kwargs):self.handle=handle
+   async def __aenter__(self):
+    self.task=asyncio.create_task(self.handle(FakeSocket()));return self
+   async def __aexit__(self,*exc):await self.task
+   def close(self):pass
+   async def wait_closed(self):pass
+  class FakeBridge:
+   def __init__(self,pool,argv,env,socket=None,status_path=None):
+    self.current='first';self.failure=None;self.last_failure=None;self.resume_thread=None
+   async def run(self):
+    try:
+     await run(self)
+    finally:
+     finished.set()
+  class FakeProcess:
+   pid=4242;returncode=0
+   async def wait(self):
+    await finished.wait();return 0
+  async def spawn(*args,**kwargs):return FakeProcess()
+  async def main():
+   nonlocal finished
+   finished=asyncio.Event()
+   return await serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge)
+  with patch('websockets.asyncio.server.unix_serve',FakeServe),patch('xswap_cli.asyncio.create_subprocess_exec',spawn),contextlib.redirect_stderr(io.StringIO()) as err:
+   code=asyncio.run(main())
+  return code,err.getvalue(),run_dir
+ def test_bridge_failure_names_the_log(self):
+  async def run(bridge):
+   bridge.failure='app-server exited';raise LiveError('app-server exited')
+  code,err,run_dir=self.serve(run)
+  self.assertEqual(code,0)
+  self.assertIn(f'xswap auto: CLI bridge disconnected (app-server exited); see {run_dir/"bridge.log"} or xswap auto-status.',err)
+ def test_failure_in_a_healthy_session_is_named_at_exit(self):
+  async def run(bridge):
+   bridge.last_failure={'event':'manual-switch-failed','account':'first','candidate':'second','reason':'usage service unavailable','at':0}
+  code,err,run_dir=self.serve(run)
+  self.assertEqual(code,0)
+  self.assertIn(f'xswap auto: last failure in this session: manual-switch-failed (usage service unavailable); see {run_dir/"bridge.log"}.',err)
+  self.assertNotIn('disconnected',err)
+ def test_clean_session_prints_nothing(self):
+  async def run(bridge):pass
+  code,err,_=self.serve(run)
+  self.assertEqual((code,err),(0,''))
 
 class ResumeHomeTests(TestCase):
  session_id='00000000-0000-4000-8000-000000000001'

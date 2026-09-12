@@ -1,12 +1,18 @@
 import asyncio
 import copy
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
 import time
 import unittest
 
 import sys
 from unittest.mock import patch
 
-from xswap_live import AccountPool, Bridge, LiveError, failure_reason, quota_available, usage_failure
+from xswap_live import (BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError, append_log_line, failure_reason,
+                        quota_available, usage_failure)
 from xswap_usage import UsageError
 
 
@@ -274,21 +280,238 @@ class FailureReasonTests(unittest.TestCase):
         self.assertEqual(failure_reason(secret), 'RuntimeError')
         self.assertNotIn('secret', failure_reason(secret))
 
+    def test_store_and_os_errors_are_classified_without_paths(self):
+        from codex_swap import SwapError
+        missing = FileNotFoundError(2, 'No such file or directory', '/Users/x/private/codex')
+        cases = [
+            (SwapError('Cannot read valid config.toml at /Users/x/private'), 'account config.toml is unreadable'),
+            (SwapError("/Users/x/private: credential storage is 'keyring'; this version supports file storage only. No credentials changed."),
+             'account uses non-file credential storage'),
+            (SwapError('No matching account. Run: xswap register main, or xswap add NAME'), 'account is not registered'),
+            (SwapError('Unsafe storage directory: /Users/x/private'), 'account store is unusable (xswap doctor)'),
+            (missing, 'local I/O error: No such file or directory'),
+            (TimeoutError(), 'app-server request timed out'),  # an OSError subclass; must keep its own text
+        ]
+        for exc, expected in cases:
+            self.assertEqual(failure_reason(exc), expected)
+            self.assertNotIn('/Users', failure_reason(exc))
+
+
+def recording_setup(case):
+    """After test_setup: a real run dir, so status.json and bridge.log are written; stderr stays quiet."""
+    case.temporary = tempfile.TemporaryDirectory()
+    case.addCleanup(case.temporary.cleanup)
+    case.run_dir = Path(case.temporary.name)
+    case.bridge.status_path = case.run_dir / 'status.json'
+    del case.bridge.status  # drop BridgeTests' no-op override: the real method writes the records
+    case.bridge.status_log = lambda event: None
+
+
+class BridgeLogTests(unittest.IsolatedAsyncioTestCase):
+    """Every swallowed failure leaves a classified reason in status.json and a line in bridge.log.
+
+    2026-09-10: three manual switches ended as manualState "failed" with reason null and no
+    log; the cause could not be reconstructed.
+    """
+    asyncTearDown = BridgeTests.asyncTearDown
+
+    async def asyncSetUp(self):
+        await test_setup(self)
+        recording_setup(self)
+
+    def state(self):
+        return json.loads((self.run_dir / 'status.json').read_text())
+
+    def log_lines(self):
+        return (self.run_dir / BRIDGE_LOG_NAME).read_text().splitlines()
+
+    def request(self, name='second', request_id='req-1'):
+        from codex_swap import atomic_json
+        atomic_json(self.run_dir / 'switch.json', {'account': name, 'id': request_id, 'instance': self.bridge.instance})
+
+    async def test_failed_manual_switch_records_reason_and_log_line(self):
+        def prepare(name, require_quota=True):
+            raise UsageError('usage service unavailable')
+        self.pool.prepare = prepare
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['event'], state['manualState'], state['account']), ('manual-switch-failed', 'failed', 'first'))
+        self.assertEqual(state['manualReason'], 'usage service unavailable')
+        self.assertEqual(state['reason'], 'usage service unavailable')
+        self.assertEqual(state['candidate'], 'second')
+        self.assertEqual({k: state['lastFailure'][k] for k in ('event', 'account', 'candidate', 'reason')},
+                         {'event': 'manual-switch-failed', 'account': 'first', 'candidate': 'second', 'reason': 'usage service unavailable'})
+        log = self.run_dir / BRIDGE_LOG_NAME
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        lines = self.log_lines()
+        self.assertEqual([line.split(' ')[1] for line in lines], ['manual-switch-applying', 'manual-switch-failed'])
+        self.assertRegex(lines[-1], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} manual-switch-failed ')
+        self.assertTrue(lines[-1].endswith(' account="first" candidate="second" reason="usage service unavailable" exc="UsageError"'), lines[-1])
+
+    async def test_manual_reason_persists_after_later_events_and_clears_on_success(self):
+        # 2026-09-10: `stopped` overwrote `manual-switch-failed`, and the record ended with reason: null.
+        outcomes = iter([RuntimeError('token=sk-secret payload'), None])
+        prepare = self.pool.prepare
+
+        def flaky(name, require_quota=True):
+            error = next(outcomes)
+            if error:
+                raise error
+            return prepare(name, require_quota)
+        self.pool.prepare = flaky
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        self.bridge.status('policy-applied')
+        state = self.state()
+        self.assertEqual((state['event'], state['manualState'], state['manualReason']), ('policy-applied', 'failed', 'RuntimeError'))
+        self.assertNotIn('reason', state)  # `reason` belongs to the current event; manualReason persists
+        self.assertEqual(state['lastFailure']['reason'], 'RuntimeError')
+        self.request(request_id='req-2')
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['manualState'], state['manualReason'], state['account']), ('applied', None, 'second'))
+        self.assertEqual(state['lastFailure']['event'], 'manual-switch-failed')  # history stays until the bridge exits
+        text = (self.run_dir / BRIDGE_LOG_NAME).read_text() + (self.run_dir / 'status.json').read_text()
+        self.assertNotIn('sk-secret', text)
+        self.assertNotIn('fake-', text)
+
+    async def test_pending_manual_switch_says_what_it_waits_for(self):
+        self.bridge.active.update(('t1', 't2'))
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['manualState'], state['manualReason']), ('pending', 'waiting for 2 active turn(s) to finish'))
+        self.assertIsNone(state['lastFailure'])
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' manual-switch-pending account="first" candidate="second" reason="waiting for 2 active turn(s) to finish"'))
+        self.bridge.active.clear()
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        self.assertEqual((self.state()['manualState'], self.state()['manualReason']), ('applied', None))
+
+    async def test_no_available_account_summarizes_every_candidate(self):
+        self.pool.names = ['first', 'second', 'third', 'fourth', 'fifth']
+        self.pool.quota.update(third=limits(0), fifth={})
+        prepare = self.pool.prepare
+
+        def flaky(name, require_quota=True):
+            if name == 'second':
+                raise LiveError('ChatGPT access token needs refresh or sign-in')
+            if name == 'fourth':
+                return prepare('first')[0], limits()  # an alias of the exhausted current identity
+            return prepare(name, require_quota)
+        self.pool.prepare = flaky
+        self.bridge.last_quota = limits(0)
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')  # the turn still goes out on the current account
+        state = self.state()
+        self.assertEqual(state['event'], 'no-available-account')
+        self.assertEqual(state['reason'], 'second: ChatGPT access token needs refresh or sign-in; '
+                         'third: no quota above the weekly reserve; fourth: same identity as an excluded account; '
+                         'fifth: quota unknown')
+        self.assertEqual(state['lastFailure']['event'], 'no-available-account')
+        lines = self.log_lines()
+        self.assertEqual([line.split(' ')[1] for line in lines],
+                         ['policy-applied', 'candidate-unavailable', 'candidate-skipped', 'candidate-skipped',
+                          'candidate-skipped', 'no-available-account'])
+        self.assertTrue(lines[1].endswith(
+            ' account="first" candidate="second" reason="ChatGPT access token needs refresh or sign-in" exc="LiveError"'), lines[1])
+
+    async def test_failed_continuation_records_reason(self):
+        async def rpc(method, params, timeout=20):
+            self.calls.append((method, copy.deepcopy(params)))
+            if method == 'turn/start':
+                raise LiveError('Codex rejected turn/start')
+            return {}
+        self.bridge.rpc = rpc
+        self.bridge.starts['thread-1'] = {'threadId': 'thread-1', 'input': []}
+        await BridgeTests.failed(self, 'thread-1')
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertFalse(self.bridge.active)
+        state = self.state()
+        self.assertEqual((state['event'], state['reason']), ('continuation-failed', 'Codex rejected turn/start'))
+        self.assertEqual({k: state['lastFailure'][k] for k in ('event', 'account', 'reason')},
+                         {'event': 'continuation-failed', 'account': 'second', 'reason': 'Codex rejected turn/start'})
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' continuation-failed account="second" reason="Codex rejected turn/start" exc="LiveError"'))
+
+    async def test_failed_quota_check_is_logged_and_does_not_block_the_turn(self):
+        self.bridge.checked_at = 0
+
+        def prepare(name, require_quota=True):
+            raise UsageError('usage request timed out')
+        self.pool.prepare = prepare
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')
+        self.assertEqual((self.state()['event'], self.state()['reason']), ('quota-check-failed', 'usage request timed out'))
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' quota-check-failed account="first" reason="usage request timed out" exc="UsageError"'))
+
+    async def test_failed_refresh_records_reason(self):
+        await self.bridge.refresh({'id': 6, 'params': {'previousAccountId': 'different'}})
+        self.assertEqual((self.state()['event'], self.state()['reason']), ('refresh-failed', 'refresh must keep the current account'))
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' refresh-failed account="first" reason="refresh must keep the current account" exc="LiveError"'))
+
+
+class BridgeLogFileTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / BRIDGE_LOG_NAME
+
+    def test_log_is_private_regardless_of_umask_and_appends(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        self.assertTrue(append_log_line(self.path, 'one'))
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.path.chmod(0o644)  # a widened file is narrowed again on the next write
+        self.assertTrue(append_log_line(self.path, 'two'))
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(self.path.read_text(), 'one\ntwo\n')
+
+    def test_symlink_or_directory_is_never_written_through(self):
+        target = Path(self.temporary.name) / 'elsewhere'
+        target.write_text('keep')
+        self.path.symlink_to(target)
+        self.assertFalse(append_log_line(self.path, 'line'))
+        self.assertEqual(target.read_text(), 'keep')
+        self.path.unlink()
+        self.path.mkdir()
+        self.assertFalse(append_log_line(self.path, 'line'))
+
+    def test_cap_keeps_only_the_newest_lines(self):
+        # 8-byte lines, a 64-byte cap: the 9th write compacts to the newest 3 lines first.
+        with patch('xswap_live.BRIDGE_LOG_MAX_BYTES', 64), patch('xswap_live.BRIDGE_LOG_KEEP_LINES', 3):
+            for index in range(12):
+                self.assertTrue(append_log_line(self.path, f'line-{index:02d}'))
+        self.assertEqual(self.path.read_text().splitlines(), [f'line-{index:02d}' for index in range(5, 12)])
+        self.assertLessEqual(self.path.stat().st_size, 64)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in Path(self.temporary.name).iterdir()], [BRIDGE_LOG_NAME])  # no temp file left
+
 
 class RunFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_stopped_status_and_bridge_carry_the_reason(self):
-        events = []
-        bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {})
-        bridge.status = lambda event, **extra: events.append((event, extra))
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=run_dir / 'status.json')
+            bridge.status_log = lambda event: None
 
-        async def idle():
-            await asyncio.Event().wait()
-        bridge.client_reader = idle
-        bridge.manual_switch_reader = idle
-        with self.assertRaises(LiveError):
-            await bridge.run()
-        self.assertEqual(events[-1], ('stopped', {'reason': 'app-server exited'}))
+            async def idle():
+                await asyncio.Event().wait()
+            bridge.client_reader = idle
+            bridge.manual_switch_reader = idle
+            with self.assertRaises(LiveError):
+                await bridge.run()
+            state = json.loads((run_dir / 'status.json').read_text())
+            log = (run_dir / BRIDGE_LOG_NAME).read_text().splitlines()
+        self.assertEqual((state['event'], state['reason']), ('stopped', 'app-server exited'))
+        # A bridge that dies after a failure must not overwrite that failure with its own exit.
+        self.assertIsNone(state['lastFailure'])
         self.assertEqual(bridge.failure, 'app-server exited')
+        self.assertTrue(log[-1].endswith(' stopped account="first" reason="app-server exited" exc="LiveError"'), log[-1])
 
 
 class StatusRecordTests(unittest.TestCase):
