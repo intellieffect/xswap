@@ -566,39 +566,181 @@ def describe_drift(drift, reconnect):
     return DRIFT_CAUSES[reason].format(**values), DRIFT_FIXES[reason].format(**values)
 
 
-def reconnect_wrapper(manager):
-    """Reconnect the wrapped codex entry after a Codex update replaced it.
+def codex_path_entries(settings, env=None):
+    """Every `codex` a PATH lookup can run, in lookup order, classified against the recorded wrapper.
 
-    Runs on every xswap launch, usage read, and selection, and when a bridged
-    session ends (the update usually happens inside one). Records the updated
-    release as the real Codex and points the entry back at xswap-codex. Returns
-    the new real path, or None when nothing was changed. Only acts while
-    automatic switching is enabled; `xswap auto-disable` restores the entry.
-    Every skip stays silent here (this runs inside list/usage and so on every
-    alert-job tick); wrapper_drift names the reason for doctor and use/switch.
+    Mirrors shutil.which's per-directory test (an existing file with the execute
+    bit; a dangling link or a directory is skipped), so entries[0] is what plain
+    `codex` runs. A directory listed twice on PATH yields one entry. `kind` is
+    'wrapper' when the entry's link target is the recorded proxy or the entry
+    resolves to the same file as the proxy, 'foreign' otherwise; `target` is the
+    raw link target of a symlink and None for a regular file. `env` supplies PATH
+    instead of os.environ, which keeps doctor pure and lets a test pin a PATH
+    without patching the process environment.
+    """
+    wrapper = settings.get('wrapper') or {}
+    proxy = wrapper.get('proxy')
+    try:
+        proxy_real = os.path.realpath(proxy) if proxy else None
+    except OSError:
+        proxy_real = None
+    entries, seen = [], set()
+    for directory in os.get_exec_path(env):
+        if not directory:
+            continue
+        candidate = Path(directory) / 'codex'
+        # Per PATH directory, not per realpath: on this machine several entries
+        # resolve to the same xswap-codex script, and collapsing them would hide
+        # both the count doctor reports and the recorded entry's place in the order.
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            target = os.readlink(candidate) if candidate.is_symlink() else None
+            real = os.path.realpath(candidate)
+        except OSError:
+            continue
+        kind = 'wrapper' if proxy and (target == proxy or real == proxy_real) else 'foreign'
+        entries.append({'path': str(candidate), 'target': target, 'kind': kind})
+    return entries
+
+
+def wrapper_state(settings, env=None):
+    """What plain `codex` runs relative to the recorded wrapper: (state, first, entries).
+
+    2026-09-10: Codex's standalone installer wrote ~/.local/bin/codex ahead of the
+    wrapped /opt/homebrew/bin/codex, so plain `codex` ran its own release against
+    ~/.codex while every check that read only auto.json reported a connected
+    wrapper. `state` is 'unconfigured' (no wrapper record, or automatic switching
+    disabled: the record is dormant and the entry was restored), 'absent' (no
+    codex on this PATH), 'connected' (the first entry is xswap-codex), 'drifted'
+    (the recorded entry itself no longer points at xswap-codex) or 'shadowed'
+    (another entry precedes it). `first` is entries[0] or None.
+    """
+    wrapper = settings.get('wrapper') or {}
+    entries = codex_path_entries(settings, env)
+    first = entries[0] if entries else None
+    if not wrapper.get('path') or not wrapper.get('proxy') or not settings.get('enabled'):
+        state = 'unconfigured'
+    elif first is None:
+        state = 'absent'
+    elif first['kind'] == 'wrapper':
+        state = 'connected'
+    elif first['path'] == wrapper['path']:
+        state = 'drifted'
+    else:
+        state = 'shadowed'
+    return state, first, entries
+
+
+def shadowing_entry(settings, env=None):
+    """(path, target) of a wrappable `codex` entry ahead of the recorded one on PATH, or None.
+
+    Acts only when the recorded entry is itself on this PATH: then the new entry
+    is what a Codex install put in front of the wrapped one. A PATH without the
+    recorded entry (a launchd job, a test fixture) says nothing about the user's
+    shell, so nothing is re-pointed from it. wrapper_state already applied the
+    `enabled` gate, so entry_drift keeps its default.
+    """
+    wrapper = settings.get('wrapper') or {}
+    state, first, entries = wrapper_state(settings, env)
+    if state != 'shadowed' or not any(entry['path'] == wrapper['path'] for entry in entries):
+        return None
+    drift = entry_drift(first['path'], wrapper['proxy'])
+    return (first['path'], drift['target']) if drift['action'] == 'reconnect' else None
+
+
+def wrapper_records(settings):
+    """Every wrapped codex entry with rollback data: the primary `wrapper`, then `wrappers` (0.8.0)."""
+    records = []
+    for record in [settings.get('wrapper'), *(settings.get('wrappers') or [])]:
+        if isinstance(record, dict) and record.get('path') and record.get('proxy') and record.get('originalTarget'):
+            records.append(record)
+    return records
+
+
+def set_primary_wrapper(settings, record):
+    """Make `record` the primary `wrapper` (the entry plain `codex` runs through).
+
+    A previous primary at another path moves to `wrappers` so auto-disable
+    restores it too; an older record for the same path is replaced. One record per
+    path. Every wrapper record xswap creates passes through here, so there is one
+    place to look for what gets stored.
+    """
+    kept = {}
+    for entry in [settings.get('wrapper'), *(settings.get('wrappers') or [])]:
+        if isinstance(entry, dict) and entry.get('path') and entry['path'] != record['path'] and entry['path'] not in kept:
+            kept[entry['path']] = entry
+    settings['wrapper'] = record
+    if kept:
+        settings['wrappers'] = list(kept.values())
+    else:
+        settings.pop('wrappers', None)
+
+
+def _relink(manager, settings, path, proxy, problem):
+    """Persist the rollback record, then atomically point `path` at xswap-codex.
+
+    False after one stderr line when the link cannot be replaced; the record
+    already names the release, so the next call retries.
     """
     from codex_swap import atomic_json
+    try:
+        atomic_json(manager.root / 'auto.json', settings)
+        swap_symlink(path, proxy)
+    except OSError as error:
+        print(f'xswap: {problem} but it could not be reconnected ({error.strerror or error}); '
+              f'run: xswap auto-enable --accounts {",".join(settings.get("accounts", []))} --wrap-codex',
+              file=sys.stderr)
+        return False
+    return True
+
+
+def reconnect_wrapper(manager):
+    """Keep plain `codex` connected while automatic switching is enabled.
+
+    Runs on every xswap launch, usage read, and selection, and when a bridged
+    session ends (a Codex update usually happens inside one). Two repairs, in
+    order: the recorded entry re-pointed by an update is pointed back at
+    xswap-codex with the new release recorded as the real Codex (0.7.8); a new
+    user-owned `codex` symlink that a Codex install put ahead of the recorded
+    entry on PATH is wrapped as well and becomes the primary record, the previous
+    one kept in `wrappers` for auto-disable (0.8.0, after the 2026-09-10 bypass).
+    Returns the real Codex path after a change, or None when nothing was changed.
+    Every skip stays silent here (this runs inside list/usage and so on every
+    alert-job tick); wrapper_drift names the reason for doctor and use/switch.
+    `xswap auto-disable` restores every record.
+    """
     with manager.locked():
         settings = read_settings(manager)
+        result = None
         drift = wrapper_drift(settings)
-        if drift['action'] != 'reconnect':
-            return None
-        wrapper = settings['wrapper']
-        path = Path(drift['path'])
-        real = drift['real']
-        wrapper.update(originalTarget=drift['target'], realCodex=real)
-        try:
-            # Persist the new rollback target before the atomic symlink swap.
-            atomic_json(manager.root / 'auto.json', settings)
-            swap_symlink(path, wrapper['proxy'])
-        except OSError as error:
-            print(f'xswap: a Codex update replaced {path} but it could not be reconnected ({error.strerror or error}); '
-                  f'run: xswap auto-enable --accounts {",".join(settings.get("accounts", []))} --wrap-codex',
-                  file=sys.stderr)
-            return None
-    print(f'xswap: a Codex update had replaced {path}; reconnected it to xswap-codex. '
-          f'Codex is now {real}.', file=sys.stderr)
-    return real
+        if drift['action'] == 'reconnect':
+            wrapper = settings['wrapper']
+            path = Path(drift['path'])
+            real = drift['real']
+            wrapper.update(originalTarget=drift['target'], realCodex=real)
+            if not _relink(manager, settings, path, wrapper['proxy'], f'a Codex update replaced {path}'):
+                return None
+            print(f'xswap: a Codex update had replaced {path}; reconnected it to xswap-codex. '
+                  f'Codex is now {real}.', file=sys.stderr)
+            result = real
+        shadow = shadowing_entry(settings)
+        if shadow is not None:
+            shadow_path, shadow_target = shadow
+            previous = settings['wrapper']
+            real = link_target_path(Path(shadow_path), shadow_target)
+            set_primary_wrapper(settings, {'path': shadow_path, 'originalTarget': shadow_target,
+                                           'realCodex': real, 'proxy': previous['proxy']})
+            if not _relink(manager, settings, Path(shadow_path), previous['proxy'],
+                           f'{shadow_path} appeared ahead of {previous["path"]} on PATH'):
+                return result
+            print(f'xswap: {shadow_path} had appeared ahead of {previous["path"]} on PATH and bypassed xswap; '
+                  f'connected it to xswap-codex. Codex is now {real}.', file=sys.stderr)
+            result = real
+    return result
 
 
 def enable(manager, accounts, wrap=False):
@@ -618,9 +760,9 @@ def enable(manager, accounts, wrap=False):
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
                     raise LiveError('codex wrapper installation requires a user-owned codex symlink; use xswap instead')
                 original = os.readlink(target)
-                settings['wrapper'] = {'path': str(target), 'originalTarget': original,
-                                       'realCodex': link_target_path(target, original),
-                                       'proxy': str(Path(proxy).absolute())}
+                set_primary_wrapper(settings, {'path': str(target), 'originalTarget': original,
+                                               'realCodex': link_target_path(target, original),
+                                               'proxy': str(Path(proxy).absolute())})
                 # Persist rollback information before the atomic symlink swap.
                 atomic_json(manager.root / 'auto.json', settings)
                 swap_symlink(target, Path(proxy).absolute())
@@ -647,13 +789,16 @@ def disable(manager):
     from codex_swap import atomic_json
     with manager.locked():
         settings = read_settings(manager)
-        wrapper = settings.get('wrapper')
-        if wrapper:
-            path = Path(wrapper['path'])
-            if path.is_symlink() and os.readlink(path) == wrapper['proxy']:
-                swap_symlink(path, wrapper['originalTarget'])
+        for record in wrapper_records(settings):
+            path = Path(record['path'])
+            if path.is_symlink() and os.readlink(path) == record['proxy']:
+                swap_symlink(path, record['originalTarget'])
             else:
-                print('codex entry changed outside xswap; left it untouched.', file=sys.stderr)
+                # Several entries can be wrapped now, so name the one left behind.
+                print(f'codex entry {path} changed outside xswap; left it untouched.', file=sys.stderr)
+        # Secondary records are restored (or were changed outside xswap) and have nothing
+        # left to recover; only the primary keeps its recovery data, as before.
+        settings.pop('wrappers', None)
         settings['enabled'] = False
         atomic_json(manager.root / 'auto.json', settings)
     print('Auto switching disabled for new sessions. Running auto sessions remain active.')
@@ -820,7 +965,8 @@ def status_data(manager, prune=False, cleanup=True):
     sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
     drift = wrapper_drift(settings)
     return {'enabled': settings.get('enabled', False),
-                      'accounts': settings.get('accounts', []), 'codexWrapped': drift['reason'] == 'ok',
+                      'accounts': settings.get('accounts', []),
+                      'codexWrapped': wrapper_state(settings)[0] == 'connected',
                       'wrapperReason': drift['reason'],
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
                       'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': sessions[-20:]}

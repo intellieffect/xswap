@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import describe_drift, read_settings, wrapper_drift
+from xswap_cli import describe_drift, entry_drift, read_settings, shadowing_entry, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
@@ -74,29 +74,76 @@ def check_codex_binary():
     return check("codex binary", OK, f"{executable} ({output})" if output else executable)
 
 
-def check_wrapper(settings, accounts=()):
-    wrapper = settings.get("wrapper")
+def _shown(entry):
+    return f"{entry['path']} -> {entry['target']}" if entry.get("target") else entry["path"]
+
+
+def check_wrapper(settings, accounts=(), env=None):
+    """What a PATH lookup of `codex` runs, not only the entry recorded in auto.json.
+
+    2026-09-10: a standalone install at ~/.local/bin/codex preceded the wrapped
+    /opt/homebrew/bin/codex on PATH, plain codex bypassed xswap, and this row said OK.
+    An entry that bypasses the selection right now is FAIL, which 0.7.8 reported as
+    WARN -- the exit code is the only signal a cron or CI check reads. Read-only:
+    the xswap_cli helpers only stat and readlink. `env` pins PATH for tests.
+    """
+    wrapper = settings.get("wrapper") or {}
     names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
     reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
-    if not wrapper:
-        if len(names) >= 2:
-            return check("wrapper", WARN, "codex command not connected; plain codex ignores the xswap "
-                         f"selection. Connect it: {reconnect}")
-        return check("wrapper", OK, "codex command not connected")
+    state, first, entries = wrapper_state(settings, env)
     drift = wrapper_drift(settings)
-    if drift["reason"] == "ok":
-        return check("wrapper", OK, f"{drift['path']} -> xswap-codex")
-    if drift["action"] == "reconnect":
-        return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
-                     f"plain codex is disconnected until the next xswap launch, list, or use reconnects it. "
-                     f"Reconnect it now: {reconnect}")
-    # xswap deliberately left the entry alone: say which condition and the manual fix, since no
-    # later launch, list, or use will close this gap -- promising one (as 0.7.8 did for every
-    # non-ok entry) is what kept the 2026-09-10 bypass looking temporary. After `auto-disable`
-    # this is the normal state and reads like "not connected" (WARN only once switching matters).
-    cause, fix = describe_drift(drift, reconnect)
-    status = OK if drift["reason"] == "auto-disabled" and len(names) < 2 else WARN
-    return check("wrapper", status, f"codex command not connected ({drift['reason']}): {cause}. Fix: {fix}")
+    if state == "unconfigured":
+        status = WARN if len(names) >= 2 else OK
+        # xswap deliberately left the entry alone: say which condition and the manual fix, since no
+        # later launch, list, or use will close this gap -- promising one (as 0.7.8 did for every
+        # non-ok entry) is what kept the 2026-09-10 bypass looking temporary. After `auto-disable`
+        # this is the normal state and reads like "not connected".
+        cause, fix = describe_drift(drift, reconnect)
+        if cause:
+            return check("wrapper", status, f"codex command not connected ({drift['reason']}): {cause}. Fix: {fix}")
+        detail = "codex command not connected"
+        if status == WARN:
+            detail += f"; plain codex ignores the xswap selection. Connect it: {reconnect}"
+        return check("wrapper", status, detail)
+    path = Path(wrapper["path"])
+    if state == "absent":
+        if drift["reason"] == "ok":
+            return check("wrapper", WARN, f"{path} -> xswap-codex, but {path.parent} is not on this shell's PATH; "
+                         "plain codex is not found here")
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"no codex on PATH and the wrapped entry {path} no longer runs "
+                     f"({drift['reason']}): {cause}. Fix: {fix}")
+    shown = _shown(first)
+    if state == "connected":
+        shadowed = [entry for entry in entries[1:] if entry["kind"] == "foreign"]
+        if shadowed:
+            return check("wrapper", WARN, f"{first['path']} -> xswap-codex; shadowed on PATH, bypassing xswap "
+                         f"only when run by full path: {'; '.join(_shown(entry) for entry in shadowed)}")
+        if len(entries) > 1:
+            return check("wrapper", OK, f"{first['path']} -> xswap-codex; {len(entries)} codex entries on PATH, all wrapped")
+        return check("wrapper", OK, f"{first['path']} -> xswap-codex")
+    if state == "drifted":
+        if drift["action"] == "reconnect":
+            return check("wrapper", FAIL, f"codex entry changed outside xswap (a Codex update replaces the link): {shown}; "
+                         "plain codex bypasses the xswap selection until the next xswap launch, list, or use "
+                         f"reconnects it. Reconnect it now: {reconnect}")
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"codex entry changed outside xswap ({drift['reason']}): {cause}. Fix: {fix}")
+    if shadowing_entry(settings, env) is not None:
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; it shadows the wrapped entry {path} "
+                     f"on PATH until the next xswap launch, list, or use wraps it. Wrap it now: {reconnect}")
+    shadow = entry_drift(first["path"], wrapper["proxy"])
+    if shadow["action"] == "reconnect":
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} is not "
+                     f"on this shell's PATH. Wrap it: {reconnect}")
+    cause, fix = describe_drift(shadow, reconnect)
+    if not cause:
+        # `ok` and `not-wrapped` have no cause sentence; reachable here only when the
+        # proxy's realpath could not be read, so the entry was classified foreign.
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} "
+                     f"is not on this shell's PATH. Wrap it: {reconnect}")
+    return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex, and xswap cannot wrap it "
+                 f"({shadow['reason']}): {cause}. The wrapped entry {path} is shadowed. Fix: {fix}")
 
 
 def check_credential_store(manager):

@@ -180,20 +180,22 @@ def identity(home):
 def plain_codex_notice(manager, selected_home):
     """Explain when the ordinary `codex` command still bypasses the xswap selection.
 
-    Returns None when the codex wrapper is connected or when plain codex already
-    uses the selected home. When a wrapper is recorded but reconnect_wrapper left
-    the entry alone, the note names that reason and its manual fix once (the
-    reconnect itself stays silent on skips). Only local labels and paths; never tokens.
+    Checks what a PATH lookup of `codex` runs, not only the entry recorded in
+    auto.json (2026-09-10: a standalone install ahead of the wrapped entry bypassed
+    xswap while the record looked fine), and names the classified reason when xswap
+    deliberately left an entry alone. Returns None when the entry plain `codex`
+    runs is xswap-codex with automatic switching on, or when plain codex already
+    uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import describe_drift, read_settings, reconnect_wrapper, wrapper_drift
+    from xswap_cli import describe_drift, entry_drift, read_settings, reconnect_wrapper, wrapper_drift, wrapper_state
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
         settings = read_settings(manager)
     except LiveError:
         settings = {}
-    drift = wrapper_drift(settings)
-    if drift["reason"] == "ok":
+    state, first, _ = wrapper_state(settings)
+    if state == "connected":
         return None
     if Path(selected_home).expanduser().resolve() == manager.source:
         return None
@@ -202,15 +204,27 @@ def plain_codex_notice(manager, selected_home):
     except SwapError:
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
-    reconnect = f"xswap auto-enable --accounts {names} --wrap-codex"
-    cause, fix = describe_drift(drift, reconnect)
+    connect = f"xswap auto-enable --accounts {names} --wrap-codex"
+    if state in ("drifted", "shadowed"):
+        shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
+        drift = (wrapper_drift(settings) if state == "drifted"
+                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"]))
+        if drift["action"] == "reconnect":
+            fix_text = f"Connect it: {connect}"
+        else:
+            cause, fix = describe_drift(drift, connect)
+            fix_text = f"xswap cannot wrap {first['path']} ({drift['reason']}): {cause}. Fix: {fix}"
+        return (f"Note: plain `codex` runs {shown}, not xswap-codex, so it keeps using {manager.source} ({label}); "
+                f"this selection applies only to xswap and xswap app. {fix_text}")
+    drift = wrapper_drift(settings)
+    cause, fix = describe_drift(drift, connect)
     if cause:
         return (f"Note: the codex command is not connected to xswap ({drift['reason']}): {cause}. "
                 f"Plain `codex` keeps using {manager.source} ({label}); this selection applies only "
                 f"to xswap and xswap app. Fix: {fix}")
     return ("Note: the codex command is not connected to xswap. Plain `codex` keeps using "
             f"{manager.source} ({label}); this selection applies only to xswap and xswap app. "
-            f"Connect it: {reconnect}")
+            f"Connect it: {connect}")
 
 
 def describe_switch_report(report, name):

@@ -309,15 +309,72 @@ class AccountTests(unittest.TestCase):
 
     def test_use_stays_quiet_when_codex_wrapper_is_connected(self):
         self.manager.register("main")
-        link = self.base / "codex-link"
-        link.symlink_to("/fixture/xswap-codex")
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir()
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
+        (bin_dir / "codex").symlink_to(proxy)
         def connect():
             atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
-                        "wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex",
+                        "wrapper": {"path": str(bin_dir / "codex"), "proxy": str(proxy),
                                     "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
-        text = self._add_work_and_use("work", before=connect)
+        with patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            text = self._add_work_and_use("work", before=connect)
         self.assertIn("Selected work.", text)
         self.assertNotIn("not connected", text)
+        self.assertNotIn("not xswap-codex", text)
+
+    def _shadowed_wrapper(self, shadow_is_symlink):
+        # 2026-09-10 layout: bin-a/codex (a standalone install) ahead of the wrapped bin-b/codex on PATH.
+        bin_a, bin_b = self.base / "bin-a", self.base / "bin-b"
+        bin_a.mkdir()
+        bin_b.mkdir()
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
+        (bin_b / "codex").symlink_to(proxy)
+        standalone = self.base / "standalone-codex"
+        standalone.write_text("fixture")
+        standalone.chmod(0o700)
+        if shadow_is_symlink:
+            (bin_a / "codex").symlink_to(standalone)
+        else:
+            (bin_a / "codex").write_text("fixture")
+            (bin_a / "codex").chmod(0o700)
+        def connect():
+            atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(bin_b / "codex"), "proxy": str(proxy),
+                                    "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
+        return bin_a, bin_b, proxy, standalone, connect
+
+    def test_use_names_the_codex_entry_that_bypasses_xswap(self):
+        self.manager.register("main")
+        bin_a, bin_b, proxy, _, connect = self._shadowed_wrapper(shadow_is_symlink=False)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join([str(bin_a), str(bin_b)])}):
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertIn(f"plain `codex` runs {bin_a / 'codex'}, not xswap-codex", text)
+        self.assertIn(f"{self.source} (ChatGPT)", text)
+        self.assertIn(f"cannot wrap {bin_a / 'codex'}", text)
+        self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertNotIn("fake-token", text)
+        self.assertEqual(os.readlink(bin_b / "codex"), str(proxy))  # a regular file is never re-pointed
+
+    def test_use_wraps_a_standalone_link_that_shadows_the_wrapped_entry_and_stays_quiet(self):
+        self.manager.register("main")
+        bin_a, bin_b, proxy, standalone, connect = self._shadowed_wrapper(shadow_is_symlink=True)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join([str(bin_a), str(bin_b)])}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertNotIn("not connected", text)
+        self.assertNotIn("not xswap-codex", text)
+        self.assertEqual(os.readlink(bin_a / "codex"), str(proxy))
+        self.assertIn("connected it to xswap-codex", err.getvalue())
+        settings = json.loads((self.manager.root / "auto.json").read_text())
+        self.assertEqual(settings["wrapper"]["realCodex"], str(standalone))
+        self.assertEqual([w["path"] for w in settings["wrappers"]], [str(bin_b / "codex")])
 
     def test_use_names_why_the_codex_entry_was_left_alone(self):
         # A recorded wrapper whose link now dangles: reconnect_wrapper stays silent, so the

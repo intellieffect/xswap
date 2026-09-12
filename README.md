@@ -174,7 +174,7 @@ Default data root: `~/.local/share/codex-swap/` (override with `CODEX_SWAP_HOME`
 | `accounts.json` | Local profile names and source-home paths |
 | `profiles/<name>/codex/` | Account credentials and conversations |
 | `auto/codex/`, `auto/cli-codex/` | Separate desktop and CLI auto-mode conversations |
-| `auto.json`, `auto/**/status.json` | Pool, wrapper recovery, threshold, and operational status |
+| `auto.json`, `auto/**/status.json` | Pool, wrapper recovery (`wrapper`, plus `wrappers` for previously wrapped entries), threshold, operational status, and the login label each session's app server confirmed |
 | `backups/openclaw/` | Sensitive backups from explicitly requested OpenClaw sync |
 
 Auto mode reads tokens from their original account homes and sends them to its local child server in memory; it does not copy them into the auto conversation home. xswap's status records exclude tokens and prompts, but contain local account labels/PIDs. Codex itself persists conversation data in its normal runtime store. xswap adds no telemetry service.
@@ -242,7 +242,7 @@ Account data is intentionally retained. These commands do not revoke credentials
 
 ## Troubleshooting
 
-If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, the optional `codex` wrapper, credential storage mode, each registered account's login and token expiry, plugin links, the automatic-switching pool, and OpenClaw's plugin SDK. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
+If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, every `codex` on PATH against the optional wrapper, credential storage mode, each registered account's login, token expiry, and any rejected login recorded by a quota read, plugin links, the automatic-switching pool, where the real Codex executable lives (`real codex`, `packages link`), running bridged sessions still on an older bridge than the installed xswap, running auto sessions' server-confirmed login, and OpenClaw's plugin SDK. A `codex` entry that currently bypasses the xswap selection is reported as FAIL, so `xswap doctor` exits 1 until the next `xswap` launch, `list`, or `use` reconnects it. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
 
 ```sh
 xswap doctor

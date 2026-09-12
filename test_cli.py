@@ -20,6 +20,8 @@ class CliTests(TestCase):
   self.assertEqual(server_overrides(['-m','x','-c','a=1','--enable','foo','--config=b=2','--disable=bar','-C','/tmp','hello']),['-c','a=1','--enable','foo','--config=b=2','--disable=bar'])
  def setup_pool(self):
   self.manager.register('main');self.manager.prepare('second')
+  # Wrapper checks walk PATH; never let a fixture see (or re-point) this machine's real codex entries.
+  self.enterContext(patch.dict(os.environ,{'PATH':str(self.base)}))
  def test_wrapper_roundtrip_and_real_executable(self):
   self.setup_pool()
   real=self.base/'real-codex';real.write_text('fixture');real.chmod(0o700)
@@ -32,6 +34,7 @@ class CliTests(TestCase):
    self.assertEqual(self.manager.codex(),str(real))
    enable(self.manager,'main,second',wrap=True)
    self.assertEqual(read_settings(self.manager)['wrapper']['originalTarget'],str(real))
+   self.assertNotIn('wrappers',read_settings(self.manager))  # re-wrapping the same entry adds no second record
    disable(self.manager)
    self.assertEqual(cli.resolve(),real)
    self.assertFalse(read_settings(self.manager)['enabled'])
@@ -180,6 +183,94 @@ class CliTests(TestCase):
    cli.unlink();cli.symlink_to('external-update')
    disable(self.manager)
    self.assertEqual(os.readlink(cli),'external-update')
+ def shadow_fixture(self):
+  # bin-b/codex is the entry xswap wrapped (originally -> a brew release); a Codex standalone
+  # install then puts bin-a/codex -> standalone ahead of it on PATH (2026-09-10).
+  self.setup_pool()
+  self.bin_a=self.base/'bin-a';self.bin_b=self.base/'bin-b';self.bin_a.mkdir();self.bin_b.mkdir()
+  self.brew=self.base/'brew-codex';self.brew.write_text('fixture');self.brew.chmod(0o700)
+  self.standalone=self.base/'standalone'/'bin'/'codex';self.standalone.parent.mkdir(parents=True);self.standalone.write_text('fixture');self.standalone.chmod(0o700)
+  self.proxy=self.base/'xswap-codex';self.proxy.write_text('fixture');self.proxy.chmod(0o700)
+  (self.bin_b/'codex').symlink_to(self.brew)
+  self.first=self.bin_b/'codex'  # what shutil.which('codex') returns; moved to bin-a below
+  self.enterContext(patch('shutil.which',side_effect=lambda n:str(self.proxy if n=='xswap-codex' else self.first)))
+  self.enterContext(patch.dict(os.environ,{'PATH':os.pathsep.join([str(self.bin_a),str(self.bin_b)])}))
+  self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+  self.err=self.enterContext(contextlib.redirect_stderr(io.StringIO()))
+  enable(self.manager,'main,second',wrap=True)
+  self.assertEqual(os.readlink(self.bin_b/'codex'),str(self.proxy))
+  (self.bin_a/'codex').symlink_to(self.standalone);self.first=self.bin_a/'codex'
+ def test_standalone_install_ahead_of_wrapped_entry_is_wrapped_on_next_use(self):
+  self.shadow_fixture()
+  self.assertEqual(self.manager.codex(),str(self.standalone))  # any launch / usage read wraps it
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.proxy));self.assertEqual(os.readlink(self.bin_b/'codex'),str(self.proxy))
+  settings=read_settings(self.manager)
+  self.assertEqual(settings['wrapper'],{'path':str(self.bin_a/'codex'),'originalTarget':str(self.standalone),'realCodex':str(self.standalone),'proxy':str(self.proxy)})
+  self.assertEqual(settings['wrappers'],[{'path':str(self.bin_b/'codex'),'originalTarget':str(self.brew),'realCodex':str(self.brew),'proxy':str(self.proxy)}])
+  text=self.err.getvalue()
+  self.assertIn(f'{self.bin_a/"codex"} had appeared ahead of {self.bin_b/"codex"} on PATH',text);self.assertIn('connected it to xswap-codex',text)
+  self.err.truncate(0);self.err.seek(0)
+  self.assertEqual(self.manager.codex(),str(self.standalone));self.assertEqual(self.err.getvalue(),'')  # quiet once connected
+  disable(self.manager)
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.standalone));self.assertEqual(os.readlink(self.bin_b/'codex'),str(self.brew))
+  settings=read_settings(self.manager)
+  self.assertNotIn('wrappers',settings);self.assertEqual(settings['wrapper']['path'],str(self.bin_a/'codex'))
+ def test_shadowing_entry_is_left_alone_when_the_wrapped_entry_is_not_on_path(self):
+  self.shadow_fixture()
+  with patch.dict(os.environ,{'PATH':str(self.bin_a)}):
+   self.assertIsNone(reconnect_wrapper(self.manager))
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.standalone))
+  self.assertEqual(read_settings(self.manager)['wrapper']['path'],str(self.bin_b/'codex'))
+  self.assertEqual(self.err.getvalue(),'')
+ def test_shadowing_regular_file_is_left_alone(self):
+  self.shadow_fixture()
+  (self.bin_a/'codex').unlink();(self.bin_a/'codex').write_text('fixture');(self.bin_a/'codex').chmod(0o700)
+  self.assertIsNone(reconnect_wrapper(self.manager))
+  self.assertFalse((self.bin_a/'codex').is_symlink())
+  self.assertEqual(read_settings(self.manager)['wrapper']['path'],str(self.bin_b/'codex'))
+ def test_shadowing_entry_is_ignored_while_auto_is_disabled(self):
+  self.shadow_fixture()
+  disable(self.manager)
+  self.assertIsNone(reconnect_wrapper(self.manager))
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.standalone))
+ def test_enable_wrap_keeps_the_previously_wrapped_entry_for_rollback(self):
+  self.shadow_fixture()
+  with patch.dict(os.environ,{'PATH':str(self.bin_a)}):  # off PATH: nothing self-heals, the user runs the command doctor names
+   enable(self.manager,'main,second',wrap=True)
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.proxy))
+  settings=read_settings(self.manager)
+  self.assertEqual(settings['wrapper']['path'],str(self.bin_a/'codex'));self.assertEqual(settings['wrapper']['realCodex'],str(self.standalone))
+  self.assertEqual([w['path'] for w in settings['wrappers']],[str(self.bin_b/'codex')])
+  enable(self.manager,'main,second',wrap=True)  # idempotent: no duplicate records
+  self.assertEqual(len(read_settings(self.manager)['wrappers']),1)
+  disable(self.manager)
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.standalone));self.assertEqual(os.readlink(self.bin_b/'codex'),str(self.brew))
+ def test_disable_restores_every_wrapped_entry_and_reports_external_changes(self):
+  self.shadow_fixture()
+  self.manager.codex()
+  (self.bin_b/'codex').unlink();(self.bin_b/'codex').symlink_to('external-update')
+  disable(self.manager)
+  self.assertEqual(os.readlink(self.bin_a/'codex'),str(self.standalone))
+  self.assertEqual(os.readlink(self.bin_b/'codex'),'external-update')
+  self.assertIn(f'codex entry {self.bin_b/"codex"} changed outside xswap; left it untouched.',self.err.getvalue())
+ def test_auto_status_codex_wrapped_follows_the_path_lookup(self):
+  from xswap_cli import status_data
+  self.shadow_fixture()
+  self.assertFalse(status_data(self.manager,cleanup=False)['codexWrapped'])
+  self.manager.codex()
+  self.assertTrue(status_data(self.manager,cleanup=False)['codexWrapped'])
+ def test_codex_path_entries_orders_classifies_and_dedupes(self):
+  from xswap_cli import codex_path_entries
+  self.shadow_fixture()
+  alias=self.base/'alias';alias.mkdir();(alias/'codex').symlink_to(os.path.relpath(self.proxy,alias))
+  dangling=self.base/'dangling';dangling.mkdir();(dangling/'codex').symlink_to(self.base/'missing')
+  folder=self.base/'folder';folder.mkdir();(folder/'codex').mkdir()
+  with patch.dict(os.environ,{'PATH':os.pathsep.join(['',str(dangling),str(folder),str(self.bin_a),str(alias),str(self.bin_b),str(self.bin_a)])}):
+   entries=codex_path_entries(read_settings(self.manager))
+  self.assertEqual([(e['path'],e['kind'],e['target']) for e in entries],[
+   (str(self.bin_a/'codex'),'foreign',str(self.standalone)),
+   (str(alias/'codex'),'wrapper',os.path.relpath(self.proxy,alias)),
+   (str(self.bin_b/'codex'),'wrapper',str(self.proxy))])
  def test_new_run_dir_makes_every_level_private_and_repairs_auto(self):
   # A CLI launch used to create `auto` through mkdir(parents=True), i.e. with the umask (INT-5085).
   import os,stat
