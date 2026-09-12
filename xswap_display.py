@@ -248,7 +248,8 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
 
 def dashboard(manager, lang="en"):
     from xswap_cli import status_data
-    state = status_data(manager, cleanup=False)
+    # The menu bar polls this every five minutes: a natural background sweep.
+    state = status_data(manager)
     rows = manager.account_rows()
     return {'accounts': [summary(row, lang=lang) for row in sorted(rows, key=lambda r: not r['active'])],
             'policy': policy_label(state, lang),

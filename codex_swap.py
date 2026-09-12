@@ -635,7 +635,8 @@ class Manager:
             return rows
         from xswap_display import render
         from xswap_cli import status_data
-        state = status_data(self, cleanup=False)
+        # The text dashboard is a sweep point; --json/--short above stay read-only.
+        state = status_data(self)
         print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"]))
         return rows
 
@@ -968,7 +969,7 @@ def parser():
     dash.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     sub.add_parser("status", help="Show selected account and login status")
     st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
-    st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
+    st.add_argument("--prune", action="store_true", help="Remove every non-running CLI run record now, not only stopped ones older than a day, empty ones older than a minute, and others older than 7 days")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
     ae.add_argument("--accounts", required=True)
     ae.add_argument("--wrap-codex", action="store_true", help="Also wrap the user-owned codex symlink, with rollback metadata")

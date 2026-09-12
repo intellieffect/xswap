@@ -117,15 +117,27 @@ class CliTests(TestCase):
   with patch.object(self.manager,'codex',return_value='/fixture/codex'),contextlib.redirect_stdout(io.StringIO()):
    launch_cli(self.manager,'main,second',[],dry=True)
   self.assertFalse((self.manager.root/'auto').exists())
- def make_run(self,name,updated_at=None,hold_lock=False):
+ def make_run(self,name,updated_at=None,hold_lock=False,event=None,reason=None,lock=True,mtime=None):
+  # A bridge record as serve_cli leaves it: status.json (whitelisted fields only) and the
+  # lock file the bridge flocks while alive. lock=False mimics a TUI that exited before
+  # its bridge ever connected; mtime backdates the directory for records without status.
   run_dir=self.manager.root/'auto'/'cli-runs'/name;run_dir.mkdir(parents=True)
   if updated_at is not None:
-   (run_dir/'status.json').write_text(json.dumps({'updatedAt':updated_at}))
-  fd=os.open(run_dir/'.bridge.lock',os.O_CREAT|os.O_RDWR,0o600)
-  if hold_lock:
-   fcntl.flock(fd,fcntl.LOCK_EX)
-  else:
-   os.close(fd);fd=None
+   state={'updatedAt':updated_at}
+   if event is not None:
+    state['event']=event
+   if reason is not None:
+    state['reason']=reason
+   (run_dir/'status.json').write_text(json.dumps(state))
+  fd=None
+  if lock:
+   fd=os.open(run_dir/'.bridge.lock',os.O_CREAT|os.O_RDWR,0o600)
+   if hold_lock:
+    fcntl.flock(fd,fcntl.LOCK_EX)
+   else:
+    os.close(fd);fd=None
+  if mtime is not None:
+   os.utime(run_dir,(mtime,mtime))
   return run_dir,fd
  def test_status_exposes_stop_reason_and_quota_flag(self):
   run_dir,_=self.make_run('failed-init')
@@ -145,12 +157,125 @@ class CliTests(TestCase):
    self.assertEqual(json.loads(out.getvalue())['pruned'],0)
   finally:
    os.close(fd)
- def test_menu_status_does_not_prune(self):
+ def test_cleanup_false_keeps_stale_dir(self):
+  # The contract `xswap upgrade` relies on for its running-session count.
   from xswap_cli import status_data
   run_dir,_=self.make_run('stale-menu',updated_at=time.time()-8*86400)
   result=status_data(self.manager,cleanup=False)
   self.assertTrue(run_dir.exists())
   self.assertEqual(result['pruned'],0)
+  self.assertEqual(result['prunedRuns'],[])
+ def test_clean_stop_goes_after_a_day_failures_and_vanished_bridges_keep_a_week(self):
+  now=time.time()
+  gone,_=self.make_run('stopped-old',updated_at=now-25*3600,event='stopped')
+  kept,_=self.make_run('stopped-new',updated_at=now-23*3600,event='stopped')
+  failed,_=self.make_run('stopped-failed',updated_at=now-25*3600,event='stopped',reason='app-server exited')
+  killed,_=self.make_run('killed',updated_at=now-25*3600,event='policy-applied')  # bridge died without its stopped write
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  self.assertFalse(gone.exists())
+  for path in (kept,failed,killed):
+   self.assertTrue(path.exists(),path)
+  report=json.loads(out.getvalue())
+  self.assertEqual(report['pruned'],1)
+  self.assertEqual([(r['run'],r['rule'],r['event'],r['reason']) for r in report['prunedRuns']],[('stopped-old','stopped','stopped',None)])
+  self.assertEqual(sorted((s['event'],s['reason'] or '') for s in report['sessions']),
+                   [('policy-applied',''),('stopped',''),('stopped','app-server exited')])
+ def test_empty_record_goes_after_a_minute_but_a_fresh_one_survives(self):
+  now=time.time()
+  empty,_=self.make_run('empty-old',lock=False,mtime=now-120)
+  lock_only,_=self.make_run('lock-only',mtime=now-120)  # took its lock, died before the first status write
+  fresh,_=self.make_run('empty-fresh',lock=False)
+  logged,_=self.make_run('logged',lock=False,mtime=now-120);(logged/'bridge.log').write_text('fixture')  # any other file keeps the week
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  self.assertFalse(empty.exists());self.assertFalse(lock_only.exists())
+  self.assertTrue(fresh.exists());self.assertTrue(logged.exists())
+  report=json.loads(out.getvalue())
+  self.assertEqual(report['pruned'],2)
+  self.assertEqual(sorted((r['run'],r['rule'],r['account'],r['event']) for r in report['prunedRuns']),
+                   [('empty-old','empty',None,None),('lock-only','empty',None,None)])
+  self.assertTrue(all(100<=r['ageSeconds']<=200 for r in report['prunedRuns']))
+ def test_launch_sweeps_stale_records_before_creating_its_own(self):
+  import stat
+  from xswap_cli import new_run_dir
+  now=time.time()
+  stale,_=self.make_run('stale',updated_at=now-8*86400,event='policy-applied')
+  stopped,_=self.make_run('stopped',updated_at=now-25*3600,event='stopped')
+  empty,_=self.make_run('empty',lock=False,mtime=now-120)
+  fresh,_=self.make_run('fresh',lock=False)
+  running,fd=self.make_run('running',updated_at=now-8*86400,hold_lock=True)
+  (self.manager.root/'auto.json').write_text('{not json')  # a launch must not depend on readable settings
+  try:
+   run_dir=new_run_dir(self.manager)
+  finally:
+   os.close(fd)
+  for path in (stale,stopped,empty):
+   self.assertFalse(path.exists(),path)
+  for path in (fresh,running,run_dir):
+   self.assertTrue(path.is_dir(),path)
+  self.assertEqual(stat.S_IMODE(run_dir.stat().st_mode),0o700)
+ def test_list_text_prunes_but_json_stays_read_only(self):
+  from codex_swap import main
+  self.manager.register('main')
+  stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
+  running,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
+  try:
+   with patch('codex_swap.Manager',return_value=self.manager),contextlib.redirect_stdout(io.StringIO()):
+    self.assertEqual(main(['list','--offline','--json']),0)
+    self.assertTrue(stale.exists())  # completion runs this on every tab; no side effects
+    self.assertEqual(main(['list','--offline']),0)
+  finally:
+   os.close(fd)
+  self.assertFalse(stale.exists())
+  self.assertTrue(running.exists())
+ def test_dashboard_prunes_stale_records(self):
+  from xswap_display import dashboard
+  stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
+  data=dashboard(self.manager)
+  self.assertFalse(stale.exists())
+  self.assertEqual(data['sessions'],[])
+  self.assertNotIn('prunedRuns',data)  # the menu app's payload is unchanged
+ def test_upgrade_count_and_doctor_leave_records_alone(self):
+  from xswap_doctor import check_auto_runs
+  from xswap_upgrade import count_running_sessions
+  stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
+  running,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
+  try:
+   with patch.dict(os.environ,{'CODEX_SWAP_HOME':str(self.manager.root),'CODEX_HOME':str(self.source)}):
+    self.assertEqual(count_running_sessions(),1)
+   self.assertEqual(check_auto_runs(self.manager)['status'],'OK')
+  finally:
+   os.close(fd)
+  self.assertTrue(stale.exists());self.assertTrue(running.exists())
+ def test_auto_status_reports_pruned_records_without_secrets(self):
+  run_dir,_=self.make_run('stale')
+  (run_dir/'status.json').write_text(json.dumps({'updatedAt':time.time()-8*86400,'event':'policy-applied','account':'main',
+   'bridgeVersion':'0.7.6','accessToken':'must-not-leak'}))
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  self.assertNotIn('must-not-leak',out.getvalue())
+  report=json.loads(out.getvalue())
+  self.assertEqual(report['pruned'],1)
+  record=report['prunedRuns'][0]
+  self.assertEqual({k:record[k] for k in ('run','rule','account','event','bridgeVersion','reason')},
+                   {'run':'stale','rule':'stale','account':'main','event':'policy-applied','bridgeVersion':'0.7.6','reason':None})
+  self.assertTrue(8*86400-5<=record['ageSeconds']<=8*86400+5)
+  self.assertEqual(set(record),{'run','rule','ageSeconds','account','event','bridgeVersion','reason'})
+ def test_prune_flag_reports_forced_rule(self):
+  self.make_run('fresh',updated_at=time.time()-5*60,event='ready')
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager,prune=True)
+  self.assertEqual([(r['run'],r['rule']) for r in json.loads(out.getvalue())['prunedRuns']],[('fresh','forced')])
+ def test_scan_survives_record_removed_by_another_sweep(self):
+  # Sweeps now run from list, the menu bar, and every launch; a record can vanish between
+  # the directory listing and opening its lock file.
+  stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
+  with patch('xswap_cli.os.open',side_effect=FileNotFoundError),contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  report=json.loads(out.getvalue())
+  self.assertEqual(report['pruned'],0)
+  self.assertEqual(report['sessions'],[])
  def test_prune_removes_stale_dir_by_default(self):
   run_dir,_=self.make_run('stale',updated_at=time.time()-8*86400)
   with contextlib.redirect_stdout(io.StringIO()) as out:

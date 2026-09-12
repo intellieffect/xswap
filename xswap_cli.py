@@ -373,6 +373,10 @@ def new_run_dir(manager):
     auto = manager.root / 'auto'
     private_dir(auto)
     private_dir(auto / 'cli-runs')
+    # A new session is the natural sweep point: records nobody will read again
+    # go before this run's own record exists. scan_runs never reads auto.json,
+    # so an unreadable settings file cannot block a launch here.
+    scan_runs(manager)
     run_dir = auto / 'cli-runs' / uuid.uuid4().hex
     private_dir(run_dir)
     return run_dir
@@ -600,18 +604,80 @@ def codex_main():
 
 
 STALE_RUN_SECONDS = 7 * 24 * 3600
+STOPPED_RUN_SECONDS = 24 * 3600
 MIN_PRUNE_AGE_SECONDS = 60
+PRUNED_RECORD_KEYS = ('account', 'event', 'bridgeVersion', 'reason')
+# The whitelist of bridge status fields a session record may expose. A constant
+# because a status.json also holds fields no report may carry (a `stopped`
+# record's raw failure payload, anything a newer bridge writes): copying keys by
+# name is what keeps `auto-status` free of tokens.
+SESSION_KEYS = ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt',
+    'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance',
+    'manualRequest', 'manualState', 'reason', 'quotaKnown')
 
 
-def status_data(manager, prune=False, cleanup=True):
-    settings = read_settings(manager)
+def run_dir_empty(run_dir):
+    """True when the record holds nothing but (optionally) its lock file.
+
+    Such a record is invisible in every report: the TUI exited before its
+    bridge connected, or the bridge died before its first status write. Any
+    other file (a status.json, even an unreadable one; a switch.json; a log)
+    keeps the record on the ordinary schedule.
+    """
+    try:
+        return all(entry.name == '.bridge.lock' for entry in run_dir.iterdir())
+    except OSError:
+        return False
+
+
+def stopped_cleanly(state):
+    """A `stopped` record without a failure reason: the bridge ended the normal way."""
+    return isinstance(state, dict) and state.get('event') == 'stopped' and not state.get('reason')
+
+
+def prune_limit(state, empty):
+    """Seconds a non-running record is kept before it is pruned without --prune.
+
+    An empty record has nothing to show. A clean `stopped` record was already
+    reported once when the TUI exited; a day keeps it for "what happened
+    yesterday". A `stopped` record with a failure reason, or any other last
+    event on a record whose lock is free (the bridge ended without its
+    `stopped` write: killed, crashed, rebooted), is kept a week so the
+    abnormal end stays visible in auto-status.
+    """
+    if empty:
+        return MIN_PRUNE_AGE_SECONDS
+    if stopped_cleanly(state):
+        return STOPPED_RUN_SECONDS
+    return STALE_RUN_SECONDS
+
+
+def prune_rule(state, empty, age):
+    """Short label for the schedule a removal fell under; 'forced' only with --prune."""
+    if empty:
+        return 'empty'
+    if age > STALE_RUN_SECONDS:
+        return 'stale'
+    if stopped_cleanly(state) and age > STOPPED_RUN_SECONDS:
+        return 'stopped'
+    return 'forced'
+
+
+def scan_runs(manager, prune=False, cleanup=True):
+    """Read every bridge record; with cleanup, remove the ones nobody will read again.
+
+    Returns (sessions, pruned). A record whose lock is held is never removed,
+    nor is anything younger than MIN_PRUNE_AGE_SECONDS. Never reads auto.json:
+    a launch sweeps through here, and an unreadable settings file must not stop
+    a session from starting.
+    """
     run_root = manager.root / 'auto' / 'cli-runs'
     entries = [(manager.root / 'auto' / 'status.json', None)]
     if run_root.is_dir():
         entries += [(run_dir / 'status.json', run_dir) for run_dir in sorted(run_root.iterdir())
                     if run_dir.is_dir() and not run_dir.is_symlink()]
-    result = []
-    pruned = 0
+    sessions = []
+    pruned = []
     for path, run_dir in entries:
         state = None
         if path.exists():
@@ -620,7 +686,12 @@ def status_data(manager, prune=False, cleanup=True):
             except (OSError, ValueError):
                 state = None
         lock_path = path.parent / '.bridge.lock'
-        fd = os.open(lock_path, os.O_RDONLY) if lock_path.exists() else None
+        try:
+            fd = os.open(lock_path, os.O_RDONLY) if lock_path.exists() else None
+        except OSError:
+            # Sweeps now run from list, the menu bar and every launch, so another
+            # one can remove this record between the listing and this open.
+            continue
         running = False
         try:
             # Holding the fd (and any lock acquired below) through the removal
@@ -640,26 +711,35 @@ def status_data(manager, prune=False, cleanup=True):
                         age = time.time() - run_dir.stat().st_mtime
                     except OSError:
                         age = 0
+                empty = state is None and run_dir_empty(run_dir)
                 # A run dir this fresh may still be between creation and the
                 # bridge taking its lock (no lock file, no status.json yet);
                 # never race that startup window regardless of --prune.
-                if cleanup and age > MIN_PRUNE_AGE_SECONDS and (prune or age > STALE_RUN_SECONDS):
+                if cleanup and age > MIN_PRUNE_AGE_SECONDS and (prune or age > prune_limit(state, empty)):
                     try:
                         shutil.rmtree(run_dir)
                     except OSError:
                         # Lost a race with another prune, or the dir vanished;
                         # never let one bad removal crash the whole report.
                         continue
-                    pruned += 1
+                    fields = state if isinstance(state, dict) else {}
+                    pruned.append({'run': run_dir.name, 'rule': prune_rule(state, empty, age),
+                                   'ageSeconds': int(age),
+                                   **{key: fields.get(key) for key in PRUNED_RECORD_KEYS}})
                     continue
         finally:
             if fd is not None:
                 os.close(fd)
         if state is None:
             continue
-        result.append({'surface': 'desktop' if run_dir is None else 'cli',
-            'running': running, **{key: state.get(key) for key in
-            ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt', 'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance', 'manualRequest', 'manualState', 'reason', 'quotaKnown')}})
+        sessions.append({'surface': 'desktop' if run_dir is None else 'cli', 'running': running,
+                         **{key: state.get(key) for key in SESSION_KEYS}})
+    return sessions, pruned
+
+
+def status_data(manager, prune=False, cleanup=True):
+    settings = read_settings(manager)
+    sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
     wrapper = settings.get('wrapper') or {}
     wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
     wrapped = bool(wrapper and wrapper_path.is_symlink() and
@@ -667,7 +747,7 @@ def status_data(manager, prune=False, cleanup=True):
     return {'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []), 'codexWrapped': wrapped,
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
-                      'pruned': pruned, 'sessions': result[-20:]}
+                      'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': sessions[-20:]}
 
 
 def show_status(manager, prune=False):

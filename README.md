@@ -150,7 +150,7 @@ xswap auto-disable                       # Restore the original codex symlink an
 
 Disabling defaults does not terminate running sessions. Fixed-account commands (`xswap run --account main -- ...`, `xswap app main`) remain available.
 
-Each auto CLI run leaves a small record under `auto/cli-runs/`. As a side effect, `auto-status` prunes non-running records older than 7 days on every call, and `--prune` removes all non-running records immediately; either way, a record younger than 60 seconds is never removed, since it may still be between creation and its bridge taking its lock.
+Each auto CLI run leaves a small record under `auto/cli-runs/`. Records nobody will read again are removed as a side effect of `xswap auto-status`, the text output of `xswap list`/`usage` (so the `alert` job sweeps on its schedule), the menu bar's `dashboard` refresh, and every new bridged CLI launch: a record whose bridge ended cleanly (`stopped` without a `reason`) goes after 24 hours; a `stopped` record carrying a failure `reason`, or one whose bridge is gone without a `stopped` write (killed, crashed, rebooted), stays a week so the abnormal end remains visible; a directory holding nothing but a free lock file (the TUI exited before its bridge connected) goes after a minute. `auto-status --prune` removes every non-running record immediately. In every case a running bridge (its lock is held) and a record younger than 60 seconds are never removed, since a fresh record may still be between creation and its bridge taking its lock. `auto-status` lists what it removed under `prunedRuns` (run id, rule, age, account, last event, bridge version, stop reason); `list --json`/`--short`, `doctor`, and `upgrade` never remove anything.
 
 ### Compatibility and limits
 
