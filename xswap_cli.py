@@ -412,6 +412,10 @@ def launch_cli(manager, accounts, args, dry=False):
                 dst.symlink_to(src, target_is_directory=src.is_dir())
         from xswap_plugins import ensure_plugins
         ensure_plugins(home, source)
+        # An in-session Codex update installs under $CODEX_HOME/packages; point that at
+        # the reference home so the release never lands inside xswap's state (INT-5186).
+        from xswap_relocate import link_packages
+        link_packages(manager, home)
     else:
         print('xswap auto: resuming from the original session home', file=sys.stderr)
     run_dir = new_run_dir(manager)
@@ -713,6 +717,7 @@ def reconnect_wrapper(manager):
     alert-job tick); wrapper_drift names the reason for doctor and use/switch.
     `xswap auto-disable` restores every record.
     """
+    from xswap_relocate import canonical_codex_path, inside_root
     with manager.locked():
         settings = read_settings(manager)
         result = None
@@ -720,19 +725,28 @@ def reconnect_wrapper(manager):
         if drift['action'] == 'reconnect':
             wrapper = settings['wrapper']
             path = Path(drift['path'])
-            real = drift['real']
-            wrapper.update(originalTarget=drift['target'], realCodex=real)
+            # install.sh writes "$CODEX_HOME/packages/standalone/current/bin/codex" literally;
+            # through an owned home's packages link that spells xswap's root, so record it via
+            # the reference home instead. The literal link text stays the rollback target only
+            # when nothing had to be rewritten.
+            real = canonical_codex_path(manager, drift['real'])
+            wrapper.update(originalTarget=drift['target'] if real == drift['real'] else real, realCodex=real)
+            misplaced = inside_root(manager, real)
             if not _relink(manager, settings, path, wrapper['proxy'], f'a Codex update replaced {path}'):
                 return None
-            print(f'xswap: a Codex update had replaced {path}; reconnected it to xswap-codex. '
-                  f'Codex is now {real}.', file=sys.stderr)
+            print(f'xswap: a Codex update had replaced {path}; reconnected it to xswap-codex. Codex is now {real}.'
+                  + (' It was installed inside the xswap state directory; run: xswap relocate-codex' if misplaced else ''),
+                  file=sys.stderr)
             result = real
         shadow = shadowing_entry(settings)
         if shadow is not None:
             shadow_path, shadow_target = shadow
             previous = settings['wrapper']
-            real = link_target_path(Path(shadow_path), shadow_target)
-            set_primary_wrapper(settings, {'path': shadow_path, 'originalTarget': shadow_target,
+            # A shadowing entry is what a Codex install just wrote, so it too can spell a
+            # release through an owned home's packages link (Mini, 2026-09-13).
+            literal = link_target_path(Path(shadow_path), shadow_target)
+            real = canonical_codex_path(manager, literal)
+            set_primary_wrapper(settings, {'path': shadow_path, 'originalTarget': shadow_target if real == literal else real,
                                            'realCodex': real, 'proxy': previous['proxy']})
             if not _relink(manager, settings, Path(shadow_path), previous['proxy'],
                            f'{shadow_path} appeared ahead of {previous["path"]} on PATH'):
@@ -760,9 +774,16 @@ def enable(manager, accounts, wrap=False):
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
                     raise LiveError('codex wrapper installation requires a user-owned codex symlink; use xswap instead')
                 original = os.readlink(target)
-                set_primary_wrapper(settings, {'path': str(target), 'originalTarget': original,
-                                               'realCodex': link_target_path(target, original),
-                                               'proxy': str(Path(proxy).absolute())})
+                from xswap_relocate import canonical_codex_path, inside_root
+                # A release the installer put under an owned home's packages link is recorded
+                # through the reference home, so purging auto/ cannot take plain codex with it.
+                literal = link_target_path(target, original)
+                real = canonical_codex_path(manager, literal)
+                set_primary_wrapper(settings, {'path': str(target), 'originalTarget': original if real == literal else real,
+                                               'realCodex': real, 'proxy': str(Path(proxy).absolute())})
+                if inside_root(manager, real):
+                    print(f'xswap: the real Codex ({real}) is inside the xswap state directory; run: xswap relocate-codex',
+                          file=sys.stderr)
                 # Persist rollback information before the atomic symlink swap.
                 atomic_json(manager.root / 'auto.json', settings)
                 swap_symlink(target, Path(proxy).absolute())
@@ -787,12 +808,23 @@ def set_policy(manager, weekly_remaining):
 
 def disable(manager):
     from codex_swap import atomic_json
+    from xswap_relocate import inside_root
     with manager.locked():
         settings = read_settings(manager)
         for record in wrapper_records(settings):
             path = Path(record['path'])
             if path.is_symlink() and os.readlink(path) == record['proxy']:
                 swap_symlink(path, record['originalTarget'])
+                # Disconnecting is the user's call even when the release behind the entry is
+                # gone or sits inside xswap's state, but plain codex then fails with no hint.
+                restored = Path(link_target_path(path, record['originalTarget']))
+                if not restored.is_file():
+                    print(f'xswap: restored {path} -> {record["originalTarget"]}, but that Codex executable is missing; '
+                          'plain codex will not start until Codex is reinstalled (the installer re-creates the link).',
+                          file=sys.stderr)
+                elif inside_root(manager, str(restored)):
+                    print(f'xswap: {path} now points inside the xswap state directory ({restored}); '
+                          'run: xswap relocate-codex', file=sys.stderr)
             else:
                 # Several entries can be wrapped now, so name the one left behind.
                 print(f'codex entry {path} changed outside xswap; left it untouched.', file=sys.stderr)
@@ -804,6 +836,15 @@ def disable(manager):
     print('Auto switching disabled for new sessions. Running auto sessions remain active.')
 
 
+def missing_codex_message(real, settings):
+    """One explicit stderr line for a wrapped codex entry with no real Codex behind it
+    (a purged runtime home that held the release, or a lost auto.json record)."""
+    names = ','.join(settings.get('accounts') or []) or 'NAME,NAME'
+    where = f'{real} is missing' if real else 'auto.json records no realCodex'
+    return (f'xswap: the codex command is connected to xswap, but the real Codex executable is unavailable ({where}). '
+            f'Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex')
+
+
 def codex_main():
     from codex_swap import Manager, SwapError
     try:
@@ -811,7 +852,8 @@ def codex_main():
         settings = read_settings(manager)
         real = (settings.get('wrapper') or {}).get('realCodex')
         if not real or not Path(real).is_file():
-            raise LiveError('original Codex executable is unavailable; inspect auto.json recovery info')
+            print(missing_codex_message(real, settings), file=sys.stderr)
+            return 1
         args = sys.argv[1:]
         if settings.get('enabled') and interactive_args(args) and os.environ.get('XSWAP_BYPASS') != '1':
             return launch_cli(manager, ','.join(settings['accounts']), args)

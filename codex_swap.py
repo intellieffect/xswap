@@ -24,6 +24,7 @@ from xswap_usage import warnings as usage_warnings
 from xswap_display import resolve_lang
 from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
+from xswap_relocate import link_packages
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
@@ -406,6 +407,7 @@ class Manager:
                 if src.exists() and not dst.exists() and not dst.is_symlink():
                     dst.symlink_to(src, target_is_directory=src.is_dir())
             ensure_plugins(home, self.source)
+            link_packages(self, home, data["accounts"])
             data["accounts"][name] = {"home": str(home), "managed": True}
             atomic_json(self.registry, data)
         return home
@@ -546,7 +548,9 @@ class Manager:
         if wrapper and Path(executable).resolve() == Path(wrapper["proxy"]).resolve():
             real = wrapper["realCodex"]
             if not Path(real).is_file() or Path(real).resolve() == Path(executable).resolve():
-                raise SwapError("Original Codex binary is unavailable.")
+                names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
+                raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
+                                f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
             return real
         return executable
 
@@ -877,6 +881,7 @@ class Manager:
             print(json.dumps({"account": name, "CODEX_HOME": str(home), "argv": command}, indent=2))
             return 0
         ensure_plugins(home, self.source)
+        link_packages(self, home)  # no-op for a registered external home
         return subprocess.call(command, env=self.env(home))
 
     def launch_auto_app(self, accounts, app=None, dry=False):
@@ -918,6 +923,7 @@ class Manager:
             if src.exists() and not dst.exists() and not dst.is_symlink():
                 dst.symlink_to(src, target_is_directory=src.is_dir())
         ensure_plugins(home, source)
+        link_packages(self, home)
         result = subprocess.run(command, env=self.env(home), capture_output=True)
         if result.returncode:
             raise SwapError("Auto desktop launch failed.")
@@ -942,6 +948,7 @@ class Manager:
         private_dir(desktop.parent)
         private_dir(desktop)
         ensure_plugins(home, self.source)
+        link_packages(self, home)  # no-op for a registered external home
         result = subprocess.run(command, env=self.env(home), capture_output=True)
         if result.returncode:
             raise SwapError("Desktop launch failed. Confirm that the app path exists and macOS permits launching it.")
@@ -996,6 +1003,8 @@ def parser():
     policy.add_argument("--weekly-remaining", type=float, required=True)
     rp = sub.add_parser("repair-plugins", help="Materialize legacy shared plugin links without stopping sessions")
     rp.add_argument("--dry-run", action="store_true")
+    rc = sub.add_parser("relocate-codex", help="Move a Codex release that an in-session update installed inside xswap's state directory to the reference Codex home, and link xswap's homes to it")
+    rc.add_argument("--dry-run", action="store_true", help="Print the planned moves without changing anything")
     dr = sub.add_parser("doctor", help="Diagnose codex install, accounts, plugins, and OpenClaw (read-only, no network)")
     dr.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
@@ -1129,6 +1138,9 @@ def main(argv=None):
         elif args.command == "repair-plugins":
             from xswap_plugins import repair
             repair(manager, args.dry_run)
+        elif args.command == "relocate-codex":
+            from xswap_relocate import relocate
+            relocate(manager, dry=args.dry_run)
         elif args.command == "doctor":
             from xswap_doctor import run, print_report
             return print_report(run(manager), args.json_output)

@@ -17,8 +17,9 @@ import time
 from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import describe_drift, entry_drift, read_settings, shadowing_entry, wrapper_drift, wrapper_state
+from xswap_cli import describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+from xswap_relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 TOKEN_WARN_SECONDS = 24 * 3600
@@ -369,6 +370,61 @@ def check_openclaw_cooldowns(accounts, cache_path):
     return rows
 
 
+def check_real_codex(manager, settings, accounts):
+    """Where the wrapped codex entry's real executable lives (INT-5186, item 2). Omitted
+    when the codex command is not connected. Paths are compared, never moved."""
+    wrapper = settings.get("wrapper") or {}
+    real = wrapper.get("realCodex")
+    if not wrapper or not isinstance(real, str) or not real:
+        return None
+    names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
+    reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
+    if not Path(real).is_file():
+        return check("real codex", FAIL, f"{real} is missing; plain codex cannot start. Recover: xswap auto-disable, "
+                     f"reinstall Codex, then {reconnect}")
+    if inside_root(manager, real) or inside_root(manager, wrapper.get("originalTarget")):
+        return check("real codex", FAIL, f"{real} is inside the xswap state directory ({manager.root}): a Codex update "
+                     "ran inside a bridged session, and purging or resetting auto/ would break plain codex. "
+                     "Fix: xswap relocate-codex")
+    return check("real codex", OK, real)
+
+
+def check_packages_links(manager, accounts):
+    """One row per xswap-owned Codex home whose `packages` entry exists, plus every auto
+    runtime home that exists at all: the entry must link to a home outside xswap's root
+    so Codex's updater installs there (see xswap_relocate)."""
+    rows = []
+    for home in codex_homes_inside_root(manager, accounts):
+        packages = home / "packages"
+        is_runtime = home.parent == manager.root / "auto"
+        if not home.is_dir() or not (is_runtime or packages.is_symlink() or packages.exists()):
+            continue
+        label = f"packages link: {home.relative_to(manager.root)}"
+        if packages.is_symlink():
+            target = os.readlink(packages)
+            absolute = Path(link_target_path(packages, target))
+            # install.sh runs `mkdir -p "$STANDALONE_ROOT"` first, and that fails on a
+            # broken link -- an in-session update would die instead of installing.
+            if not absolute.exists():
+                rows.append(check(label, WARN, f"{packages} -> {target} does not exist: a Codex update from inside "
+                                               "a session fails here. Fix: xswap relocate-codex"))
+                continue
+            try:
+                stays_inside = absolute.resolve().is_relative_to(manager.root)
+            except (OSError, RuntimeError):
+                stays_inside = absolute.is_relative_to(manager.root)
+            if stays_inside:
+                rows.append(check(label, WARN, f"{packages} -> {target} stays inside {manager.root}; run: xswap relocate-codex"))
+            else:
+                rows.append(check(label, OK, f"{packages} -> {target}"))
+        elif packages.is_dir():
+            rows.append(check(label, WARN, f"{packages} is a real directory: a Codex update from inside a session "
+                                          "installs here. Fix: xswap relocate-codex"))
+        else:
+            rows.append(check(label, OK, "not created yet; linked on the next launch"))
+    return rows
+
+
 def check_storage(manager):
     try:
         info = manager.root.lstat()
@@ -421,7 +477,11 @@ def run(manager):
 
     if settings_ok:
         results.append(check_auto_pool(settings, accounts))
+        real_codex = check_real_codex(manager, settings, accounts)
+        if real_codex is not None:
+            results.append(real_codex)
     results.append(check_auto_dir(manager))
+    results.extend(check_packages_links(manager, accounts))
     results.append(check_auto_runs(manager))
     results.extend(check_openclaw())
     results.extend(check_openclaw_cooldowns(accounts, manager.usage_cache_path()))

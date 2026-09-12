@@ -425,6 +425,104 @@ class DoctorTests(unittest.TestCase):
             row = find(doctor.run(self.manager), "openclaw")
         self.assertEqual(row["status"], "WARN")
 
+    # --- real codex location and packages links (INT-5186 item 2) ---
+
+    def wrapped_settings(self, real, original=None):
+        atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main"], "wrapper": {
+            "path": str(self.base / "codex-link"), "originalTarget": original or real, "realCodex": real,
+            "proxy": "/fixture/xswap-codex"}})
+
+    def test_real_codex_inside_root_fails_and_names_relocate(self):
+        self.register_main()
+        inside = self.manager.root / "auto" / "cli-codex" / "packages" / "standalone" / "current" / "bin" / "codex"
+        inside.parent.mkdir(parents=True)
+        inside.write_text("fixture")
+        self.wrapped_settings(str(inside))
+        before = (self.manager.root / "auto.json").read_bytes()
+        results = self.run_doctor()
+        row = find(results, "real codex")
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("xswap relocate-codex", row["detail"])
+        self.assertIn(str(inside), row["detail"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 1)
+        # Read-only: nothing was moved, linked, or rewritten.
+        self.assertTrue(inside.is_file())
+        self.assertFalse((self.manager.root / "auto" / "cli-codex" / "packages").is_symlink())
+        self.assertEqual((self.manager.root / "auto.json").read_bytes(), before)
+
+    def test_real_codex_resolving_into_root_through_a_link_fails(self):
+        self.register_main()
+        target = self.manager.root / "profiles" / "x" / "codex" / "bin" / "codex"
+        target.parent.mkdir(parents=True)
+        target.write_text("fixture")
+        alias = self.base / "alias"
+        alias.symlink_to(self.manager.root / "profiles")
+        self.wrapped_settings(str(alias / "x" / "codex" / "bin" / "codex"))
+        self.assertEqual(find(self.run_doctor(), "real codex")["status"], "FAIL")
+
+    def test_real_codex_missing_fails_with_recovery_steps(self):
+        self.register_main()
+        gone = self.base / "gone" / "codex"
+        self.wrapped_settings(str(gone))
+        row = find(self.run_doctor(), "real codex")
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("is missing", row["detail"])
+        self.assertIn("xswap auto-enable --accounts main --wrap-codex", row["detail"])
+
+    def test_real_codex_outside_root_is_ok(self):
+        self.register_main()
+        real = self.base / "real-codex"
+        real.write_text("fixture")
+        self.wrapped_settings(str(real))
+        row = find(self.run_doctor(), "real codex")
+        self.assertEqual(row["status"], "OK")
+        self.assertEqual(row["detail"], str(real))
+
+    def test_real_codex_original_target_inside_root_fails_even_when_real_is_outside(self):
+        self.register_main()
+        real = self.base / "real-codex"
+        real.write_text("fixture")
+        self.wrapped_settings(str(real), original=str(self.manager.root / "profiles" / "x" / "codex" / "bin" / "codex"))
+        self.assertEqual(find(self.run_doctor(), "real codex")["status"], "FAIL")
+
+    def test_real_codex_row_omitted_without_wrapper(self):
+        self.register_main()
+        self.assertFalse(any(r["name"] == "real codex" for r in self.run_doctor()))
+
+    def test_packages_link_directory_warns_and_link_is_ok(self):
+        self.register_main()
+        runtime = self.manager.root / "auto" / "cli-codex"
+        (runtime / "packages").mkdir(parents=True)
+        row = find(self.run_doctor(), "packages link: auto/cli-codex")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("xswap relocate-codex", row["detail"])
+        (runtime / "packages").rmdir()
+        (self.source / "packages").mkdir()  # what link_packages creates before it links
+        (runtime / "packages").symlink_to(self.source / "packages")
+        results = self.run_doctor()
+        row = find(results, "packages link: auto/cli-codex")
+        self.assertEqual(row["status"], "OK")
+        self.assertIn(str(self.source / "packages"), row["detail"])
+        self.assertFalse(any(r["name"] == "packages link: auto/codex" for r in results))
+
+    def test_packages_link_into_the_root_warns(self):
+        self.register_main()
+        runtime = self.manager.root / "auto" / "cli-codex"
+        runtime.mkdir(parents=True)
+        (self.manager.root / "auto" / "codex" / "packages").mkdir(parents=True)
+        (runtime / "packages").symlink_to(self.manager.root / "auto" / "codex" / "packages")
+        row = find(self.run_doctor(), "packages link: auto/cli-codex")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("stays inside", row["detail"])
+
+    def test_packages_link_absent_runtime_home_is_ok(self):
+        self.register_main()
+        (self.manager.root / "auto" / "cli-codex").mkdir(parents=True)
+        row = find(self.run_doctor(), "packages link: auto/cli-codex")
+        self.assertEqual(row["status"], "OK")
+        self.assertIn("not created yet", row["detail"])
+
     # --- storage / registry ---
 
     def test_storage_dir_mode_ok(self):

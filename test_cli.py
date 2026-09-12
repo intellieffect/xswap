@@ -183,6 +183,75 @@ class CliTests(TestCase):
    cli.unlink();cli.symlink_to('external-update')
    disable(self.manager)
    self.assertEqual(os.readlink(cli),'external-update')
+ def test_codex_main_reports_missing_real_codex_explicitly(self):
+  self.setup_pool()
+  gone=self.base/'gone'/'codex'
+  from codex_swap import atomic_json
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second'],'wrapper':{'path':str(self.base/'codex'),'originalTarget':str(gone),'realCodex':str(gone),'proxy':str(self.base/'xswap-codex')}})
+  from xswap_cli import codex_main
+  calls=[]
+  with patch.dict(os.environ,{'CODEX_SWAP_HOME':str(self.manager.root),'CODEX_HOME':str(self.source)}),patch('xswap_cli.sys.argv',['xswap-codex','--version']),patch('xswap_cli.os.execve',side_effect=lambda *a:calls.append(a)),contextlib.redirect_stderr(io.StringIO()) as err:
+   self.assertEqual(codex_main(),1)
+  self.assertEqual(calls,[])
+  text=err.getvalue()
+  self.assertIn('real Codex executable is unavailable',text);self.assertIn(str(gone),text)
+  self.assertIn('xswap auto-enable --accounts main,second --wrap-codex',text)
+ def test_codex_main_passes_through_when_real_codex_exists(self):
+  self.setup_pool()
+  real=self.base/'real-codex';real.write_text('fixture');real.chmod(0o700)
+  from codex_swap import atomic_json
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second'],'wrapper':{'path':str(self.base/'codex'),'originalTarget':str(real),'realCodex':str(real),'proxy':str(self.base/'xswap-codex')}})
+  from xswap_cli import codex_main
+  calls=[]
+  def fake_execve(path,argv,env):
+   calls.append((path,argv));raise OSError('stop')
+  with patch.dict(os.environ,{'CODEX_SWAP_HOME':str(self.manager.root),'CODEX_HOME':str(self.source)}),patch('xswap_cli.sys.argv',['xswap-codex','--version']),patch('xswap_cli.os.execve',side_effect=fake_execve),contextlib.redirect_stderr(io.StringIO()):
+   codex_main()
+  self.assertEqual(calls,[(str(real),[str(real),'--version'])])
+ def test_manager_codex_names_recovery_when_real_is_missing(self):
+  real,updated,proxy,cli=self.wrapped_fixture()
+  from codex_swap import SwapError
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()):
+   enable(self.manager,'main,second',wrap=True)
+   real.unlink()  # what purging the directory that held the release does
+   with self.assertRaisesRegex(SwapError,'xswap auto-enable --accounts main,second --wrap-codex') as caught:
+    self.manager.codex()
+  self.assertIn(str(real),str(caught.exception))
+ def test_disable_reports_a_missing_original_target(self):
+  real,updated,proxy,cli=self.wrapped_fixture()
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()):
+   enable(self.manager,'main,second',wrap=True)
+  real.unlink()
+  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   disable(self.manager)
+  self.assertEqual(os.readlink(cli),str(real))  # restored as asked, and said so
+  self.assertIn(str(real),err.getvalue());self.assertIn('is missing',err.getvalue())
+  self.assertFalse(read_settings(self.manager)['enabled'])
+ def test_disable_names_relocate_when_restored_target_is_inside_root(self):
+  self.setup_pool()
+  inside=self.manager.root/'auto'/'cli-codex'/'packages'/'standalone'/'current'/'bin'/'codex'
+  inside.parent.mkdir(parents=True);inside.write_text('fixture');inside.chmod(0o700)
+  proxy=self.base/'xswap-codex';proxy.write_text('fixture');proxy.chmod(0o700)
+  cli=self.base/'codex';cli.symlink_to(proxy)
+  from codex_swap import atomic_json
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second'],'wrapper':{'path':str(cli),'originalTarget':str(inside),'realCodex':str(inside),'proxy':str(proxy)}})
+  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   disable(self.manager)
+  self.assertEqual(os.readlink(cli),str(inside))
+  self.assertIn('run: xswap relocate-codex',err.getvalue())
+ def test_enable_warns_when_the_wrapped_target_is_inside_root(self):
+  self.setup_pool()
+  inside=self.manager.root/'auto'/'cli-codex'/'packages'/'standalone'/'current'/'bin'/'codex'
+  inside.parent.mkdir(parents=True);inside.write_text('fixture');inside.chmod(0o700)
+  proxy=self.base/'xswap-codex';proxy.write_text('fixture');proxy.chmod(0o700)
+  cli=self.base/'codex';cli.symlink_to(inside)
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   enable(self.manager,'main,second',wrap=True)
+  self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'],str(inside))
+  self.assertIn('run: xswap relocate-codex',err.getvalue())
  def shadow_fixture(self):
   # bin-b/codex is the entry xswap wrapped (originally -> a brew release); a Codex standalone
   # install then puts bin-a/codex -> standalone ahead of it on PATH (2026-09-10).
