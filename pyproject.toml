@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "intellieffect-xswap"
-version = "0.7.8"
+version = "0.8.0"
 description = "Account switching for Codex CLI, macOS desktop, and local OpenClaw"
 readme = "README.md"
 license = "MIT"

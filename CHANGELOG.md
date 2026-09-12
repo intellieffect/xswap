@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0
+
+Hardening follow-up to the 2026-09-10 bypass incident, from a source-level comparison with claude-swap (INT-5186). Eleven gaps where xswap could not see, remember, or report a failure that happened outside a bridged session.
+
 ## 0.7.8
 
 A Codex update no longer disconnects plain `codex` from xswap (INT-5121). Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install script) re-points the user-owned `~/.local/bin/codex` symlink at its new release, silently undoing `--wrap-codex`: the next plain `codex` ran the new binary against `~/.codex` and its own account, and only `xswap doctor` noticed (2026-09-10 on a 0.153.4 → 0.154.0 update, the session hit that account's exhausted weekly limit).
