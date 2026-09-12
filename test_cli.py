@@ -186,11 +186,15 @@ class CliTests(TestCase):
   empty,_=self.make_run('empty-old',lock=False,mtime=now-120)
   lock_only,_=self.make_run('lock-only',mtime=now-120)  # took its lock, died before the first status write
   fresh,_=self.make_run('empty-fresh',lock=False)
-  logged,_=self.make_run('logged',lock=False,mtime=now-120);(logged/'bridge.log').write_text('fixture')  # any other file keeps the week
+  # Backdate after writing, not through make_run: creating a file resets the directory mtime,
+  # and a record with no status.json has nothing else to date it — written the other way round
+  # these two come out 0 s old and survive on the 60 s floor without ever reaching run_dir_empty.
+  logged,_=self.make_run('logged',lock=False);(logged/'bridge.log').write_text('fixture');os.utime(logged,(now-120,now-120))  # any other file keeps the week
+  corrupt,_=self.make_run('corrupt',lock=False);(corrupt/'status.json').write_text('{not json');os.utime(corrupt,(now-120,now-120))  # an unreadable status is content too
   with contextlib.redirect_stdout(io.StringIO()) as out:
    show_status(self.manager)
   self.assertFalse(empty.exists());self.assertFalse(lock_only.exists())
-  self.assertTrue(fresh.exists());self.assertTrue(logged.exists())
+  self.assertTrue(fresh.exists());self.assertTrue(logged.exists());self.assertTrue(corrupt.exists())
   report=json.loads(out.getvalue())
   self.assertEqual(report['pruned'],2)
   self.assertEqual(sorted((r['run'],r['rule'],r['account'],r['event']) for r in report['prunedRuns']),
