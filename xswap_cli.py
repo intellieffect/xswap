@@ -18,13 +18,25 @@ import uuid
 from xswap_live import AccountPool, Bridge, LiveError, validate_threshold
 
 
+# `upgrade` is Codex's own name for the standalone updater and was in neither set, so
+# interactive_args called it interactive: a wrapped `codex upgrade` ran inside the bridge,
+# whose CODEX_HOME is auto/cli-codex, and installed the release into xswap's own state --
+# the accident `xswap relocate-codex` exists to undo.
 NON_INTERACTIVE = {'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'mcp-server',
-    'app-server', 'remote-control', 'app', 'completion', 'update', 'doctor', 'sandbox',
-    'debug', 'apply', 'queue', 'archive', 'delete', 'migrate-rollouts', 'unarchive',
-    'cloud', 'exec-server', 'features', 'help'}
+    'app-server', 'remote-control', 'app', 'completion', 'update', 'upgrade', 'doctor',
+    'sandbox', 'debug', 'apply', 'queue', 'archive', 'delete', 'migrate-rollouts',
+    'unarchive', 'cloud', 'exec-server', 'features', 'help'}
 VALUE_FLAGS = {'-c', '--config', '-C', '--cd', '-m', '--model', '-p', '--profile', '-s',
     '--sandbox', '-a', '--ask-for-approval', '--enable', '--disable', '-i', '--image',
     '--add-dir', '--local-provider', '--remote', '--remote-auth-token-env'}
+# Pass-through subcommands that keep the caller's own Codex home. They manage the
+# caller's sign-in, installation, shell, or desktop app rather than run a task as an
+# account: `login`/`logout` write the caller's auth.json, `app` opens the Desktop app
+# through `open` (the injected env would not reach it), `app-server` is spawned by the
+# bridge/desktop/usage code with an explicit env, and `update`/`upgrade` install the next
+# Codex release under $CODEX_HOME/packages/standalone/, which must never be a profile.
+PASSTHROUGH_EXCLUDED = {'login', 'logout', 'app', 'app-server', 'completion', 'help',
+    'update', 'upgrade'}
 
 
 def interactive_args(args):
@@ -40,6 +52,28 @@ def interactive_args(args):
         elif not arg.startswith('-'):
             return arg not in NON_INTERACTIVE
     return True
+
+
+def passthrough_subcommand(args):
+    """The Codex subcommand a pass-through invocation runs as an xswap account, or None.
+
+    None keeps the caller's own home: --help/--version/--remote forms, a bare
+    invocation (interactive, so it never reaches pass-through while automatic
+    switching is on), and PASSTHROUGH_EXCLUDED subcommands. Skips option values the
+    same way interactive_args does, so `codex -m gpt-5 exec ...` resolves to `exec`.
+    """
+    if any(a in ('--help', '-h', '--version', '-V', '--remote') or a.startswith('--remote=') for a in args):
+        return None
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in VALUE_FLAGS:
+            skip = True
+        elif not arg.startswith('-'):
+            return None if arg in PASSTHROUGH_EXCLUDED else arg
+    return None
 
 
 def server_overrides(args):
@@ -836,6 +870,60 @@ def disable(manager):
     print('Auto switching disabled for new sessions. Running auto sessions remain active.')
 
 
+def passthrough_account(manager):
+    """The account a pass-through Codex command runs as.
+
+    Same resolution as `xswap run -- exec ...` without --account (Manager.launch_cli
+    -> Manager.account(None)): the directory mapping for the cwd, else the account
+    selected with `xswap use`. Returns (name, home, mapping_path); mapping_path is
+    None when the selection decided. Raises SwapError with a short, non-secret reason
+    when no usable account resolves; the caller then keeps the caller's own home.
+    """
+    from codex_swap import SwapError, check_file_store, identity
+    name, mapped = manager.resolve_default()
+    if not name:
+        raise SwapError('no account selected; run: xswap use NAME')
+    name, home = manager.account(name)
+    if manager.read()['accounts'][name].get('disabled'):
+        raise SwapError(f'account {name} is disabled; run: xswap enable {name}')
+    check_file_store(home)
+    if identity(home) in ('not signed in', 'unreadable auth cache'):
+        raise SwapError(f'account {name} is not signed in; run: xswap login {name}')
+    return name, home, mapped
+
+
+def passthrough_env(manager, args):
+    """Environment for a pass-through Codex command while automatic switching is on.
+
+    `codex exec`, `review`, and the other non-interactive subcommands have no --remote
+    hook, so the bridge cannot carry them; before 0.8.0 they ran with the caller's own
+    environment, i.e. against ~/.codex and whichever account was signed in there,
+    silently ignoring the xswap selection. They now run once as the resolved account
+    with the same secret stripping as every other xswap launch (Manager.env). The
+    caller's environment is returned unchanged and without a notice for an explicit
+    CODEX_HOME, for --help/--version/--remote forms, and for PASSTHROUGH_EXCLUDED
+    subcommands; it is returned unchanged with one warning when no usable account
+    resolves. Never raises. XSWAP_QUIET=1 silences only the informational line.
+    """
+    from codex_swap import SwapError
+    from xswap_plugins import ensure_plugins
+    sub = passthrough_subcommand(args)
+    if sub is None or os.environ.get('CODEX_HOME'):
+        return dict(os.environ)
+    try:
+        name, home, mapped = passthrough_account(manager)
+        ensure_plugins(home, manager.source)
+    except (SwapError, LiveError, OSError) as error:
+        reason = str(error) if isinstance(error, (SwapError, LiveError)) else (error.strerror or type(error).__name__)
+        print(f'xswap: codex {sub} is running with its own home {manager.source}, not the xswap selection ({reason})',
+              file=sys.stderr, flush=True)
+        return dict(os.environ)
+    if os.environ.get('XSWAP_QUIET') != '1':
+        print(f'xswap: running codex {sub} as {name}' + (f' (mapped by {mapped})' if mapped else ''),
+              file=sys.stderr, flush=True)
+    return manager.env(home)
+
+
 def missing_codex_message(real, settings):
     """One explicit stderr line for a wrapped codex entry with no real Codex behind it
     (a purged runtime home that held the release, or a lost auto.json record)."""
@@ -855,9 +943,13 @@ def codex_main():
             print(missing_codex_message(real, settings), file=sys.stderr)
             return 1
         args = sys.argv[1:]
-        if settings.get('enabled') and interactive_args(args) and os.environ.get('XSWAP_BYPASS') != '1':
+        bypass = os.environ.get('XSWAP_BYPASS') == '1'
+        if settings.get('enabled') and interactive_args(args) and not bypass:
             return launch_cli(manager, ','.join(settings['accounts']), args)
-        os.execve(real, [real, *args], dict(os.environ))
+        env = dict(os.environ)
+        if settings.get('enabled') and not bypass:
+            env = passthrough_env(manager, args)
+        os.execve(real, [real, *args], env)
     except BusyThreadError as error:
         print('xswap: ' + str(error), file=sys.stderr)
         return 1

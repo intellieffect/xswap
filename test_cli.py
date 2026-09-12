@@ -7,14 +7,14 @@ import time
 from unittest import TestCase
 from unittest.mock import patch
 import test_codex_swap
-from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper
+from xswap_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper, codex_main, passthrough_subcommand
 
 class CliTests(TestCase):
  setUp=test_codex_swap.AccountTests.setUp
  def test_routes_interactive_only(self):
   for args in ([],['hello'],['resume','--last'],['fork'],['-m','gpt-5','hello'],['--config','a=1','resume']):
    self.assertTrue(interactive_args(args),args)
-  for args in (['exec','hi'],['-m','gpt-5','exec','hi'],['login'],['--version'],['--remote','unix:///tmp/a']):
+  for args in (['exec','hi'],['-m','gpt-5','exec','hi'],['login'],['--version'],['--remote','unix:///tmp/a'],['upgrade']):
    self.assertFalse(interactive_args(args),args)
  def test_server_configuration_forwarding(self):
   self.assertEqual(server_overrides(['-m','x','-c','a=1','--enable','foo','--config=b=2','--disable=bar','-C','/tmp','hello']),['-c','a=1','--enable','foo','--config=b=2','--disable=bar'])
@@ -556,6 +556,141 @@ class CliTests(TestCase):
   self.assertTrue(target.exists())
   self.assertTrue(link.is_symlink())
   self.assertEqual(json.loads(out.getvalue())['pruned'],0)
+
+class PassthroughTests(TestCase):
+ # `codex exec` and the other non-interactive subcommands reach the real Codex through
+ # os.execve; the wrapper must hand them the xswap-selected account's home the way
+ # `xswap run -- exec` does, or say why it could not (audit item 3, INT-5186).
+ setUp=CliTests.setUp
+ setup_pool=CliTests.setup_pool
+ wrapped_fixture=CliTests.wrapped_fixture
+ def wrap(self):
+  # Connected codex command: `main` (self.source, signed in) is selected, `second` is prepared but not signed in.
+  real,updated,proxy,cli=self.wrapped_fixture()
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  self.which=which
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()):
+   enable(self.manager,'main,second',wrap=True)
+  return real
+ def run_wrapper(self,args,extra_env=None):
+  # Invoke the wrapped codex entry with os.execve captured; returns (path, argv, env, stderr).
+  calls=[]
+  environ={'OPENAI_API_KEY':'do-not-inherit','CODEX_API_KEY':'do-not-inherit',**(extra_env or {})}
+  with patch('codex_swap.Manager',return_value=self.manager),patch.dict(os.environ,environ),patch('sys.argv',['xswap-codex',*args]),patch('xswap_cli.os.execve',side_effect=lambda path,argv,env:calls.append((path,argv,env))),contextlib.redirect_stderr(io.StringIO()) as err:
+   for key in ('CODEX_HOME','XSWAP_BYPASS','XSWAP_QUIET'):
+    if key not in environ:os.environ.pop(key,None)
+   self.assertIsNone(codex_main())
+  self.assertEqual(len(calls),1,args)
+  path,argv,env=calls[0]
+  return path,argv,env,err.getvalue()
+ def signed_in_second(self):
+  from codex_swap import atomic_json
+  second=self.manager.account('second')[1];atomic_json(second/'auth.json',self.auth)
+  return second
+ def mapped_project(self,name):
+  project=self.base/'project';project.mkdir(exist_ok=True)
+  self.manager.map_dir(name,str(project))
+  self.addCleanup(os.chdir,os.getcwd());os.chdir(project)
+  return project
+ def test_passthrough_subcommand_skips_option_values_and_excludes_install_commands(self):
+  for args,expected in ((['exec','hi'],'exec'),(['e','hi'],'e'),(['-c','a=1','-m','gpt-5','review'],'review'),(['--config=a=1','mcp','list'],'mcp'),(['mcp-server'],'mcp-server'),(['doctor'],'doctor'),(['login'],None),(['logout'],None),(['app'],None),(['app-server','--stdio'],None),(['completion','zsh'],None),(['help'],None),(['update'],None),(['upgrade'],None),(['--version'],None),(['exec','-h'],None),(['--remote=unix:///tmp/a'],None),([],None)):
+   self.assertEqual(passthrough_subcommand(args),expected,args)
+ def test_exec_runs_as_the_selected_account_without_inherited_secrets(self):
+  real=self.wrap()
+  path,argv,env,err=self.run_wrapper(['exec','hi'])
+  self.assertEqual((path,argv),(str(real),[str(real),'exec','hi']))
+  self.assertEqual(env['CODEX_HOME'],str(self.source))
+  for key in ('OPENAI_API_KEY','CODEX_API_KEY'):
+   self.assertNotIn(key,env)
+  self.assertEqual(err,'xswap: running codex exec as main\n')
+  self.assertNotIn('fake-token',err)
+ def test_directory_mapping_wins_over_the_selection(self):
+  self.wrap()
+  second=self.signed_in_second()
+  project=self.mapped_project('second')
+  _,argv,env,err=self.run_wrapper(['-m','gpt-5','review'])
+  self.assertEqual(argv[1:],['-m','gpt-5','review'])
+  self.assertEqual(env['CODEX_HOME'],str(second))
+  self.assertEqual(err,f'xswap: running codex review as second (mapped by {project})\n')
+ def test_excluded_commands_and_flags_keep_the_callers_home_silently(self):
+  self.wrap()
+  for args in (['login'],['logout','--all'],['app'],['app-server','--stdio'],['completion','zsh'],['help','exec'],['update'],['upgrade'],['--version'],['exec','--help'],['-h'],['--remote','unix:///tmp/a','exec','hi']):
+   _,argv,env,err=self.run_wrapper(args)
+   self.assertEqual(argv[1:],args)
+   self.assertNotIn('CODEX_HOME',env,args)
+   self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit',args)
+   self.assertEqual(err,'',args)
+ def test_explicit_codex_home_and_bypass_are_respected(self):
+  self.wrap()
+  elsewhere=str(self.base/'elsewhere')
+  _,_,env,err=self.run_wrapper(['exec','hi'],{'CODEX_HOME':elsewhere})
+  self.assertEqual(env['CODEX_HOME'],elsewhere);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit');self.assertEqual(err,'')
+  _,_,env,err=self.run_wrapper(['exec','hi'],{'XSWAP_BYPASS':'1'})
+  self.assertNotIn('CODEX_HOME',env);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit');self.assertEqual(err,'')
+ def test_disabled_or_unsigned_selection_falls_back_with_a_warning(self):
+  self.wrap()
+  self.manager.set_disabled('main',True)
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit')
+  self.assertEqual(err,f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection (account main is disabled; run: xswap enable main)\n')
+  self.manager.set_disabled('main',False)
+  self.mapped_project('second')  # prepared, never signed in
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env)
+  self.assertEqual(err,f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection (account second is not signed in; run: xswap login second)\n')
+ def test_no_selected_account_falls_back_with_a_warning(self):
+  from codex_swap import atomic_json
+  self.wrap()
+  data=self.manager.read();data['active']=None;atomic_json(self.manager.registry,data)
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit')
+  self.assertEqual(err,f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection (no account selected; run: xswap use NAME)\n')
+ def test_keyring_store_falls_back_with_the_store_reason(self):
+  self.wrap()
+  second=self.signed_in_second()
+  (second/'config.toml').unlink();(second/'config.toml').write_text('cli_auth_credentials_store = "keyring"\n')
+  self.mapped_project('second')
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env)
+  self.assertTrue(err.startswith(f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection ('),err)
+  self.assertIn("credential storage is 'keyring'",err);self.assertNotIn('fake-token',err)
+ def test_quiet_env_silences_the_notice_but_not_the_warning(self):
+  self.wrap()
+  _,_,env,err=self.run_wrapper(['exec','hi'],{'XSWAP_QUIET':'1'})
+  self.assertEqual(env['CODEX_HOME'],str(self.source));self.assertNotIn('OPENAI_API_KEY',env);self.assertEqual(err,'')
+  self.manager.set_disabled('main',True)
+  _,_,env,err=self.run_wrapper(['exec','hi'],{'XSWAP_QUIET':'1'})
+  self.assertNotIn('CODEX_HOME',env);self.assertIn('account main is disabled; run: xswap enable main',err)
+ def test_disabled_auto_mode_leaves_pass_through_untouched(self):
+  self.wrap()
+  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+   disable(self.manager)
+  # xswap-codex reached by name, or through a link disable() could not restore, stays transparent.
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit');self.assertEqual(err,'')
+ def test_interactive_invocations_still_take_the_bridge(self):
+  # Guard: the pass-through branch must not swallow the interactive path.
+  self.wrap()
+  with patch('codex_swap.Manager',return_value=self.manager),patch.dict(os.environ,{}),patch('sys.argv',['xswap-codex','hello']),patch('xswap_cli.launch_cli',return_value=0) as bridge,patch('xswap_cli.os.execve') as execve:
+   os.environ.pop('CODEX_HOME',None);os.environ.pop('XSWAP_BYPASS',None)
+   self.assertEqual(codex_main(),0)
+  bridge.assert_called_once_with(self.manager,'main,second',['hello'])
+  execve.assert_not_called()
+ def test_run_upgrade_launches_into_the_profile_home_instead_of_the_bridge(self):
+  # `upgrade` was in neither subcommand set, so `xswap run -- upgrade` was treated as
+  # interactive and installed the release with CODEX_HOME=auto/cli-codex. It now launches
+  # directly; the profile's `packages` link is what keeps the release out of xswap's state.
+  real=self.wrap()
+  second=self.signed_in_second()
+  self.mapped_project('second')
+  calls=[]
+  with patch('shutil.which',side_effect=self.which),patch('xswap_cli.launch_cli') as bridge,patch('codex_swap.subprocess.call',side_effect=lambda command,env:calls.append((command,env)) or 0):
+   self.assertEqual(self.manager.launch_cli(None,['upgrade']),0)
+  bridge.assert_not_called()
+  command,env=calls[0]
+  self.assertEqual(command,[str(real),'upgrade'])
+  self.assertEqual(env['CODEX_HOME'],str(second))
+  self.assertEqual(os.readlink(second/'packages'),str(self.source/'packages'))
 
 class ResumeHomeTests(TestCase):
  session_id='00000000-0000-4000-8000-000000000001'

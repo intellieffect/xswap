@@ -113,7 +113,7 @@ xswap auto-status
 xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 ```
 
-`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원하며, `codex exec`, login/logout 등 비대화형 명령과 명시적 `--remote` 연결은 원래 Codex로 전달되어 자동 전환 대상이 아닙니다. `codex exec`에는 `--remote`가 없어 이 실시간 전환이 보호하지 못하므로, 실행 직전 잔여량이 가장 많은 계정을 한 번만 고르는 `xswap run --best`로만 다룹니다.
+`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원합니다. `codex exec`, `review` 등 `--remote` 훅이 없는 비대화형 명령은 실행 중 전환되지는 않지만, `codex` 명령이 연결된 뒤에는 `xswap run -- exec …`와 같은 규칙(현재 디렉터리 매핑, 없으면 `xswap use`로 선택한 계정)으로 선택 계정의 `CODEX_HOME`을 넣고 셸의 `OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_ACCESS_TOKEN`을 제거한 채 한 번 실행되며, stderr에 `xswap: running codex exec as work` 한 줄을 남깁니다(`XSWAP_QUIET=1`은 이 줄만 숨깁니다). `CODEX_HOME`이 이미 설정됐거나 `XSWAP_BYPASS=1`인 경우, `--help`/`--version`/`--remote` 형식, 그리고 `login`, `logout`, `app`, `app-server`, `completion`, `help`, `update`, `upgrade`는 알림 없이 원래 홈으로 전달됩니다(`codex update`·`codex upgrade`가 계정 프로필 안에 릴리스를 설치하면 안 되기 때문입니다). 선택 계정이 비활성·미로그인 등으로 쓸 수 없으면 원래 홈으로 실행하고 이유와 조치를 한 줄 경고로 출력합니다. 잔여량 기준으로 고르려면 `xswap run --best -- exec …`를 사용하십시오. 0.8.0 이전에 저장된 `codex exec` 세션은 `~/.codex/sessions`에 남아 있으며 `XSWAP_BYPASS=1 codex exec resume …`로 이어갈 수 있습니다.
 
 자동 모드 앱과 CLI는 각각 **실행 중인 한 개의 Codex 서버와 대화 저장소를 유지**합니다. CLI는 원본 TUI 프로세스도 그대로 유지하며 사용자 전용 Unix WebSocket으로 서버와 연결합니다. TCP 포트를 열지 않습니다. 앱과 CLI 저장소는 분리되어 있습니다. 새 턴 전에 현재 사용량을 확인하고, 적용되는 한도가 소진되면 잔여량이 확인된 다음 계정으로 인증을 바꿉니다. 한도 정보는 최대 30초 동안 재사용하며, Codex의 한도 알림으로 갱신합니다. 모델별 한도를 확인할 수 없는 후보는 선택하지 않습니다.
 
