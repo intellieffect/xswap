@@ -305,6 +305,30 @@ class RelocateTests(TestCase):
         self.assertFalse((runtime / 'packages').is_symlink())
         self.assertEqual((self.manager.root / 'auto.json').read_bytes(), before)
 
+    def test_refuses_when_two_owned_homes_hold_the_same_release(self):
+        # Two surfaces updated to the same version: ctrl+u inside a bridged session left
+        # 0.154.0 under auto/cli-codex, and an update under `xswap run second` left it in a
+        # profile home created before 0.8.0. `destination.exists()` cannot see the plan
+        # being built, so both entries claimed the same destination and the second rename
+        # failed with "Directory not empty" once the first release had already moved.
+        runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
+        second = self.manager.prepare('second')
+        (second / 'packages').unlink()  # a profile created before 0.8.0 has no link
+        duplicate = install_release(second / 'packages' / 'standalone', NEW, current=True)
+        before = (self.manager.root / 'auto.json').read_bytes()
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(['relocate-codex']), 1)
+        self.assertIn(str(second / 'packages' / 'standalone' / 'releases' / NEW), err.getvalue())
+        self.assertIn(str(standalone / 'releases' / NEW), err.getvalue())
+        self.assertIn('Nothing was changed', err.getvalue())
+        self.assertEqual(binary.read_text(), 'release ' + NEW)
+        self.assertEqual(duplicate.read_text(), 'release ' + NEW)
+        self.assertTrue((standalone / 'releases' / OLD / 'bin' / 'codex').is_file())
+        self.assertFalse((self.source / 'packages' / 'standalone').exists())
+        self.assertFalse((runtime / 'packages').is_symlink())
+        self.assertFalse((second / 'packages').is_symlink())
+        self.assertEqual((self.manager.root / 'auto.json').read_bytes(), before)
+
     def test_refuses_an_interrupted_install_without_moving_anything(self):
         runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
         (standalone / 'releases' / '.staging.123').mkdir()

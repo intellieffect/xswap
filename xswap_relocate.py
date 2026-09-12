@@ -241,11 +241,21 @@ def plan_relocation(manager):
     if reference is None:
         raise SwapError(f'no reference Codex home outside {manager.root}: CODEX_HOME ({manager.source}) must be an existing directory outside the xswap state directory. Nothing was changed.')
     ref_releases = reference / 'packages' / 'standalone' / 'releases'
+    claimed = {}
     for entry in homes:
         for release in entry['releases']:
             destination = ref_releases / release.name
             if destination.exists() or destination.is_symlink():
                 raise SwapError(f'refusing to move {release}: {destination} already exists. Remove or rename one copy, then retry. Nothing was changed.')
+            # The check above asks the filesystem, which cannot see the plan being built. Two
+            # owned homes updated to the same version (ctrl+u in one, `xswap run NAME` in the
+            # other) claim the same destination, and the second os.rename then fails with
+            # ENOTEMPTY once the first release has already moved -- a half-migration the user
+            # can only finish by hand. Refuse here, while nothing has been changed.
+            if destination in claimed:
+                raise SwapError(f'refusing to move {release}: {claimed[destination]} is the same release and would '
+                                f'move to the same {destination}. Remove or rename one copy, then retry. Nothing was changed.')
+            claimed[destination] = release
             plan['moves'].append((release, destination))
     moved = {release.name for release, _ in plan['moves']}
 
