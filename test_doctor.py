@@ -233,10 +233,25 @@ class DoctorTests(unittest.TestCase):
         row = doctor.check_wrapper(settings)
         self.assertEqual(row["status"], "OK")
 
-    def test_check_wrapper_changed_externally_names_the_reconnect_command(self):
-        link = self.base / "codex-link-3"
-        link.symlink_to("/something-else")
-        settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
+    def wrapped_entry(self, target, enabled=True):
+        """A recorded wrapper whose codex entry currently points at `target` (dangling allowed)."""
+        link = self.base / "codex-entry"
+        link.symlink_to(target)
+        settings = {"enabled": enabled, "accounts": ["main", "work"],
+                    "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
+                                "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}}
+        return link, settings
+
+    def executable(self, name):
+        path = self.base / name
+        path.write_text("fixture")
+        path.chmod(0o700)
+        return path
+
+    def test_check_wrapper_replaced_by_update_names_the_reconnect_command(self):
+        # A user-owned link re-pointed at another executable while switching is on: the next
+        # launch, list, or use reconnects it, and doctor still names the manual command.
+        link, settings = self.wrapped_entry(self.executable("release-codex"))
         row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
         self.assertEqual(row["status"], "WARN")
         self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
@@ -248,6 +263,93 @@ class DoctorTests(unittest.TestCase):
         settings = {"wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex"}}
         row = doctor.check_wrapper(settings)
         self.assertEqual(row["status"], "WARN")
+
+    # --- check_wrapper: conditions xswap deliberately leaves alone (INT-5186 item 10) ---
+
+    def test_check_wrapper_dangling_target_names_reason_and_manual_fix(self):
+        gone = self.base / "gone"
+        link, settings = self.wrapped_entry(gone)
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("codex command not connected (dangling-target): ", row["detail"])
+        self.assertIn(f"{link} -> {gone} does not exist, so xswap leaves it alone. Fix: reinstall Codex", row["detail"])
+        self.assertIn("then run: xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
+        self.assertNotIn("reconnects it", row["detail"])
+        self.assertEqual(os.readlink(link), str(gone))  # doctor stays read-only
+
+    def test_check_wrapper_not_executable_target(self):
+        notes = self.base / "notes.txt"
+        notes.write_text("fixture")
+        link, settings = self.wrapped_entry(notes)
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(not-executable): ", row["detail"])
+        self.assertIn(f"{link} -> {notes} is not an executable file", row["detail"])
+        self.assertIn("Fix: point the link at a Codex executable, then run: xswap auto-enable", row["detail"])
+
+    def test_check_wrapper_regular_file_where_the_link_was(self):
+        link, settings = self.wrapped_entry(self.executable("release-codex"))
+        link.unlink()
+        link.write_text("fixture")
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(not-a-symlink): ", row["detail"])
+        self.assertIn(f"{link} is not a symlink, so xswap leaves it alone. Fix: replace it with a user-owned symlink", row["detail"])
+
+    def test_check_wrapper_missing_entry(self):
+        link, settings = self.wrapped_entry(self.executable("release-codex"))
+        link.unlink()
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(missing): ", row["detail"])
+        self.assertIn(f"{link} does not exist. Fix: reinstall Codex or recreate the link, then run: xswap auto-enable", row["detail"])
+
+    def test_check_wrapper_foreign_owner(self):
+        link, settings = self.wrapped_entry(self.executable("release-codex"))
+        with patch("os.getuid", return_value=os.getuid() + 1):
+            row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(not-user-owned): ", row["detail"])
+        self.assertIn(f"{link} is not owned by this user, so xswap leaves it alone. Fix: make it a user-owned symlink", row["detail"])
+
+    def test_check_wrapper_unreadable_entry(self):
+        link, settings = self.wrapped_entry(self.executable("release-codex"))
+        with patch("os.readlink", side_effect=PermissionError(13, "Permission denied")):
+            row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(unreadable): ", row["detail"])
+        self.assertIn(f"{link} could not be inspected (Permission denied)", row["detail"])
+        self.assertNotIn("fixture", row["detail"])
+
+    def test_check_wrapper_auto_disabled_reads_like_not_connected(self):
+        # After `xswap auto-disable` the wrapper record stays and the link points at the
+        # release; nothing reconnects it, so say so, WARN only once two accounts could switch.
+        release = self.executable("release-codex")
+        link, settings = self.wrapped_entry(release, enabled=False)
+        row = doctor.check_wrapper(settings, {"main": {}, "work": {}})
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(auto-disabled): ", row["detail"])
+        self.assertIn(f"automatic switching is disabled, so xswap leaves {link} alone (-> {release})", row["detail"])
+        self.assertIn("Fix: enable automatic switching and connect it: xswap auto-enable --accounts main,work --wrap-codex", row["detail"])
+        self.assertNotIn("changed outside xswap", row["detail"])
+        row = doctor.check_wrapper(settings, {"main": {}})
+        self.assertEqual(row["status"], "OK")
+        self.assertIn("(auto-disabled): ", row["detail"])
+        self.assertIn("xswap auto-enable --accounts main --wrap-codex", row["detail"])
+
+    def test_doctor_run_reports_wrapper_skip_reason_and_leaves_the_link_alone(self):
+        self.register_main()
+        gone = self.base / "gone"
+        link, settings = self.wrapped_entry(gone)
+        atomic_json(self.manager.root / "auto.json", settings)
+        results = self.run_doctor()
+        row = find(results, "wrapper")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("(dangling-target): ", row["detail"])
+        self.assertEqual(os.readlink(link), str(gone))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 1)  # auto pool: "work" is not registered
+        self.assertEqual(find(results, "auto pool")["status"], "FAIL")
 
     # --- auto pool ---
 

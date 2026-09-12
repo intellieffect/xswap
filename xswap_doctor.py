@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import read_settings
+from xswap_cli import describe_drift, read_settings, wrapper_drift
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
@@ -83,12 +83,20 @@ def check_wrapper(settings, accounts=()):
             return check("wrapper", WARN, "codex command not connected; plain codex ignores the xswap "
                          f"selection. Connect it: {reconnect}")
         return check("wrapper", OK, "codex command not connected")
-    path = Path(wrapper.get("path", ""))
-    if path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
-        return check("wrapper", OK, f"{path} -> xswap-codex")
-    return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
-                 f"plain codex is disconnected until the next xswap launch, list, or use reconnects it. "
-                 f"Reconnect it now: {reconnect}")
+    drift = wrapper_drift(settings)
+    if drift["reason"] == "ok":
+        return check("wrapper", OK, f"{drift['path']} -> xswap-codex")
+    if drift["action"] == "reconnect":
+        return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
+                     f"plain codex is disconnected until the next xswap launch, list, or use reconnects it. "
+                     f"Reconnect it now: {reconnect}")
+    # xswap deliberately left the entry alone: say which condition and the manual fix, since no
+    # later launch, list, or use will close this gap -- promising one (as 0.7.8 did for every
+    # non-ok entry) is what kept the 2026-09-10 bypass looking temporary. After `auto-disable`
+    # this is the normal state and reads like "not connected" (WARN only once switching matters).
+    cause, fix = describe_drift(drift, reconnect)
+    status = OK if drift["reason"] == "auto-disabled" and len(names) < 2 else WARN
+    return check("wrapper", status, f"codex command not connected ({drift['reason']}): {cause}. Fix: {fix}")
 
 
 def check_credential_store(manager):

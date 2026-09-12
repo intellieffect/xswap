@@ -319,6 +319,45 @@ class AccountTests(unittest.TestCase):
         self.assertIn("Selected work.", text)
         self.assertNotIn("not connected", text)
 
+    def test_use_names_why_the_codex_entry_was_left_alone(self):
+        # A recorded wrapper whose link now dangles: reconnect_wrapper stays silent, so the
+        # selection notice carries the classified reason and the manual fix, exactly once.
+        self.manager.register("main")
+        link = self.base / "codex-link"
+        gone = self.base / "gone"
+        link.symlink_to(gone)
+        def connect():
+            atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
+                                    "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
+        # A pinned PATH keeps the notice off this machine's own `codex`.
+        with patch.dict(os.environ, {"PATH": str(self.base)}):
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertIn(f"Note: the codex command is not connected to xswap (dangling-target): {link} -> {gone} does not exist, so xswap leaves it alone. Plain `codex` keeps using {self.source} (ChatGPT)", text)
+        self.assertIn("Fix: reinstall Codex or point the link at a Codex executable, then run: xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertEqual(text.count("not connected"), 1)
+        self.assertNotIn("fake-token", text)
+        self.assertEqual(os.readlink(link), str(gone))
+
+    def test_use_says_switching_is_off_instead_of_blaming_an_outside_change(self):
+        self.manager.register("main")
+        release = self.base / "release-codex"
+        release.write_text("fixture")
+        release.chmod(0o700)
+        link = self.base / "codex-link"
+        link.symlink_to(release)
+        def disabled():
+            atomic_json(self.manager.root / "auto.json", {"enabled": False, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
+                                    "originalTarget": str(release), "realCodex": str(release)}})
+        with patch.dict(os.environ, {"PATH": str(self.base)}):
+            text = self._add_work_and_use("work", before=disabled)
+        self.assertIn(f"(auto-disabled): automatic switching is disabled, so xswap leaves {link} alone (-> {release}).", text)
+        self.assertIn("Fix: enable automatic switching and connect it: xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertEqual(text.count("not connected"), 1)
+        self.assertEqual(os.readlink(link), str(release))
+
     def test_use_without_bridges_says_so_instead_of_dumping_zero_counters(self):
         from codex_swap import describe_switch_report
         self.assertEqual(describe_switch_report({'applied': 0, 'pending': 0, 'unsupported': 0, 'failed': 0, 'unconfirmed': 0}, 'work'),

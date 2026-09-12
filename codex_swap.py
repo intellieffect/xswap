@@ -181,21 +181,20 @@ def plain_codex_notice(manager, selected_home):
     """Explain when the ordinary `codex` command still bypasses the xswap selection.
 
     Returns None when the codex wrapper is connected or when plain codex already
-    uses the selected home. Only local labels and paths; never tokens.
+    uses the selected home. When a wrapper is recorded but reconnect_wrapper left
+    the entry alone, the note names that reason and its manual fix once (the
+    reconnect itself stays silent on skips). Only local labels and paths; never tokens.
     """
-    from xswap_cli import read_settings, reconnect_wrapper
+    from xswap_cli import describe_drift, read_settings, reconnect_wrapper, wrapper_drift
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
-        wrapper = read_settings(manager).get("wrapper") or {}
+        settings = read_settings(manager)
     except LiveError:
-        wrapper = {}
-    try:
-        path = Path(wrapper.get("path", ""))
-        if wrapper and path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
-            return None
-    except OSError:
-        pass
+        settings = {}
+    drift = wrapper_drift(settings)
+    if drift["reason"] == "ok":
+        return None
     if Path(selected_home).expanduser().resolve() == manager.source:
         return None
     try:
@@ -203,9 +202,15 @@ def plain_codex_notice(manager, selected_home):
     except SwapError:
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
+    reconnect = f"xswap auto-enable --accounts {names} --wrap-codex"
+    cause, fix = describe_drift(drift, reconnect)
+    if cause:
+        return (f"Note: the codex command is not connected to xswap ({drift['reason']}): {cause}. "
+                f"Plain `codex` keeps using {manager.source} ({label}); this selection applies only "
+                f"to xswap and xswap app. Fix: {fix}")
     return ("Note: the codex command is not connected to xswap. Plain `codex` keeps using "
             f"{manager.source} ({label}); this selection applies only to xswap and xswap app. "
-            f"Connect it: xswap auto-enable --accounts {names} --wrap-codex")
+            f"Connect it: {reconnect}")
 
 
 def describe_switch_report(report, name):

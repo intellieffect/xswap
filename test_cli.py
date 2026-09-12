@@ -80,6 +80,84 @@ class CliTests(TestCase):
    cli.unlink();cli.symlink_to(updated)  # executable, but automatic switching is off
    self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(updated))
    self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'],str(real))
+ def drift(self):
+  from xswap_cli import wrapper_drift
+  return wrapper_drift(read_settings(self.manager))
+ def test_wrapper_drift_names_every_skip_reason_and_reconnect_stays_silent(self):
+  # Every condition that used to be a bare None now carries a classified reason; reconnect_wrapper
+  # still returns None, leaves the link alone, and prints nothing for each of them (INT-5186 item 10).
+  from xswap_cli import DRIFT_REASONS, status_data
+  real,updated,proxy,cli=self.wrapped_fixture()
+  def which(name):return str(proxy if name=='xswap-codex' else cli)
+  with patch('shutil.which',side_effect=which),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()) as err:
+   enable(self.manager,'main,second',wrap=True)
+   self.assertEqual(self.drift(),{'action':'skip','reason':'ok','path':str(cli),'target':str(proxy),'real':str(proxy),'proxy':str(proxy),'error':None})
+   state=status_data(self.manager,cleanup=False)
+   self.assertEqual((state['codexWrapped'],state['wrapperReason']),(True,'ok'))
+   seen={}
+   cli.unlink();cli.symlink_to(self.base/'missing')
+   seen['dangling-target']=self.drift()
+   plain=self.base/'notes.txt';plain.write_text('fixture');cli.unlink();cli.symlink_to(plain)
+   seen['not-executable']=self.drift()
+   cli.unlink();cli.write_text('fixture')  # a reinstall dropped a regular file where the link was
+   seen['not-a-symlink']=self.drift()
+   cli.unlink()
+   seen['missing']=self.drift()
+   cli.symlink_to(updated)
+   with patch('os.getuid',return_value=os.getuid()+1):
+    seen['not-user-owned']=self.drift()
+   with patch('os.readlink',side_effect=PermissionError(13,'Permission denied')):
+    seen['unreadable']=self.drift()
+   for reason,drift in seen.items():
+    self.assertEqual((drift['action'],drift['reason'],drift['path'],drift['proxy']),('skip',reason,str(cli),str(proxy)),reason)
+    self.assertIn(reason,DRIFT_REASONS)
+   self.assertEqual(seen['dangling-target']['target'],str(self.base/'missing'))
+   self.assertEqual(seen['dangling-target']['real'],str(self.base/'missing'))
+   self.assertEqual(seen['not-executable']['target'],str(plain))
+   self.assertIsNone(seen['missing']['target'])
+   self.assertEqual(seen['not-user-owned']['target'],str(updated))
+   self.assertEqual(seen['unreadable']['error'],'Permission denied')
+   # The only reconnect case: user-owned link at another executable while switching is enabled.
+   drift=self.drift()
+   self.assertEqual((drift['action'],drift['reason'],drift['target'],drift['real']),('reconnect','replaced',str(updated),str(updated)))
+   # Silent skips: re-create each skip state and confirm reconnect_wrapper neither writes nor prints.
+   cli.unlink();cli.symlink_to(self.base/'missing')
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(self.base/'missing'))
+   state=status_data(self.manager,cleanup=False)
+   self.assertEqual((state['codexWrapped'],state['wrapperReason']),(False,'dangling-target'))
+   cli.unlink();cli.write_text('fixture')
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertTrue(cli.is_file() and not cli.is_symlink())
+   cli.unlink()
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertFalse(os.path.lexists(cli))
+   self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'],str(real))
+   self.assertEqual(err.getvalue(),'')
+   cli.symlink_to(proxy)
+   disable(self.manager)
+   cli.unlink();cli.symlink_to(updated)  # executable, but automatic switching is off
+   drift=self.drift()
+   self.assertEqual((drift['action'],drift['reason'],drift['target']),('skip','auto-disabled',str(updated)))
+   self.assertIsNone(reconnect_wrapper(self.manager));self.assertEqual(os.readlink(cli),str(updated))
+   self.assertEqual(err.getvalue(),'')
+ def test_wrapper_drift_without_a_recorded_wrapper(self):
+  from xswap_cli import wrapper_drift
+  empty={'action':'skip','reason':'not-wrapped','path':None,'target':None,'real':None,'proxy':None,'error':None}
+  self.assertEqual(wrapper_drift({}),empty)
+  self.assertEqual(wrapper_drift({'enabled':True,'wrapper':{}}),empty)
+  self.assertEqual(wrapper_drift({'wrapper':{'path':'/x/codex'}}),{**empty,'path':'/x/codex'})  # no proxy recorded
+ def test_describe_drift_pairs_cause_and_fix_without_secrets(self):
+  from xswap_cli import DRIFT_REASONS, describe_drift, wrapper_drift
+  self.assertEqual(describe_drift(wrapper_drift({}),'CMD'),('',''))
+  self.assertEqual(describe_drift({'reason':'ok','path':'/x','target':'/p','real':'/p','proxy':'/p','error':None},'CMD'),('',''))
+  drift={'action':'skip','reason':'dangling-target','path':'/x/codex','target':'/x/gone','real':'/x/gone','proxy':'/x/xswap-codex','error':None}
+  self.assertEqual(describe_drift(drift,'xswap auto-enable --accounts a,b --wrap-codex'),
+   ('/x/codex -> /x/gone does not exist, so xswap leaves it alone','reinstall Codex or point the link at a Codex executable, then run: xswap auto-enable --accounts a,b --wrap-codex'))
+  for reason in DRIFT_REASONS:
+   cause,fix=describe_drift({**drift,'reason':reason,'error':'Permission denied'},'CMD')
+   if reason in ('ok','not-wrapped'):
+    self.assertEqual((cause,fix),('',''),reason)
+   else:
+    self.assertTrue(cause and fix.endswith('CMD'),reason)
+    self.assertNotIn('reconnects it',cause+fix,reason)  # skips never promise an automatic reconnect
  def test_bridged_session_end_reconnects_after_in_session_update(self):
   # ctrl+u runs the updater inside the bridged TUI; the link must be back before the next plain `codex`.
   real,updated,proxy,cli=self.wrapped_fixture()

@@ -460,32 +460,110 @@ def swap_symlink(path, target):
         temporary.unlink(missing_ok=True)
 
 
-def wrapper_drift(settings):
-    """The link target a Codex update left behind on the wrapped codex entry, or None.
+DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'not-user-owned',
+    'dangling-target', 'not-executable', 'auto-disabled', 'unreadable')
+DRIFT_CAUSES = {
+    'replaced': 'a Codex update replaced {path} and xswap could not reconnect it',
+    'missing': '{path} does not exist',
+    'not-a-symlink': '{path} is not a symlink, so xswap leaves it alone',
+    'not-user-owned': '{path} is not owned by this user, so xswap leaves it alone',
+    'dangling-target': '{path} -> {target} does not exist, so xswap leaves it alone',
+    'not-executable': '{path} -> {target} is not an executable file, so xswap leaves it alone',
+    'auto-disabled': 'automatic switching is disabled, so xswap leaves {path} alone (-> {target})',
+    'unreadable': '{path} could not be inspected ({error}), so xswap leaves it alone',
+}
+DRIFT_FIXES = {
+    'replaced': 'reconnect it by hand: {reconnect}',
+    'missing': 'reinstall Codex or recreate the link, then run: {reconnect}',
+    'not-a-symlink': 'replace it with a user-owned symlink to the Codex executable, then run: {reconnect}',
+    'not-user-owned': 'make it a user-owned symlink (or use xswap directly), then run: {reconnect}',
+    'dangling-target': 'reinstall Codex or point the link at a Codex executable, then run: {reconnect}',
+    'not-executable': 'point the link at a Codex executable, then run: {reconnect}',
+    'auto-disabled': 'enable automatic switching and connect it: {reconnect}',
+    'unreadable': 'check its permissions, then run: {reconnect}',
+}
+
+
+def entry_drift(path, proxy, enabled=True):
+    """Classify one `codex` entry against the recorded xswap-codex proxy.
 
     Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install
     script) re-points the user-owned `codex` symlink at its new release and so
-    silently disconnects plain `codex` from xswap. Only a user-owned symlink whose
-    current target is an existing executable other than xswap-codex counts; a
-    dangling or foreign link is left for the user.
+    silently disconnects plain `codex` from xswap. Returns a dict with the same
+    keys every time:
+
+      action  'reconnect' (a user-owned symlink now points at another existing
+              executable and automatic switching is enabled) or 'skip'
+      reason  one of DRIFT_REASONS; 'ok' means the entry runs xswap-codex and
+              'replaced' is the only reason paired with 'reconnect'
+      path    the entry that was judged
+      target  the entry's current link text (may be relative), or None
+      real    that target as an absolute path, or None
+      proxy   the recorded xswap-codex path, or None
+      error   short OS error text for 'unreadable', else None
+
+    Pure: lstat/readlink/access only, never a write. Every condition that used to
+    be a silent None is named, so doctor and use/switch can explain a gap nothing
+    will ever close on its own. A link-state reason wins over `auto-disabled`:
+    those need the same manual repair whether or not switching is on.
     """
+    path = Path(path)
+    result = {'action': 'skip', 'reason': 'replaced', 'path': str(path),
+              'target': None, 'real': None, 'proxy': proxy, 'error': None}
+    try:
+        # lexists, not exists: a dangling symlink still occupies the entry and
+        # takes a different repair than a missing one.
+        if not os.path.lexists(path):
+            return {**result, 'reason': 'missing'}
+        if not path.is_symlink():
+            return {**result, 'reason': 'not-a-symlink'}
+        target = os.readlink(path)
+        result.update(target=target, real=link_target_path(path, target))
+        if target == proxy:
+            return {**result, 'reason': 'ok'}
+        # Ownership is checked after that: an entry already running xswap-codex is
+        # connected whoever owns it, which is the rule doctor has always applied.
+        if path.lstat().st_uid != os.getuid():
+            return {**result, 'reason': 'not-user-owned'}
+        real = Path(result['real'])
+        if not real.is_file():
+            return {**result, 'reason': 'dangling-target'}
+        if not os.access(real, os.X_OK):
+            return {**result, 'reason': 'not-executable'}
+        if real.resolve() == Path(proxy).resolve():
+            return {**result, 'reason': 'ok'}
+    except (OSError, RuntimeError) as error:
+        # RuntimeError: Path.resolve() on a symlink loop before Python 3.13. Its
+        # message quotes the loop's own path, so report the kind of failure only;
+        # the cause sentence already names the entry.
+        return {**result, 'reason': 'unreadable',
+                'error': getattr(error, 'strerror', None) or type(error).__name__}
+    if not enabled:
+        return {**result, 'reason': 'auto-disabled'}
+    return {**result, 'action': 'reconnect', 'reason': 'replaced'}
+
+
+def wrapper_drift(settings):
+    """Classify the recorded codex entry; same keys as entry_drift, plus 'not-wrapped'."""
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
-    path = Path(wrapper.get('path', ''))
     if not proxy or not wrapper.get('path'):
-        return None
-    try:
-        if not path.is_symlink() or path.lstat().st_uid != os.getuid():
-            return None
-        target = os.readlink(path)
-        if target == proxy:
-            return None
-        real = Path(link_target_path(path, target))
-        if not real.is_file() or not os.access(real, os.X_OK) or real.resolve() == Path(proxy).resolve():
-            return None
-    except OSError:
-        return None
-    return target
+        return {'action': 'skip', 'reason': 'not-wrapped', 'path': wrapper.get('path') or None,
+                'target': None, 'real': None, 'proxy': proxy or None, 'error': None}
+    return entry_drift(wrapper['path'], proxy, bool(settings.get('enabled')))
+
+
+def describe_drift(drift, reconnect):
+    """(cause, fix) for a drift result xswap did not act on; ('', '') for 'ok' and 'not-wrapped'.
+
+    `reconnect` is the `xswap auto-enable --accounts ... --wrap-codex` line for the
+    caller's account set. Paths and short OS error text only; never secrets.
+    """
+    reason = drift.get('reason')
+    if reason not in DRIFT_CAUSES:
+        return '', ''
+    values = {**drift, 'reconnect': reconnect}
+    return DRIFT_CAUSES[reason].format(**values), DRIFT_FIXES[reason].format(**values)
 
 
 def reconnect_wrapper(manager):
@@ -496,19 +574,19 @@ def reconnect_wrapper(manager):
     release as the real Codex and points the entry back at xswap-codex. Returns
     the new real path, or None when nothing was changed. Only acts while
     automatic switching is enabled; `xswap auto-disable` restores the entry.
+    Every skip stays silent here (this runs inside list/usage and so on every
+    alert-job tick); wrapper_drift names the reason for doctor and use/switch.
     """
     from codex_swap import atomic_json
     with manager.locked():
         settings = read_settings(manager)
-        if not settings.get('enabled'):
-            return None
-        target = wrapper_drift(settings)
-        if target is None:
+        drift = wrapper_drift(settings)
+        if drift['action'] != 'reconnect':
             return None
         wrapper = settings['wrapper']
-        path = Path(wrapper['path'])
-        real = link_target_path(path, target)
-        wrapper.update(originalTarget=target, realCodex=real)
+        path = Path(drift['path'])
+        real = drift['real']
+        wrapper.update(originalTarget=drift['target'], realCodex=real)
         try:
             # Persist the new rollback target before the atomic symlink swap.
             atomic_json(manager.root / 'auto.json', settings)
@@ -740,12 +818,10 @@ def scan_runs(manager, prune=False, cleanup=True):
 def status_data(manager, prune=False, cleanup=True):
     settings = read_settings(manager)
     sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
-    wrapper = settings.get('wrapper') or {}
-    wrapper_path = Path(wrapper.get('path', '/nonexistent-xswap-codex'))
-    wrapped = bool(wrapper and wrapper_path.is_symlink() and
-                   os.readlink(wrapper_path) == wrapper.get('proxy'))
+    drift = wrapper_drift(settings)
     return {'enabled': settings.get('enabled', False),
-                      'accounts': settings.get('accounts', []), 'codexWrapped': wrapped,
+                      'accounts': settings.get('accounts', []), 'codexWrapped': drift['reason'] == 'ok',
+                      'wrapperReason': drift['reason'],
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
                       'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': sessions[-20:]}
 
