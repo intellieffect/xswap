@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -368,6 +369,64 @@ class DoctorTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.print_report(results), 1)  # auto pool: "work" is not registered
         self.assertEqual(find(results, "auto pool")["status"], "FAIL")
+
+    # --- auto cli-runs / outdated bridges ---
+
+    THREAD = "00000000-0000-4000-8000-000000000001"
+
+    def bridged_run(self, name, state, running=True):
+        from codex_swap import private_dir
+        run_dir = self.manager.root / "auto" / "cli-runs" / name
+        for path in (run_dir.parent.parent, run_dir.parent, run_dir):
+            private_dir(path)
+        atomic_json(run_dir / "status.json", {"account": "main", "updatedAt": time.time(), **state})
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        if running:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return run_dir
+
+    def save_thread(self, home):
+        path = home / "sessions" / "2026" / "09" / "13"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f"rollout-2026-09-13T00-00-00-{self.THREAD}.jsonl").write_text("{}\n")
+
+    def test_auto_runs_row_is_ok_when_every_running_bridge_is_current(self):
+        from codex_swap import __version__
+        self.register_main()
+        self.bridged_run("current", {"bridgeVersion": __version__})
+        self.bridged_run("stopped-old", {"bridgeVersion": "0.7.2", "event": "stopped"}, running=False)
+        row = find(self.run_doctor(), "auto cli-runs")
+        self.assertEqual(row["status"], "OK")
+        self.assertEqual(row["detail"], "2 run(s), 1 running")
+
+    def test_auto_runs_row_warns_with_reopen_hints_for_outdated_running_bridges(self):
+        from codex_swap import __version__
+        self.register_main()
+        runtime = self.manager.root / "auto" / "cli-codex"
+        self.save_thread(runtime)
+        atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main"]})
+        self.bridged_run("legacy", {})
+        self.bridged_run("old", {"bridgeVersion": "0.7.2", "conversationId": self.THREAD, "codexHome": str(runtime)})
+        results = self.run_doctor()
+        row = find(results, "auto cli-runs")
+        self.assertEqual(row["status"], "WARN")
+        self.assertEqual(row["detail"],
+            f"2 run(s), 2 running; 2 still running an older bridge, reopen to load {__version__}: "
+            f"CLI · main · bridge unknown (older than 0.7.6) · exit and reopen it to load {__version__}; "
+            f"CLI · main · bridge 0.7.2 · reopen with xswap run -- resume {self.THREAD} to load {__version__}")
+        # WARN only: doctor still exits 0, and the records it read are untouched.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 0)
+        self.assertTrue((self.manager.root / "auto" / "cli-runs" / "legacy" / "status.json").exists())
+
+    def test_auto_runs_row_survives_a_corrupted_auto_json(self):
+        self.register_main()
+        self.bridged_run("old", {"bridgeVersion": "0.7.2"})
+        (self.manager.root / "auto.json").write_text("{not json")
+        row = find(self.run_doctor(), "auto cli-runs")
+        self.assertEqual(row["status"], "OK")
+        self.assertEqual(row["detail"], "1 run(s), 1 running")
 
     # --- auto pool ---
 

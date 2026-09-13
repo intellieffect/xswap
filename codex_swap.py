@@ -665,10 +665,11 @@ class Manager:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return rows
         from xswap_display import render
-        from xswap_cli import status_data
+        from xswap_cli import bridge_hints, status_data
         # The text dashboard is a sweep point; --json/--short above stay read-only.
         state = status_data(self)
-        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"]))
+        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"],
+                     hints=bridge_hints(self, state, __version__)))
         return rows
 
     def best_account(self, model=None, exclude=(), max_age=None):

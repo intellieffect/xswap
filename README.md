@@ -86,7 +86,7 @@ The deepest matching directory wins. A mapping only applies where no account is 
 xswap list --warn 15   # Warn on any codex window with less than 15% remaining
 ```
 
-`--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`.
+`--warn PCT` accepts 1-100. After the normal table (or `--json`) prints to stdout unchanged, xswap checks every non-disabled, successfully fetched account's `codex` windows and prints one `warn: NAME WINDOW N% left (resets ...)` line per stderr for each window below `PCT`. Unknown remaining values never warn. If any warning fired, `xswap list --warn` exits `3`; otherwise `0`. Plain `xswap list` is unaffected and always exits `0`. Outdated-bridge lines under Running sessions are part of the table, not `warn:` lines: they never change the exit code or post a notification.
 
 This is meant to be polled from `launchd` or `cron`, not run interactively. `xswap alert --install` sets that up for you:
 
@@ -167,6 +167,7 @@ Each run directory also holds a `bridge.log`: one line per bridge event (local t
 | `codex exec`, `review`, and other non-interactive commands | Run once as the xswap-selected account (directory mapping, then `xswap use`) when the `codex` command is connected; no live switching during the run |
 | `login`, `logout`, `app`, `app-server`, `completion`, `help`, `update`, `upgrade`, `--help`/`--version`/`--remote` | Passed through with your own home |
 | Already-running ordinary sessions | Cannot be attached or upgraded in place |
+| Bridged sessions open during `xswap upgrade` | Keep the previous bridge until reopened; `list`, `doctor`, and `upgrade` name the resume command |
 | Existing ordinary conversation history | Not copied into auto mode; `resume --last` searches the auto-mode store |
 | OpenClaw | Explicit one-time sync only, not the CLI/desktop auto-switching loop |
 
@@ -234,6 +235,8 @@ xswap upgrade                    # Reinstall the latest tag; add --tag vX.Y.Z fo
 xswap upgrade --dry-run          # Print the command without running it
 ```
 
+After a successful install, `xswap upgrade` lists every running bridged session with the command that reopens it on the new code (see Automatic switching). Nothing is stopped or restarted for you.
+
 Or run the underlying command directly:
 
 ```sh
@@ -287,7 +290,7 @@ When an auto-mode CLI exits, use the final xswap resume command printed below Co
 
 With `--details`, earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
 
-The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After upgrading, restart existing CLI sessions once to load the updated bridge.
+The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After `xswap upgrade`, sessions that were already open keep running the previous bridge until they are reopened. `xswap list` marks each one under Running sessions (`⚠ bridge 0.7.8 · reopen with codex resume UUID to load 0.8.0`; `xswap run -- resume UUID` when the `codex` command is not connected), `xswap doctor` reports them as WARN on the `auto cli-runs` row, and `xswap upgrade` prints the same lines after a successful install. A conversation is named only once it has been saved (at least one turn) by a 0.8.0 or newer bridge; older records and sessions without a saved conversation read `exit and reopen it`, desktop sessions `quit and reopen it with xswap app`. Exit the old session before resuming: it still holds the conversation's writer lock.
 
 Automatic CLI session pickers omit conversations locked by another writer. Explicit UUID resumes stop before starting the TUI if that conversation is still open elsewhere. Return to its existing window or close that session before resuming. Writer locks are never deleted. Reconnect hints use only conversation IDs with saved rollouts.
 

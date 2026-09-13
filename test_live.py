@@ -529,6 +529,27 @@ class StatusRecordTests(unittest.TestCase):
         self.assertIs(state['quotaKnown'], True)
         self.assertEqual(state['event'], 'policy-applied')
 
+    def test_status_record_names_conversation_home_and_pool(self):
+        # list/doctor/upgrade build the reopen hint from these three fields (item 6);
+        # a plain (desktop) Bridge has no conversation to name, so it writes null.
+        import json, pathlib, tempfile
+        thread = '00000000-0000-4000-8000-000000000001'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'status.json'
+            env = {'CODEX_HOME': tmp, 'OPENAI_API_KEY': 'must-not-leak'}
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], env, status_path=path)
+            bridge.status('ready')
+            first = json.loads(path.read_text())
+            bridge.resume_thread = thread
+            bridge.status('policy-applied')
+            text = path.read_text()
+            later = json.loads(text)
+        self.assertIsNone(first['conversationId'])
+        self.assertEqual(first['codexHome'], tmp)
+        self.assertEqual(first['accounts'], ['first', 'second'])
+        self.assertEqual(later['conversationId'], thread)
+        self.assertNotIn('must-not-leak', text)
+
 
 async def test_setup(case):
     await BridgeTests.asyncSetUp(case)

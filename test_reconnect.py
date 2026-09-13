@@ -65,3 +65,39 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.remember_thread(self.thread)
         with patch('xswap_cli.saved_thread', return_value=False):
             self.assertIsNone(reconnect_command(pool, {'CODEX_HOME': '/tmp/home'}, self.bridge))
+
+    def test_conversation_change_is_published_to_status_once(self):
+        # list/doctor/upgrade read conversationId from status.json; a session that moves
+        # to another thread through the picker must not keep advertising the old one,
+        # and an unchanged thread must not rewrite the record on every turn.
+        import json, tempfile
+        from pathlib import Path
+        other = '00000000-0000-4000-8000-000000000002'
+        with tempfile.TemporaryDirectory() as tmp:
+            self.bridge.status_path = Path(tmp) / 'status.json'
+            self.bridge.initialized = True
+            self.bridge.remember_thread(self.thread)
+            first = json.loads(self.bridge.status_path.read_text())
+            self.bridge.remember_thread(self.thread)
+            again = json.loads(self.bridge.status_path.read_text())
+            self.bridge.remember_thread(other)
+            second = json.loads(self.bridge.status_path.read_text())
+        self.assertEqual(first['conversationId'], self.thread)
+        self.assertEqual(first['event'], 'conversation-known')
+        self.assertEqual(again['updatedAt'], first['updatedAt'])
+        self.assertEqual(second['conversationId'], other)
+        self.assertEqual(self.bridge.resume_candidates, [other, self.thread])
+
+    def test_conversation_is_not_published_before_initialize_or_while_stopping(self):
+        import tempfile
+        from pathlib import Path
+        other = '00000000-0000-4000-8000-000000000002'
+        with tempfile.TemporaryDirectory() as tmp:
+            self.bridge.status_path = Path(tmp) / 'status.json'
+            self.bridge.remember_thread(self.thread)
+            self.assertFalse(self.bridge.status_path.exists())
+            self.bridge.initialized = True
+            self.bridge.stopping = True
+            self.bridge.remember_thread(other)
+            self.assertFalse(self.bridge.status_path.exists())
+        self.assertEqual(self.bridge.resume_thread, other)

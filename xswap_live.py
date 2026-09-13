@@ -299,6 +299,9 @@ class Bridge:
         # Whitelist operational metadata only. No prompts, tokens, raw RPC errors.
         # `exc` is the exception behind a failure event: its classified reason goes
         # into the record and the log; its type goes into the log only.
+        # conversationId/codexHome/accounts let `xswap list`, `doctor`, and `upgrade`
+        # name the command that reopens this session on newer code: on 2026-09-10 three
+        # 0.7.2 bridges ran next to an installed 0.7.6 and no reader could say how.
         if exc is not None:
             extra['reason'] = failure_reason(exc)
         if event in FAILURE_EVENTS and extra.get('reason'):
@@ -315,6 +318,9 @@ class Bridge:
                 'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
                 'manualRequest': self.manual_request, 'manualState': self.manual_state,
                 'manualReason': self.manual_reason, 'lastFailure': self.last_failure,
+                'conversationId': getattr(self, 'resume_thread', None),
+                'codexHome': (self.env or {}).get('CODEX_HOME'),
+                'accounts': list(self.pool.names),
                 'updatedAt': time.time(), **extra})
             self.log(event, extra, type(exc).__name__ if exc is not None else None)
         self.status_log(event)

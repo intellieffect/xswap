@@ -14,10 +14,10 @@ import stat
 import subprocess
 import time
 
-from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_package_root
+from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, wrapper_drift, wrapper_state
+from xswap_cli import bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap_relocate import codex_homes_inside_root, inside_root
 
@@ -240,26 +240,41 @@ def check_auto_dir(manager):
 
 
 def check_auto_runs(manager):
+    """Count CLI run records and flag live bridges (CLI or desktop) that still run code
+    other than the installed xswap, each with the command that reopens it.
+
+    2026-09-10: three 0.7.2 bridges ran next to an installed 0.7.6 and this row said OK.
+    Read-only: status_data(cleanup=False) prunes nothing, and the conversation lookup
+    only globs the session store. A corrupted auto.json is reported by its own row.
+    """
     run_root = manager.root / "auto" / "cli-runs"
-    if not run_root.is_dir():
-        return check("auto cli-runs", OK, "0 run(s)")
     total = running = 0
-    for run_dir in sorted(run_root.iterdir()):
-        if not run_dir.is_dir() or run_dir.is_symlink():
-            continue
-        total += 1
-        lock_path = run_dir / ".bridge.lock"
-        if not lock_path.exists():
-            continue
-        fd = os.open(lock_path, os.O_RDONLY)
-        try:
+    if run_root.is_dir():
+        for run_dir in sorted(run_root.iterdir()):
+            if not run_dir.is_dir() or run_dir.is_symlink():
+                continue
+            total += 1
+            lock_path = run_dir / ".bridge.lock"
+            if not lock_path.exists():
+                continue
+            fd = os.open(lock_path, os.O_RDONLY)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                running += 1
-        finally:
-            os.close(fd)
-    return check("auto cli-runs", OK, f"{total} run(s), {running} running")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    running += 1
+            finally:
+                os.close(fd)
+    summary = f"{total} run(s), {running} running" if run_root.is_dir() else "0 run(s)"
+    try:
+        hints = bridge_hints(manager, status_data(manager, cleanup=False), __version__)
+    except (LiveError, OSError):
+        hints = []
+    if not hints:
+        return check("auto cli-runs", OK, summary)
+    detail = (f"{summary}; {len(hints)} still running an older bridge, reopen to load {__version__}: "
+              + "; ".join(describe_bridge_hint(hint) for hint in hints))
+    return check("auto cli-runs", WARN, detail)
 
 
 OPENCLAW_ENTRY_POINTS = ("provider-auth", "agent-runtime", "config-runtime")

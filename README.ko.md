@@ -290,6 +290,15 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 설정/설치는 기존 세션을 종료하지 않습니다. `auto-status`의 전역 값은 저장된 기준이며,
 각 세션의 `bridgeVersion`/`weeklyRemainingThreshold`는 실제 실행 코드의 지원·상태를 나타냅니다.
 
+`xswap upgrade` 시점에 이미 열려 있던 세션은 다시 열 때까지 이전 브리지를 계속 실행합니다. 각 브리지는
+현재 대화(`conversationId`), `codexHome`, 풀(`accounts`)을 `status.json`에 기록하므로, `xswap list`는 실행
+세션 아래에 다시 여는 명령을 표시하고(`⚠ bridge 0.7.8 · reopen with codex resume UUID to load 0.8.0`,
+`codex` 명령이 연결돼 있지 않으면 `xswap run -- resume UUID`), `xswap doctor`는 `auto cli-runs` 행을
+WARN으로 보고하며, `xswap upgrade`는 설치 성공 후 같은 줄을 출력합니다. 대화는 0.8.0 이상 브리지가 한 번
+이상 턴을 저장한 뒤에만 이름으로 지목됩니다. 그 전의 기록이나 저장된 대화가 없는 세션은 `exit and reopen it`,
+데스크톱 세션은 `quit and reopen it with xswap app`으로 표시됩니다. 이전 세션이 대화의 쓰기 잠금을 아직
+쥐고 있으므로 다시 열기 전에 종료하십시오. 아무 세션도 자동으로 중단·재시작되지 않습니다.
+
 `XSWAP_TEST_RESERVE=1`로 실제 Codex 서버/CLI 회귀 검사를 실행하면, 모의 weekly 10% 알림 후
 한도 오류 없이 다음 계정이 다음 사용자 턴을 처리하는지 확인합니다.
 

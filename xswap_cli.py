@@ -203,10 +203,19 @@ class WebSocketBridge(Bridge):
 
     def remember_thread(self, value):
         try:
-            self.resume_thread = str(uuid.UUID(value))
-            self.resume_candidates = [self.resume_thread, *[t for t in self.resume_candidates if t != self.resume_thread]][:100]
+            thread = str(uuid.UUID(value))
         except (ValueError, TypeError, AttributeError):
-            pass
+            return
+        changed = thread != self.resume_thread
+        self.resume_thread = thread
+        self.resume_candidates = [thread, *[t for t in self.resume_candidates if t != thread]][:100]
+        # Publish the conversation so list/doctor/upgrade can name the resume command
+        # for this session. The first turn already lands in the 'policy-applied' write;
+        # a later /resume to another thread must not keep advertising the old one.
+        # Best effort only: the hint is never worth the session.
+        if changed and self.initialized and not self.stopping and self.status_path:
+            with contextlib.suppress(LiveError, OSError, ValueError):
+                self.status('conversation-known')
 
     def available_threads(self, message):
         result = message.get('result')
@@ -978,7 +987,8 @@ PRUNED_RECORD_KEYS = ('account', 'event', 'bridgeVersion', 'reason')
 SESSION_KEYS = ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPid', 'updatedAt',
     'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance',
     'manualRequest', 'manualState', 'reason', 'quotaKnown',
-    'manualReason', 'candidate', 'lastFailure')
+    'manualReason', 'candidate', 'lastFailure',
+    'conversationId', 'codexHome', 'accounts')
 
 
 def run_dir_empty(run_dir):
@@ -1114,6 +1124,75 @@ def status_data(manager, prune=False, cleanup=True):
                       'wrapperReason': drift['reason'],
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
                       'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': sessions[-20:]}
+
+
+SURFACE_LABELS = {'cli': 'CLI', 'desktop': 'Desktop'}
+
+
+def bridge_label(session):
+    """The version a status record reports; every bridge from 0.7.6 on writes it."""
+    version = session.get('bridgeVersion')
+    return version if isinstance(version, str) and version else 'unknown (older than 0.7.6)'
+
+
+def reopen_command(session, state, manager):
+    """Shell-quoted command that reopens this CLI session's conversation on the
+    installed code, or None when no saved conversation can be named.
+
+    Only a validated UUID and non-secret settings reach the string. The same
+    saved-conversation rule as reconnect_command: a bootstrap thread that never
+    took a turn has no rollout file and must not be advertised.
+    """
+    try:
+        thread = str(uuid.UUID(session.get('conversationId')))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    home = session.get('codexHome') or str(manager.root / 'auto' / 'cli-codex')
+    if not saved_thread(home, thread):
+        return None
+    if state.get('codexWrapped'):
+        return shlex.join(['codex', 'resume', thread])
+    if state.get('enabled'):
+        return shlex.join(['xswap', 'run', '--', 'resume', thread])
+    names = [n for n in [session.get('account'), *(session.get('accounts') or [])] if isinstance(n, str) and n]
+    names = list(dict.fromkeys(names))
+    if len(names) < 2:
+        return None
+    return shlex.join(['xswap', 'run', '--auto', '--accounts', ','.join(names), '--', 'resume', thread])
+
+
+def bridge_hint(session, state, manager, target_version):
+    """One English line saying how to bring a running session onto target_version."""
+    label = bridge_label(session)
+    if session.get('surface') == 'desktop':
+        return f'bridge {label} · quit and reopen it with xswap app to load {target_version}'
+    command = reopen_command(session, state, manager)
+    if command:
+        return f'bridge {label} · reopen with {command} to load {target_version}'
+    return f'bridge {label} · exit and reopen it to load {target_version}'
+
+
+def bridge_hints(manager, state, target_version):
+    """Running sessions whose bridge is not target_version, each with its reopen hint.
+
+    `state` is a status_data() result. A stopped record is never listed: only a live
+    bridge keeps running old code. A record without a version predates 0.7.6 and
+    counts as outdated. Plain string inequality, so a downgrade (`upgrade --tag` to an
+    older release) is flagged too and the text stays true.
+    """
+    hints = []
+    for session in state.get('sessions') or []:
+        if not session.get('running') or session.get('bridgeVersion') == target_version:
+            continue
+        hints.append({'surface': session.get('surface'), 'account': session.get('account'),
+                      'bridgeVersion': session.get('bridgeVersion'),
+                      'hint': bridge_hint(session, state, manager, target_version)})
+    return hints
+
+
+def describe_bridge_hint(hint):
+    """`CLI · ai · bridge 0.7.2 · reopen with ... to load 0.8.0` for doctor and upgrade."""
+    return f"{SURFACE_LABELS.get(hint['surface'], 'Unknown')} · {hint['account'] or 'unknown'} · {hint['hint']}"
 
 
 def show_status(manager, prune=False):

@@ -186,7 +186,7 @@ def policy_label(settings, lang="en"):
     return _t(lang, 'autoswitch_on_limit')
 
 
-def render(rows, settings, include_spark=False, details=False, color=None, now=None, lang="en", sessions=None):
+def render(rows, settings, include_spark=False, details=False, color=None, now=None, lang="en", sessions=None, hints=None):
     if not rows:
         return _t(lang, 'no_accounts')
     if color is None:
@@ -234,6 +234,15 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
         for (surface, account), count in counts.items():
             label = {'cli': 'CLI', 'desktop': 'Desktop'}.get(surface, 'Unknown')
             lines.append(f"  ● {label} · {account or 'unknown'} · " + _t(lang, 'session_single' if count == 1 else 'session_count', count=count))
+            # A session still running an older bridge sits under its group with the
+            # command that reopens it on the installed code (xswap_cli.bridge_hints).
+            for hint in hints or []:
+                if (hint.get('surface'), hint.get('account')) != (surface, account):
+                    continue
+                text = f"⚠ {hint['hint']}"
+                if color:
+                    text = f'\033[33m{text}\033[0m'
+                lines.append('    ' + text)
         if not counts:
             lines.append(_t(lang, 'no_sessions'))
         lines.append('')

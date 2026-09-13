@@ -498,14 +498,16 @@ class CliTests(TestCase):
   self.assertEqual(data['sessions'],[])
   self.assertNotIn('prunedRuns',data)  # the menu app's payload is unchanged
  def test_upgrade_count_and_doctor_leave_records_alone(self):
+  from codex_swap import __version__
   from xswap_doctor import check_auto_runs
-  from xswap_upgrade import count_running_sessions
+  from xswap_upgrade import running_session_hints
   stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
   running,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
   try:
    with patch.dict(os.environ,{'CODEX_SWAP_HOME':str(self.manager.root),'CODEX_HOME':str(self.source)}):
-    self.assertEqual(count_running_sessions(),1)
-   self.assertEqual(check_auto_runs(self.manager)['status'],'OK')
+    # Both records predate bridgeVersion, so the one holding its lock is reported.
+    self.assertEqual(len(running_session_hints(__version__)),1)
+   self.assertEqual(check_auto_runs(self.manager)['status'],'WARN')
   finally:
    os.close(fd)
   self.assertTrue(stale.exists());self.assertTrue(running.exists())
@@ -575,6 +577,81 @@ class CliTests(TestCase):
   self.assertTrue(target.exists())
   self.assertTrue(link.is_symlink())
   self.assertEqual(json.loads(out.getvalue())['pruned'],0)
+ THREAD='00000000-0000-4000-8000-000000000001'
+ def bridged_run(self,name,state,hold_lock=True):
+  # A run record as a bridge writes it, its .bridge.lock held while "running".
+  from codex_swap import atomic_json
+  run_dir,fd=self.make_run(name,hold_lock=hold_lock)
+  if fd is not None: self.addCleanup(os.close,fd)
+  atomic_json(run_dir/'status.json',{'account':'main','updatedAt':time.time(),**state})
+  return run_dir
+ def save_thread(self,home,thread=THREAD):
+  path=home/'sessions'/'2026'/'09'/'13';path.mkdir(parents=True,exist_ok=True)
+  (path/f'rollout-2026-09-13T00-00-00-{thread}.jsonl').write_text('{}\n')
+ def test_status_exposes_conversation_home_and_pool(self):
+  runtime=self.manager.root/'auto'/'cli-codex'
+  self.bridged_run('x',{'conversationId':self.THREAD,'codexHome':str(runtime),'accounts':['main','second'],'accessToken':'must-not-leak'},hold_lock=False)
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   show_status(self.manager)
+  [session]=json.loads(out.getvalue())['sessions']
+  self.assertEqual((session['conversationId'],session['codexHome'],session['accounts']),(self.THREAD,str(runtime),['main','second']))
+  self.assertNotIn('must-not-leak',out.getvalue())
+ def test_bridge_hints_flag_only_running_sessions_on_another_version(self):
+  from codex_swap import __version__,atomic_json
+  from xswap_cli import bridge_hints,status_data
+  runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})
+  self.bridged_run('a-old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime)})
+  self.bridged_run('b-current',{'bridgeVersion':__version__,'conversationId':self.THREAD,'codexHome':str(runtime)})
+  self.bridged_run('c-stopped',{'bridgeVersion':'0.7.2','event':'stopped','conversationId':self.THREAD,'codexHome':str(runtime)},hold_lock=False)
+  self.bridged_run('d-legacy',{})  # pre-0.7.6 record: no bridgeVersion, no conversation
+  hints=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual([(h['surface'],h['account'],h['bridgeVersion']) for h in hints],[('cli','main','0.7.2'),('cli','main',None)])
+  self.assertEqual(hints[0]['hint'],f'bridge 0.7.2 · reopen with xswap run -- resume {self.THREAD} to load {__version__}')
+  self.assertEqual(hints[1]['hint'],f'bridge unknown (older than 0.7.6) · exit and reopen it to load {__version__}')
+ def test_bridge_hint_uses_plain_codex_when_the_wrapper_is_connected(self):
+  from codex_swap import __version__,atomic_json
+  from xswap_cli import bridge_hints,status_data
+  # codexWrapped follows the PATH lookup (item 1), so the entry must be a real
+  # executable on the pinned PATH or the enumeration skips it.
+  self.setup_pool()
+  runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
+  proxy=self.base/'xswap-codex';proxy.write_text('fixture');proxy.chmod(0o700)
+  cli=self.base/'codex';cli.symlink_to(proxy)
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second'],'wrapper':{'path':str(cli),'proxy':str(proxy),'originalTarget':str(proxy),'realCodex':str(proxy)}})
+  self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime)})
+  state=status_data(self.manager,cleanup=False)
+  self.assertTrue(state['codexWrapped'])
+  [hint]=bridge_hints(self.manager,state,__version__)
+  self.assertEqual(hint['hint'],f'bridge 0.7.2 · reopen with codex resume {self.THREAD} to load {__version__}')
+ def test_bridge_hint_names_the_pool_when_auto_defaults_are_off(self):
+  from codex_swap import __version__
+  from xswap_cli import bridge_hints,status_data
+  runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
+  self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime),'account':'second','accounts':['main','second']})
+  [hint]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual(hint['hint'],f'bridge 0.7.2 · reopen with xswap run --auto --accounts second,main -- resume {self.THREAD} to load {__version__}')
+  self.assertNotIn('CODEX_HOME',hint['hint'])
+ def test_bridge_hint_never_names_an_unsaved_conversation_and_desktop_reopens_the_app(self):
+  from codex_swap import __version__,atomic_json
+  from xswap_cli import bridge_hints,status_data
+  self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(self.manager.root/'auto'/'cli-codex')})
+  desktop=self.manager.root/'auto';atomic_json(desktop/'status.json',{'account':'main','bridgeVersion':'0.7.2','updatedAt':time.time()})
+  fd=os.open(desktop/'.bridge.lock',os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(fd,fcntl.LOCK_EX);self.addCleanup(os.close,fd)
+  hints=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual([h['hint'] for h in hints],[f'bridge 0.7.2 · quit and reopen it with xswap app to load {__version__}',f'bridge 0.7.2 · exit and reopen it to load {__version__}'])
+ def test_list_shows_the_reopen_hint_under_the_running_session(self):
+  from codex_swap import __version__,atomic_json
+  self.manager.register('main')
+  runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})
+  self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime)})
+  with contextlib.redirect_stdout(io.StringIO()) as out:
+   self.manager.show_accounts(offline=True)
+  lines=out.getvalue().splitlines()
+  group=lines.index('  ● CLI · main · 1 session')
+  self.assertEqual(lines[group+1],f'    ⚠ bridge 0.7.2 · reopen with xswap run -- resume {self.THREAD} to load {__version__}')
+  self.assertNotIn('\033',out.getvalue())
 
 class PassthroughTests(TestCase):
  # `codex exec` and the other non-interactive subcommands reach the real Codex through
