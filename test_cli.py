@@ -893,18 +893,26 @@ class PassthroughDocsTests(TestCase):
     self.assertIn(phrase,blocks[0],name)
 
 class DocPromiseTests(TestCase):
- # Two sentences the docs promised more from than the code delivers. `auto-tick --dry-run`
- # does not change the selection or signal a bridge, but it does fetch quota through
+ # Sentences the docs promised more from than the code delivers. `auto-tick --dry-run` does
+ # not change the selection or signal a bridge, but it does fetch quota through
  # Manager.codex() and so re-points a wrapped `codex` entry and rewrites auto.json -- the
  # next paragraph of the same section already says so. And doctor's wrapper FAIL clears
- # itself only for an entry xswap will re-point: a regular file or a link owned by another
- # user is deliberately never touched, so that row stays FAIL (and doctor keeps exiting 1)
- # until the user acts -- an operator who wired doctor into a gate was told to wait instead.
- overpromises=(('README.md','change nothing'),('README.ko.md','아무것도 바꾸지 않음'))
+ # itself only for the one drift reason xswap acts on (`replaced`): `dangling-target` and
+ # `not-executable` are re-pointed entries too, yet entry_drift skips them, so naming only
+ # "a regular file, or a link owned by another user" as permanent still told an operator who
+ # had wired doctor into a gate to wait for a repair that never comes. The permanent clause
+ # now names the whole skip family, the way the wrapper section already does.
+ overpromises=(('README.md','change nothing'),('README.ko.md','아무것도 바꾸지 않음'),
+               ('README.md','(a regular file, or a link owned by another user) stays FAIL'),
+               ('README.ko.md','(일반 파일이나 다른 사용자 소유 링크)'),
+               ('CHANGELOG.md','`use` reconnects it. After `auto-disable`'))
  required=(('README.md',('# print the decision; select nothing, signal no bridge',
-                         'stays FAIL until you apply the fix the row names')),
+                         'stays FAIL until you apply the fix the row names',
+                         'its target missing or not executable')),
            ('README.ko.md',('# 판단만 출력하고 선택·전달은 하지 않음',
-                            '항목이 알려주는 조치를 직접 할 때까지 FAIL')))
+                            '항목이 알려주는 조치를 직접 할 때까지 FAIL',
+                            '링크 대상이 없거나 실행 파일이 아님')),
+           ('CHANGELOG.md',('until you repair it by hand',)))
  def test_readmes_promise_only_what_the_code_does(self):
   from pathlib import Path
   for name,phrase in self.overpromises:
