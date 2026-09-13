@@ -277,6 +277,29 @@ class RelocateTests(TestCase):
         self.assertIn(f'auto.json realCodex -> {expected}', out.getvalue())
         self.assertEqual(list(self.source.rglob('auth.json')), [self.source / 'auth.json'])
 
+    def test_a_packages_dir_holding_more_than_the_installer_left_is_kept_not_deleted(self):
+        # `_is_skeleton(aside)` is the only thing between shutil.rmtree and a directory the
+        # user may still need, and it had no test: with the guard gone, a runtime `packages/`
+        # holding anything the installer did not create (a stray file, a half-moved
+        # releases/, a node_modules/) was renamed aside and then permanently deleted by the
+        # most destructive command in this release. Keep it and say so instead.
+        runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
+        # A restore that dereferenced symlinks (rsync -L, an unzipped backup) leaves
+        # `current` as a real directory holding a copy of the release, which the installer
+        # never creates. The layout checks accept it, so relocate() reaches the rename.
+        current = standalone / 'current'
+        current.unlink()
+        (current / 'bin').mkdir(parents=True)
+        (current / 'bin' / 'codex').write_text('restored copy')
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(['relocate-codex']), 0)
+        [kept] = list(runtime.glob('.packages-relocated-*'))
+        self.assertEqual((kept / 'standalone' / 'current' / 'bin' / 'codex').read_text(), 'restored copy')
+        self.assertIn(f'Kept {kept}', out.getvalue())
+        self.assertIn('review and remove it by hand', out.getvalue())
+        self.assertEqual(os.readlink(runtime / 'packages'), str(self.source / 'packages'))
+        self.assertTrue((self.source / 'packages' / 'standalone' / 'releases' / NEW / 'bin' / 'codex').is_file())
+
     def test_relocate_rewrites_a_secondary_wrapper_record_too(self):
         # The 2026-09-10 shape: the standalone installer wrote a second `codex` ahead of the
         # wrapped one, so reconnect_wrapper made that the primary and pushed the old record

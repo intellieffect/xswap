@@ -261,6 +261,29 @@ class ReconnectWrapperTests(WrapperFixture):
         self.assertEqual(wrapper['realCodex'], str(updated))
         self.assertEqual(wrapper['originalTarget'], str(updated))
 
+    def test_a_failed_swap_leaves_no_temp_link_next_to_the_entry(self):
+        # swap_symlink's own failure path: only os.replace failing runs its
+        # `finally: temporary.unlink(...)`, and no test reached it -- the neighbouring
+        # swap-failure test patches xswap_cli.swap_symlink wholesale, so dropping the
+        # cleanup left all tests green while every failed swap (EACCES on the bin
+        # directory, a read-only mount) stranded a dangling .xswap-codex-<hex>.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        self.repoint(cli, updated)
+        genuine = os.replace
+
+        def refuse_the_temp_link(source, destination, *args, **kwargs):
+            if os.path.basename(source).startswith('.xswap-codex-'):
+                raise OSError(errno.EACCES, 'Permission denied')
+            return genuine(source, destination, *args, **kwargs)
+
+        with patch('xswap_cli.os.replace', side_effect=refuse_the_temp_link), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+        self.assertEqual(self.temp_links(), [])
+        self.assertEqual(os.readlink(cli), str(updated))  # the entry itself is untouched
+        self.assertIn('could not be reconnected (Permission denied)', err.getvalue())
+
     def test_corrupt_settings_raise_without_touching_the_link(self):
         real, updated, proxy, cli = self.wrapped_fixture()
         self.connect(proxy, cli)
