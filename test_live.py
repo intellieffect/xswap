@@ -4,6 +4,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import tempfile
 import time
@@ -742,6 +743,31 @@ class BridgeLogFileTests(unittest.TestCase):
         self.path.unlink()
         self.path.mkdir()
         self.assertFalse(append_log_line(self.path, 'line'))
+
+    def test_a_fifo_is_rejected_without_blocking_the_event_loop(self):
+        # status() calls this synchronously on the bridge's event loop, so an open that
+        # blocks freezes the whole bridge: no status writes, no manual switch ever applied,
+        # no turn forwarded, and the TUI hanging with no timeout and no message. A FIFO at
+        # this path (a debugging leftover, a restore) blocks both opens without O_NONBLOCK,
+        # which also defeats the fstat regular-file guard that follows them.
+        os.mkfifo(self.path)
+
+        class Deadline(BaseException):
+            """Not an Exception: `except OSError` inside append_log_line must not hide it."""
+
+        def ring(signum, frame):
+            raise Deadline()
+
+        previous = signal.signal(signal.SIGALRM, ring)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 2.0)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        try:
+            self.assertFalse(append_log_line(self.path, 'line'))
+        except Deadline:
+            self.fail('append_log_line blocked on a FIFO instead of rejecting it')
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        self.assertTrue(stat.S_ISFIFO(self.path.lstat().st_mode))  # nothing replaced it
 
     def test_cap_keeps_only_the_newest_lines(self):
         # 8-byte lines, a 64-byte cap: the 9th write compacts to the newest 3 lines first.

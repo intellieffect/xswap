@@ -93,7 +93,9 @@ def append_log_line(path, line):
     """Append one line to a private bridge log; never raise (logging must not stop a bridge).
 
     Only a user-owned regular file is written through (O_NOFOLLOW plus an fstat
-    check), created 0600 and narrowed back to 0600 if widened. When the file would
+    check), created 0600 and narrowed back to 0600 if widened. O_NONBLOCK is what
+    makes that check reachable: without it a non-regular blocking file at this path
+    (a FIFO) freezes the open itself, and status() runs on the bridge's event loop. When the file would
     exceed BRIDGE_LOG_MAX_BYTES it is first compacted to its newest
     BRIDGE_LOG_KEEP_LINES lines. The bridge holding the run dir's .bridge.lock is
     the only writer, so the compaction needs no lock of its own.
@@ -101,7 +103,7 @@ def append_log_line(path, line):
     data = (line + '\n').encode()
     try:
         compact_log(path, len(data))
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -119,7 +121,7 @@ def append_log_line(path, line):
 def compact_log(path, incoming):
     """Rewrite the log with its newest lines when `incoming` more bytes would pass the cap."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return
     try:
