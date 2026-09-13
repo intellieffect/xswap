@@ -47,6 +47,8 @@ class Pool:
    return credentials,None
   return credentials,limits(10 if getattr(self,'reserve_reached',False) and name=='first' else 100)
  def refresh(self,name):return self.prepare(name)[0]
+ def credentials(self,name):return self.prepare(name)[0]
+ def first_available(self):return self.names[0]
 
 async def main():
  server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -90,6 +92,9 @@ async def main():
    await turn('second turn')
    print('RESULT',json.dumps({'sameServer':pid==bridge.process.pid,'thread':tid,'switchedTo':bridge.current,'calls':[(c['path'],c['account']) for c in calls],'completed':any(e.get('method')=='turn/completed' and e['params']['turn']['status']=='completed' for e in events)}))
    assert bridge.current=='second'
+   account=await bridge.rpc('account/read',{})
+   assert account['account']['email']=='second@example.test'
+   assert (bridge.verified_account,bridge.verified_identity,bridge.verify_reason)==('second','second@example.test',None),bridge.verify_reason
    if browser_fixture:
     await assert_browser_setup(home,browser_fixture)
     print('PASS: actual browser runtime setup before and after account switch')

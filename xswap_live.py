@@ -82,6 +82,13 @@ def failure_reason(exc):
     return type(exc).__name__
 
 
+class IdentityMismatch(LiveError):
+    """The app server reports a different login than the one just sent to it."""
+
+    def __init__(self):
+        super().__init__('identity mismatch')
+
+
 def append_log_line(path, line):
     """Append one line to a private bridge log; never raise (logging must not stop a bridge).
 
@@ -143,6 +150,18 @@ def jwt_claims(token):
         return value if isinstance(value, dict) else {}
     except (ValueError, IndexError, TypeError):
         return {}
+
+
+def token_emails(token):
+    """Email labels a ChatGPT access token carries, for comparison with account/read.
+
+    Real access tokens keep the address under the profile namespace; id tokens
+    and test fixtures keep it at the top level. Case-folded; may be empty.
+    """
+    claims = jwt_claims(token)
+    profile = claims.get('https://api.openai.com/profile')
+    candidates = [claims.get('email'), profile.get('email') if isinstance(profile, dict) else None]
+    return {value.casefold() for value in candidates if isinstance(value, str) and value}
 
 
 def load_credentials(home):
@@ -277,6 +296,15 @@ class AccountPool:
         credentials, _ = self.prepare(name)
         return credentials
 
+    def credentials(self, name):
+        """Tokens only, for putting a login back after a failed verification: no usage read."""
+        from codex_swap import check_file_store
+        if name not in {n for n, _ in self.manager.enabled_accounts()}:
+            raise LiveError('selected account is disabled or removed')
+        _, home = self.manager.account(name)
+        check_file_store(home)
+        return load_credentials(home)
+
     def first_available(self):
         """The first pool member whose current login is not recorded as rejected; the
         pool's first name when every member is (prepare then reports the reason)."""
@@ -325,6 +353,12 @@ class Bridge:
         self.failure = None
         self.manual_reason = None  # Why the manual request is pending or failed; persists like manual_state.
         self.last_failure = None  # Newest failure {event, account, reason, at[, candidate]}; persists until exit.
+        # What the app server itself answered to account/read after the last login
+        # it was sent (0.8.0); `current` alone is what this bridge believes it installed.
+        self.verified_account = None
+        self.verified_identity = None
+        self.verified_at = None
+        self.verify_reason = None
 
     @staticmethod
     def stdout_message(message):
@@ -357,6 +391,8 @@ class Bridge:
                 'conversationId': getattr(self, 'resume_thread', None),
                 'codexHome': (self.env or {}).get('CODEX_HOME'),
                 'accounts': list(self.pool.names),
+                'verifiedAccount': self.verified_account, 'verifiedIdentity': self.verified_identity,
+                'verifiedAt': self.verified_at, 'verifyReason': self.verify_reason,
                 'updatedAt': time.time(), **extra})
             self.log(event, extra, type(exc).__name__ if exc is not None else None)
         self.status_log(event)
@@ -395,14 +431,75 @@ class Bridge:
         if self.active:
             raise LiveError('cannot change authentication while turns are active')
         await self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **credentials})
+        try:
+            label, reason = await self.verify_identity(credentials)
+        except IdentityMismatch:
+            # The server holds some other login now; put the account this bridge
+            # already trusted back, then record the outcome for the failed switch.
+            await self.restore_current()
+            self.status('identity-mismatch', candidate=name)
+            raise
         changed = self.current_id is not None and self.current_id != credentials['chatgptAccountId']
         self.current, self.current_id = name, credentials['chatgptAccountId']
+        self.record_verification(name if label else None, label, reason)
         self.switches += int(changed)
         # Unknown quota: leave checked_at at 0 so before_turn re-reads it first.
         self.checked_at = time.monotonic() if raw is not None else 0
         self.last_quota = raw
         self.quota_known = raw is not None
         self.status('switched' if changed else 'ready', quotaKnown=self.quota_known)
+
+    def record_verification(self, account, label, reason):
+        self.verified_account = account
+        self.verified_identity = label
+        self.verified_at = time.time() if account else None
+        self.verify_reason = reason
+
+    async def verify_identity(self, credentials):
+        """Read back which login the app server holds after account/login/start.
+
+        account/read is local (no refresh, no network) and answers with the email
+        of the token the server actually installed. Returns (label, None) when it
+        names the token just sent, (None, reason) when the answer cannot settle it,
+        and raises IdentityMismatch when the server holds no login or another one.
+        2026-09-10: a session's record named the account the bridge had asked for,
+        and codex-cli 0.154.0 leaves the previous login installed when an
+        external-token login is rejected. Plan types (account/updated, rate limits)
+        are shared by every account on a plan and are never treated as identity.
+        """
+        expected = token_emails(credentials['accessToken'])
+        try:
+            result = await self.rpc('account/read', {}, timeout=10)
+        except TimeoutError:
+            return None, 'app-server request timed out'
+        except LiveError:
+            return None, 'account/read rejected'
+        if not isinstance(result, dict) or 'account' not in result:
+            return None, 'unrecognized account/read response'
+        account = result['account']
+        if not isinstance(account, dict) or account.get('type') != 'chatgpt':
+            raise IdentityMismatch()  # no login at all, an API key, or another provider
+        if not expected:
+            return None, 'no email claim'
+        email = account.get('email')
+        if not isinstance(email, str) or email.casefold() not in expected:
+            raise IdentityMismatch()
+        return clean(email), None
+
+    async def restore_current(self):
+        """Best effort after a mismatch: re-send the trusted account's tokens and re-check."""
+        if self.current_id is None:
+            self.record_verification(None, None, 'identity mismatch')  # nothing was installed before
+            return
+        try:
+            credentials = await asyncio.to_thread(self.pool.credentials, self.current)
+            await self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **credentials})
+            label, reason = await self.verify_identity(credentials)
+        except Exception:
+            self.record_verification(None, None, 'identity unknown after rollback')
+            self.status('identity-unknown')
+            return
+        self.record_verification(self.current if label else None, label, reason or 'identity mismatch')
 
     async def apply_manual_switch(self):
         """Called with gate held; only idle servers may change authentication."""

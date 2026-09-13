@@ -405,6 +405,17 @@ class CliTests(TestCase):
    show_status(self.manager)
   session=[s for s in json.loads(out.getvalue())['sessions'] if s['manualState']=='failed'][0]
   self.assertEqual(session['log'],str(run_dir/'bridge.log'))
+ def test_status_exposes_the_server_confirmed_login(self):
+  # `account` is the bridge's own claim; only the verified* fields came from its app server.
+  run_dir,fd=self.make_run('verified',hold_lock=True)
+  try:
+   (run_dir/'status.json').write_text(json.dumps({'updatedAt':time.time(),'event':'ready','account':'main','verifiedAccount':'main','verifiedIdentity':'main@example.test','verifiedAt':1700000000.0,'verifyReason':None}))
+   with contextlib.redirect_stdout(io.StringIO()) as out:
+    show_status(self.manager)
+   session=[s for s in json.loads(out.getvalue())['sessions'] if s['running']][0]
+   self.assertEqual((session['verifiedAccount'],session['verifiedIdentity'],session['verifiedAt'],session['verifyReason']),('main','main@example.test',1700000000.0,None))
+  finally:
+   os.close(fd)
  def test_prune_never_removes_running_dir(self):
   run_dir,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
   try:

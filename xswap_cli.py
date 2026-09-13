@@ -991,7 +991,8 @@ SESSION_KEYS = ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPi
     'bridgeVersion', 'weeklyRemainingThreshold', 'manualSwitchVersion', 'bridgeInstance',
     'manualRequest', 'manualState', 'reason', 'quotaKnown',
     'manualReason', 'candidate', 'lastFailure',
-    'conversationId', 'codexHome', 'accounts')
+    'conversationId', 'codexHome', 'accounts',
+    'verifiedAccount', 'verifiedIdentity', 'verifiedAt', 'verifyReason')
 
 
 def run_dir_empty(run_dir):

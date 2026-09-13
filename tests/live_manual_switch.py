@@ -81,6 +81,8 @@ async def main():
             expected = bridge.pool.prepare(names[1])[0]['chatgptAccountId']
             if bridge.current_id != expected:
                 raise RuntimeError('account identity mismatch')
+            if bridge.verified_account != names[1]:
+                raise RuntimeError('server login not verified: ' + str(bridge.verify_reason))
             await turn(11)
             print(json.dumps({'stage':'after','account':bridge.current,'response':'XSWAP_ACCOUNT_OK',
                 'sameServer':initial_pid==bridge.process.pid,'sameThread':True,'report':report}),flush=True)

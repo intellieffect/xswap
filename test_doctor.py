@@ -723,6 +723,84 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("fixture-refresh", blob)
 
 
+class AutoSessionDoctorTests(unittest.TestCase):
+    """`xswap doctor`'s "auto sessions" row: a running bridge's `account` is self-reported;
+    only `verifiedAccount`/`verifiedIdentity` came from its app server (INT-5186 item 9)."""
+
+    setUp = DoctorTests.setUp
+    run_doctor = DoctorTests.run_doctor
+
+    def register_with_email(self, name, email):
+        home = self.base / f"home-{name}"
+        home.mkdir()
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {
+            "access_token": fake_jwt(exp=time.time() + 100000), "id_token": fake_jwt(claims={"email": email}),
+            "refresh_token": "fixture-refresh"}})
+        self.manager.register(name, home)
+        return home
+
+    def running_session(self, name, state, running=True, version=None):
+        from codex_swap import __version__, private_dir
+        directory = self.manager.root / "auto" / "cli-runs" / name
+        for path in (directory.parent.parent, directory.parent, directory):
+            private_dir(path)
+        fd = os.open(directory / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        if running:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        atomic_json(directory / "status.json", {"updatedAt": time.time(), "bridgeVersion": version or __version__,
+                                                "cliPid": 4242, "event": "ready", **state})
+        return directory
+
+    def test_no_running_session_is_ok(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("stopped", {"account": "main", "verifiedAccount": None, "verifyReason": "identity mismatch"}, running=False)
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "no running sessions"))
+
+    def test_confirmed_session_is_ok(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("live", {"account": "main", "verifiedAccount": "main", "verifiedIdentity": "Main@example.test",
+                                      "verifiedAt": time.time(), "verifyReason": None})
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "1 running, 1 verified"))
+
+    def test_unconfirmed_session_warns_with_reason_and_resend_command(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("live", {"account": "main", "verifiedAccount": None, "verifiedIdentity": None,
+                                      "verifiedAt": None, "verifyReason": "account/read rejected"})
+        results = self.run_doctor()
+        row = find(results, "auto sessions")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("cli pid 4242 on main: server login unverified (account/read rejected)", row["detail"])
+        self.assertIn("xswap switch main", row["detail"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 0)  # a WARN never fails the run
+
+    def test_session_verified_as_someone_the_account_no_longer_is_warns(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("live", {"account": "main", "verifiedAccount": "main", "verifiedIdentity": "old@example.test",
+                                      "verifiedAt": time.time(), "verifyReason": None})
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("verified as old@example.test but main is now signed in as main@example.test", row["detail"])
+        self.assertIn("xswap switch main", row["detail"])
+
+    def test_older_bridge_is_counted_not_judged(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("old", {"account": "main"}, version="0.7.6")
+        self.running_session("live", {"account": "main", "verifiedAccount": "main", "verifiedIdentity": "main@example.test",
+                                      "verifiedAt": time.time(), "verifyReason": None})
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "2 running, 1 verified, 1 on an older bridge (not checked)"))
+
+    def test_row_never_repeats_a_token_from_a_status_record(self):
+        self.register_with_email("main", "main@example.test")
+        self.running_session("live", {"account": "main", "verifiedAccount": None, "verifyReason": "identity mismatch",
+                                      "accessToken": "must-not-leak"})
+        self.assertNotIn("must-not-leak", json.dumps(self.run_doctor()))
+
+
 class WrapperPathTests(unittest.TestCase):
     """`xswap doctor`'s wrapper row against a fixture PATH of two bin directories.
 

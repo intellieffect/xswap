@@ -291,6 +291,58 @@ def check_auto_runs(manager):
     return check("auto cli-runs", WARN, detail)
 
 
+def check_auto_sessions(manager, accounts):
+    """Running bridges: what their own app server confirmed after the last login (0.8.0).
+
+    `account` in a status record is what the bridge believes it installed;
+    `verifiedAccount`/`verifiedIdentity` are the app server's answer to account/read.
+    2026-09-10: a failed session's record still named the account it had asked for.
+    A session on an older bridge has no such answer and is left to the version
+    check. A running session whose server never confirmed its login, or whose
+    account has since been signed in as someone else, names the command that
+    re-sends the account's current login to running bridges. Read-only: status
+    records and lock probes only, no process is spawned.
+    """
+    try:
+        sessions = [s for s in status_data(manager, cleanup=False)["sessions"] if s.get("running")]
+    except LiveError as exc:
+        return check("auto sessions", WARN, f"not checked: {exc}")
+    if not sessions:
+        return check("auto sessions", OK, "no running sessions")
+    older = verified = 0
+    problems = []
+    for session in sessions:
+        surface = session.get("surface") or "unknown"
+        pid = session.get("cliPid") or session.get("bridgePid") or "?"
+        account = session.get("account")
+        if session.get("bridgeVersion") != __version__:
+            older += 1
+            continue
+        if not account or session.get("verifiedAccount") != account:
+            reason = session.get("verifyReason") or "not verified"
+            problems.append(f"{surface} pid {pid} on {account or 'unknown'}: server login unverified ({reason}); "
+                            f"re-send it: xswap switch {account or 'NAME'}")
+            continue
+        verified += 1
+        home = (accounts.get(account) or {}).get("home")
+        confirmed = session.get("verifiedIdentity")
+        if not home or not isinstance(confirmed, str) or not Path(home).is_dir():
+            continue
+        try:
+            current = identity(Path(home))
+        except SwapError:
+            continue
+        if current not in ("not signed in", "unreadable auth cache", "API key") and current.casefold() != confirmed.casefold():
+            problems.append(f"{surface} pid {pid} verified as {confirmed} but {account} is now signed in as {current}; "
+                            f"re-send it: xswap switch {account}")
+    if problems:
+        return check("auto sessions", WARN, "; ".join(problems))
+    detail = f"{len(sessions)} running, {verified} verified"
+    if older:
+        detail += f", {older} on an older bridge (not checked)"
+    return check("auto sessions", OK, detail)
+
+
 OPENCLAW_ENTRY_POINTS = ("provider-auth", "agent-runtime", "config-runtime")
 _NODE_PROBE = """
 const {createRequire} = require('module');
@@ -513,6 +565,7 @@ def run(manager):
     results.append(check_auto_dir(manager))
     results.extend(check_packages_links(manager, accounts))
     results.append(check_auto_runs(manager))
+    results.append(check_auto_sessions(manager, accounts))
     results.extend(check_openclaw())
     results.extend(check_openclaw_cooldowns(accounts, manager.usage_cache_path()))
     results.append(check_storage(manager))
