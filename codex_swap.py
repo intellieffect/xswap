@@ -984,7 +984,17 @@ class Manager:
             return 0
         ensure_plugins(home, self.source)
         link_packages(self, home)  # no-op for a registered external home
-        return subprocess.call(command, env=self.env(home))
+        try:
+            return subprocess.call(command, env=self.env(home))
+        finally:
+            # `upgrade`/`update` reach this branch (they are non-interactive), and Codex's
+            # standalone updater re-points the wrapped `codex` entry on its way out. xswap
+            # still holds this process, so repair the entry here the way launch_cli's own
+            # exit path does; without it `xswap run -- upgrade` left plain `codex` running
+            # against the caller's home -- the 2026-09-10 bypass, re-created by xswap.
+            with contextlib.suppress(LiveError, OSError, SwapError):
+                from xswap_cli import reconnect_wrapper
+                reconnect_wrapper(self)
 
     def launch_auto_app(self, accounts, app=None, dry=False):
         from xswap_live import AccountPool, LiveError

@@ -25,6 +25,7 @@ import test_cli
 import test_codex_swap
 import xswap_doctor as doctor
 from codex_swap import SwapError, __version__, atomic_json
+from codex_swap import main as codex_swap_main
 from xswap_cli import (STALE_RUN_SECONDS, codex_main, codex_path_entries, enable, launch_cli,
                        link_target_path, read_settings, reconnect_wrapper, show_status, wrapper_drift)
 from xswap_live import LiveError
@@ -346,6 +347,49 @@ class LaunchExitReconnectTests(WrapperFixture):
         self.assertFalse(stale.exists())
         runs = [p for p in (self.manager.root / 'auto' / 'cli-runs').iterdir() if p.is_dir()]
         self.assertEqual(len(runs), 1)  # only this launch's own record is left
+
+
+
+class PassthroughExitReconnectTests(WrapperFixture):
+    """Manager.launch_cli's fixed-account branch: `xswap run -- upgrade` runs Codex's own
+    standalone updater as a subprocess, and that updater re-points the wrapped `codex`
+    entry. xswap holds the process, so the repair belongs on this exit path too."""
+
+    def run_passthrough(self, proxy, cli, call):
+        with patch('codex_swap.Manager', return_value=self.manager), self.which(proxy, cli), \
+                patch('subprocess.call', side_effect=call), patch('xswap_plugins.ensure_plugins'), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = codex_swap_main(['run', '--', 'upgrade'])
+        return code, err.getvalue()
+
+    def test_upgrade_reconnects_the_entry_its_updater_repointed(self):
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+
+        def updater(command, **kwargs):
+            self.assertEqual(command[1:], ['upgrade'])
+            self.repoint(cli, updated)  # install.sh's update_visible_command
+            return 0
+
+        code, err = self.run_passthrough(proxy, cli, updater)
+        self.assertEqual(code, 0)
+        self.assertEqual(os.readlink(cli), str(proxy))
+        self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'], str(updated))
+        self.assertIn('reconnected it to xswap-codex', err)
+        self.assertEqual(doctor.check_wrapper(read_settings(self.manager), self.manager.read()['accounts'])['status'],
+                         doctor.OK)
+
+    def test_exit_status_and_a_corrupt_settings_file_survive_the_reconnect(self):
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+
+        def updater(command, **kwargs):
+            (self.manager.root / 'auto.json').write_text('not json')
+            return 7
+
+        code, err = self.run_passthrough(proxy, cli, updater)
+        self.assertEqual(code, 7)
+        self.assertNotIn('Traceback', err)
 
 
 class WrapperEntryTests(WrapperFixture):
