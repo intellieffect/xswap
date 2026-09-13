@@ -1150,20 +1150,26 @@ def scan_runs(manager, prune=False, cleanup=True):
 
 
 def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
-    """At most `limit` records for a report, keeping every running one and the newest of
-    the rest, in scan order.
+    """Every running record plus the `limit - running` newest stopped ones, in scan order.
 
-    The cap bounds `auto-status`, but it must not decide what the version check sees:
-    bridge_hints, doctor's `auto cli-runs` row, `upgrade` and the menu bar all read this
-    list, and run directories are named by uuid4, so a plain tail silently dropped a
-    running bridge once the store held more than `limit` readable records -- the desktop
-    record sorts first and went first. On 2026-09-10 three 0.7.2 bridges running next to
-    an installed 0.7.6 is exactly the state these hints exist to surface.
+    So the list can exceed `limit` when more than `limit` bridges run: the cap bounds
+    `auto-status`, but it must not decide what the version check sees. bridge_hints,
+    doctor's `auto cli-runs` row, `upgrade` and the menu bar all read this list, and run
+    directories are named by uuid4, so a plain tail silently dropped a running bridge once
+    the store held more than `limit` readable records -- the desktop record sorts first and
+    went first. On 2026-09-10 three 0.7.2 bridges running next to an installed 0.7.6 is
+    exactly the state these hints exist to surface.
+
+    `updatedAt` decides which stopped records go, not scan order: uuid4 names carry no
+    time, so dropping by position threw away whichever records happened to sort first --
+    the desktop record every time, and with it the recent `lastFailure`/`log` a user is
+    looking for while keeping a week-old one.
     """
     if len(sessions) <= limit:
         return list(sessions)
     room = max(0, limit - sum(1 for session in sessions if session.get('running')))
-    newest = [index for index, session in enumerate(sessions) if not session.get('running')]
+    droppable = [index for index, session in enumerate(sessions) if not session.get('running')]
+    newest = sorted(droppable, key=lambda index: sessions[index].get('updatedAt') or 0)
     keep = set(newest[-room:] if room else [])
     return [session for index, session in enumerate(sessions)
             if session.get('running') or index in keep]

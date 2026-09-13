@@ -641,6 +641,27 @@ class CliTests(TestCase):
   row=xswap_doctor.check_auto_runs(self.manager)
   self.assertEqual(row['status'],'WARN')
   self.assertIn('21 run(s), 1 running',row['detail'])
+ def test_session_report_cap_keeps_the_newest_stopped_records_not_the_first_in_scan_order(self):
+  # Scan order is `sorted(run_root.iterdir())` over uuid4 names, so it says nothing about
+  # time: keeping the tail of that order dropped whichever records happened to sort first
+  # -- the desktop record every time, and here the session that just failed, while a
+  # six-day-old one stayed. auto-status is the only way to reach lastFailure/manualReason
+  # and the bridge.log path, and prunedRuns says nothing about a record the cap withheld.
+  from xswap_cli import SESSION_REPORT_LIMIT,reported_sessions,status_data
+  last={'event':'manual-switch-failed','account':'main','candidate':'second','reason':'usage service unavailable','at':0}
+  self.bridged_run('a-just-failed',{'updatedAt':time.time(),'event':'stopped','reason':'app-server exited','lastFailure':last},hold_lock=False)
+  for index in range(SESSION_REPORT_LIMIT):
+   self.bridged_run(f'z{index:02d}',{'updatedAt':time.time()-6*24*3600,'event':'stopped'},hold_lock=False)
+  sessions=status_data(self.manager,cleanup=False)['sessions']
+  self.assertEqual(len(sessions),SESSION_REPORT_LIMIT)
+  self.assertEqual([s['lastFailure'] for s in sessions if s['lastFailure']],[last])
+  self.assertEqual([s['reason'] for s in sessions if s['reason']],['app-server exited'])
+  # A record with no updatedAt at all is the oldest, not the newest, so it never pushes a
+  # dated one out; and running records are kept even past the cap.
+  undated=[{'running':False},*[{'running':False,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT)]]
+  self.assertEqual([s.get('updatedAt') for s in reported_sessions(undated)],[float(i) for i in range(SESSION_REPORT_LIMIT)])
+  running=[{'running':True,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT+3)]
+  self.assertEqual(len(reported_sessions(running)),SESSION_REPORT_LIMIT+3)
  def test_bridge_hint_uses_plain_codex_when_the_wrapper_is_connected(self):
   from codex_swap import __version__,atomic_json
   from xswap_cli import bridge_hints,status_data
