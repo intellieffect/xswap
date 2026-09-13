@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from unittest import TestCase
 from unittest.mock import patch
@@ -291,6 +292,14 @@ class RelocateTests(TestCase):
         current.unlink()
         (current / 'bin').mkdir(parents=True)
         (current / 'bin' / 'codex').write_text('restored copy')
+        # The entry recorded here points straight at the release rather than through
+        # `current`, so the rewritten path still resolves after the move; a `current` this
+        # plan cannot place in the reference home is refused instead (next test), because the
+        # record would otherwise be rewritten through a link nothing creates.
+        release = standalone / 'releases' / NEW / 'bin' / 'codex'
+        settings = read_settings(self.manager)
+        settings['wrapper'].update(originalTarget=str(release), realCodex=str(release))
+        atomic_json(self.manager.root / 'auto.json', settings)
         with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(main(['relocate-codex']), 0)
         [kept] = list(runtime.glob('.packages-relocated-*'))
@@ -299,6 +308,43 @@ class RelocateTests(TestCase):
         self.assertIn('review and remove it by hand', out.getvalue())
         self.assertEqual(os.readlink(runtime / 'packages'), str(self.source / 'packages'))
         self.assertTrue((self.source / 'packages' / 'standalone' / 'releases' / NEW / 'bin' / 'codex').is_file())
+        # The command doctor asks for must leave a real Codex behind, not only a kept copy.
+        self.assertTrue(os.path.exists(read_settings(self.manager)['wrapper']['realCodex']))
+        self.assertFalse(inside_root(self.manager, read_settings(self.manager)['wrapper']['realCodex']))
+
+    def test_refuses_when_the_recorded_codex_runs_through_a_current_it_cannot_place(self):
+        # Same dereferenced restore, but with install.sh's own record: `codex` ->
+        # `<standalone>/current/bin/codex`. _current_name() reads no release name from a real
+        # directory, so nothing created `current` in the reference home while _rewrite still
+        # re-spelled the record through it: relocate exited 0, printed `auto.json realCodex
+        # -> <ref>/packages/standalone/current/bin/codex`, and `xswap doctor` then reported
+        # that path `is missing; plain codex cannot start` -- one command after the command
+        # doctor had told the user to run. Refuse before anything moves, and name the repair.
+        runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
+        current = standalone / 'current'
+        current.unlink()
+        (current / 'bin').mkdir(parents=True)
+        (current / 'bin' / 'codex').write_text('restored copy')
+        before = (self.manager.root / 'auto.json').read_bytes()
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(['relocate-codex']), 1)
+        self.assertIn(str(current), err.getvalue())
+        self.assertIn('ln -sfn releases/<name> current', err.getvalue())
+        self.assertIn('Nothing was changed.', err.getvalue())
+        self.assertTrue(binary.is_file())
+        self.assertFalse((self.source / 'packages' / 'standalone').exists())
+        self.assertFalse((runtime / 'packages').is_symlink())
+        self.assertEqual((self.manager.root / 'auto.json').read_bytes(), before)
+        # --dry-run refuses identically: the plan is what raises.
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(['relocate-codex', '--dry-run']), 1)
+        self.assertIn('Nothing was changed.', err.getvalue())
+        # The repair the message names makes the same command work and leaves a real Codex.
+        shutil.rmtree(current)
+        current.symlink_to(standalone / 'releases' / NEW)
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['relocate-codex']), 0)
+        self.assertTrue(os.path.exists(read_settings(self.manager)['wrapper']['realCodex']))
 
     def test_relocate_rewrites_a_secondary_wrapper_record_too(self):
         # The 2026-09-10 shape: the standalone installer wrote a second `codex` ahead of the

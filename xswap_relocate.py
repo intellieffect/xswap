@@ -280,6 +280,21 @@ def plan_relocation(manager):
     def usable(name):
         return name is not None and (name in moved or (ref_releases / name).is_dir())
 
+    # install.sh spells the recorded realCodex through `<standalone>/current`, and _rewrite
+    # re-spells it through the reference home, so a `current` this plan cannot place there --
+    # a real directory holding a copy (a restore that dereferenced links: rsync -L, an
+    # unzipped backup), a missing link, one pointing at a release that is not here -- left
+    # the record on a reference path nothing creates. relocate then exited 0 and `xswap
+    # doctor` reported `real codex ... is missing; plain codex cannot start`, one command
+    # after the one doctor had asked for. Refuse while nothing has been changed.
+    for entry in homes:
+        current = entry['packages'] / 'standalone' / 'current'
+        if entry['holdsReal'] and Path(real).is_relative_to(current) and not usable(entry['current']):
+            raise SwapError(f'{current} does not point at a release that can be moved to {reference / "packages"}, '
+                            f'but auto.json records the real Codex through it ({real}); point it at a release under '
+                            f'{current.parent / "releases"} (ln -sfn releases/<name> current), then retry. '
+                            'Nothing was changed.')
+
     # The release the recorded realCodex runs from decides `current`: that is the one
     # plain `codex` is about to execute. Otherwise a reference `current` that already
     # exists is the user's own choice and is left alone.
