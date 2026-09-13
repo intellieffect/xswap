@@ -477,22 +477,47 @@ def check_openclaw_cooldowns(accounts, cache_path):
 
 
 def check_real_codex(manager, settings, accounts):
-    """Where the wrapped codex entry's real executable lives (INT-5186, item 2). Omitted
-    when the codex command is not connected. Paths are compared, never moved."""
+    """Where each wrapped codex entry's real executable lives (INT-5186, item 2). Empty when
+    the codex command is not connected. Paths are compared, never moved.
+
+    One row per recorded entry, not only the primary: 0.8.0 keeps the entries a Codex
+    install pushed aside in `wrappers`, `auto-disable` restores every one of them, and
+    `relocate-codex` rewrites every one of them. Reading only `wrapper` meant the 2026-09-10
+    shape -- the standalone installer's entry became the primary with a `realCodex` outside
+    the root, the inside-root record moved to `wrappers` -- produced no row at all, so the
+    repair relocate was taught to make was never the one doctor asked for.
+    """
     wrapper = settings.get("wrapper") or {}
-    real = wrapper.get("realCodex")
-    if not wrapper or not isinstance(real, str) or not real:
-        return None
+    if not wrapper or not isinstance(wrapper.get("realCodex"), str) or not wrapper["realCodex"]:
+        return []
     names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
     reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
+    rows = [_real_codex_row(manager, "real codex", wrapper, reconnect, primary=True)]
+    for record in settings.get("wrappers") or []:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str) or not record["path"]:
+            continue
+        if not isinstance(record.get("realCodex"), str) or not record["realCodex"]:
+            continue
+        rows.append(_real_codex_row(manager, f"real codex: {record['path']}", record, reconnect, primary=False))
+    return rows
+
+
+def _real_codex_row(manager, label, record, reconnect, primary):
+    """One `real codex` row. A secondary record is not what plain `codex` runs today, but
+    `auto-disable` puts its path back on PATH pointing at exactly this executable."""
+    real = record["realCodex"]
+    consequence = ("plain codex cannot start" if primary else
+                   f"xswap auto-disable would restore {record['path']} to a Codex that cannot start")
     if not Path(real).is_file():
-        return check("real codex", FAIL, f"{real} is missing; plain codex cannot start. Recover: xswap auto-disable, "
+        return check(label, FAIL, f"{real} is missing; {consequence}. Recover: xswap auto-disable, "
                      f"reinstall Codex, then {reconnect}")
-    if inside_root(manager, real) or inside_root(manager, wrapper.get("originalTarget")):
-        return check("real codex", FAIL, f"{real} is inside the xswap state directory ({manager.root}): a Codex update "
-                     "ran inside a bridged session, and purging or resetting auto/ would break plain codex. "
-                     "Fix: xswap relocate-codex")
-    return check("real codex", OK, real)
+    if inside_root(manager, real) or inside_root(manager, record.get("originalTarget")):
+        broken = ("purging or resetting auto/ would break plain codex" if primary else
+                  f"xswap auto-disable would put {record['path']} back on PATH pointing inside it, and purging or "
+                  "resetting auto/ would then break plain codex")
+        return check(label, FAIL, f"{real} is inside the xswap state directory ({manager.root}): a Codex update "
+                     f"ran inside a bridged session, and {broken}. Fix: xswap relocate-codex")
+    return check(label, OK, real)
 
 
 def check_packages_links(manager, accounts):
@@ -584,9 +609,7 @@ def run(manager):
 
     if settings_ok:
         results.append(check_auto_pool(settings, accounts))
-        real_codex = check_real_codex(manager, settings, accounts)
-        if real_codex is not None:
-            results.append(real_codex)
+        results.extend(check_real_codex(manager, settings, accounts))
     results.append(check_auto_dir(manager))
     results.extend(check_packages_links(manager, accounts))
     results.append(check_auto_runs(manager))

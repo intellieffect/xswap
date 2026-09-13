@@ -623,6 +623,34 @@ class DoctorTests(unittest.TestCase):
         self.wrapped_settings(str(real), original=str(self.manager.root / "profiles" / "x" / "codex" / "bin" / "codex"))
         self.assertEqual(find(self.run_doctor(), "real codex")["status"], "FAIL")
 
+    def test_real_codex_inside_root_in_a_secondary_record_also_names_relocate(self):
+        # The 2026-09-10 shape once 0.8.0 repairs it: the standalone installer's
+        # ~/.local/bin/codex became the primary record, with a realCodex outside the root,
+        # and the entry whose release an in-session update had left under auto/ moved to
+        # `wrappers`. Reading only `wrapper` meant no row said `xswap relocate-codex` any
+        # more, while `auto-disable` would still restore that entry to the path under auto/
+        # and the next purge or reset of auto/ would break plain codex.
+        self.register_main()
+        real = self.base / "real-codex"
+        real.write_text("fixture")
+        inside = self.manager.root / "auto" / "cli-codex" / "packages" / "standalone" / "current" / "bin" / "codex"
+        inside.parent.mkdir(parents=True)
+        inside.write_text("fixture")
+        self.wrapped_settings(str(real))
+        settings = json.loads((self.manager.root / "auto.json").read_text())
+        settings["wrappers"] = [{"path": str(self.base / "brew-codex"), "originalTarget": str(inside),
+                                 "realCodex": str(inside), "proxy": "/fixture/xswap-codex"}]
+        atomic_json(self.manager.root / "auto.json", settings)
+        results = self.run_doctor()
+        self.assertEqual(find(results, "real codex")["status"], "OK")  # what plain codex runs is fine
+        row = find(results, f"real codex: {self.base / 'brew-codex'}")
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn(str(inside), row["detail"])
+        self.assertIn("xswap relocate-codex", row["detail"])
+        self.assertIn(str(self.base / "brew-codex"), row["detail"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 1)
+
     def test_real_codex_row_omitted_without_wrapper(self):
         self.register_main()
         self.assertFalse(any(r["name"] == "real codex" for r in self.run_doctor()))
