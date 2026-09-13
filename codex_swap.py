@@ -197,18 +197,24 @@ def plain_codex_notice(manager, selected_home):
     Checks what a PATH lookup of `codex` runs, not only the entry recorded in
     auto.json (2026-09-10: a standalone install ahead of the wrapped entry bypassed
     xswap while the record looked fine), and names the classified reason when xswap
-    deliberately left an entry alone. Returns None when the entry plain `codex`
+    deliberately left an entry alone -- including the `codex` a relative PATH element
+    resolves to, which is what plain `codex` runs in this working directory and the one
+    entry xswap can never wrap. Returns None when the entry plain `codex`
     runs is xswap-codex with automatic switching on, or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import describe_drift, entry_drift, read_settings, reconnect_wrapper, wrapper_drift, wrapper_state
+    from xswap_cli import (RELATIVE_ENTRY_REASON, describe_drift, entry_drift, read_settings, reconnect_wrapper,
+                           wrapper_drift, wrapper_state)
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
         settings = read_settings(manager)
     except LiveError:
         settings = {}
-    state, first, _ = wrapper_state(settings)
+    # relative=True: this notice only reports what plain `codex` runs, and the entry a relative
+    # PATH element resolves to is exactly what it runs in this directory. reconnect_wrapper above
+    # keeps the default, so nothing re-points it.
+    state, first, _ = wrapper_state(settings, relative=True)
     if state == "connected":
         return None
     if Path(selected_home).expanduser().resolve() == manager.source:
@@ -219,9 +225,14 @@ def plain_codex_notice(manager, selected_home):
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
     connect = f"xswap auto-enable --accounts {names} --wrap-codex"
-    if state in ("drifted", "shadowed"):
+    if state in ("drifted", "shadowed", "relative"):
         shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
-        drift = (wrapper_drift(settings) if state == "drifted"
+        # A relative entry is a skip by construction -- nothing may re-point one -- so it carries
+        # entry_drift's shape with the reason whose cause and fix name the PATH element and the
+        # working directory it resolves against, and the line below keeps the one shape every
+        # other skip reason prints in.
+        drift = ({"action": "skip", "reason": RELATIVE_ENTRY_REASON, "path": first["path"]} if state == "relative"
+                 else wrapper_drift(settings) if state == "drifted"
                  else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"]))
         if drift["action"] == "reconnect":
             fix_text = f"Connect it: {connect}"

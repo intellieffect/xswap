@@ -532,6 +532,13 @@ def swap_symlink(path, target):
 
 DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'not-user-owned',
     'dangling-target', 'not-executable', 'auto-disabled', 'unreadable')
+# The one reason the PATH walk contributes instead of entry_drift: the `codex` a relative PATH
+# element resolved to. Deliberately outside DRIFT_REASONS -- entry_drift never returns it (the
+# condition belongs to the PATH element, not to the entry's link state) and its fix is the
+# user's PATH, not the reconnect command every other fix ends with. It is keyed into the same
+# two dicts because describe_drift looks a reason up, so auto-status and the use/switch notice
+# can report a relative entry with the same words, in the shape they print every other skip in.
+RELATIVE_ENTRY_REASON = 'relative-path-entry'
 DRIFT_CAUSES = {
     'replaced': 'a Codex update replaced {path} and xswap could not reconnect it',
     'missing': '{path} does not exist',
@@ -541,6 +548,8 @@ DRIFT_CAUSES = {
     'not-executable': '{path} -> {target} is not an executable file, so xswap leaves it alone',
     'auto-disabled': 'automatic switching is disabled, so xswap leaves {path} alone (-> {target})',
     'unreadable': '{path} could not be inspected ({error}), so xswap leaves it alone',
+    RELATIVE_ENTRY_REASON: '{path} is found through a relative PATH entry, which the shell resolves against the '
+        'working directory, so it names a different file in every directory and xswap never re-points it',
 }
 DRIFT_FIXES = {
     'replaced': 'reconnect it by hand: {reconnect}',
@@ -551,6 +560,8 @@ DRIFT_FIXES = {
     'not-executable': 'point the link at a Codex executable, then run: {reconnect}',
     'auto-disabled': 'enable automatic switching and connect it: {reconnect}',
     'unreadable': 'check its permissions, then run: {reconnect}',
+    RELATIVE_ENTRY_REASON: 'make that PATH entry absolute; until then what plain codex runs depends on the '
+        'directory you run it from',
 }
 
 
@@ -693,7 +704,7 @@ def codex_path_entries(settings, env=None, relative=False):
     return entries
 
 
-def wrapper_state(settings, env=None):
+def wrapper_state(settings, env=None, relative=False):
     """What plain `codex` runs relative to the recorded wrapper: (state, first, entries).
 
     2026-09-10: Codex's standalone installer wrote ~/.local/bin/codex ahead of the
@@ -704,14 +715,25 @@ def wrapper_state(settings, env=None):
     codex on this PATH), 'connected' (the first entry is xswap-codex), 'drifted'
     (the recorded entry itself no longer points at xswap-codex) or 'shadowed'
     (another entry precedes it). `first` is entries[0] or None.
+
+    `relative` is handed to codex_path_entries, and only a caller that merely
+    reports what plain `codex` runs passes it: `state` is then also 'relative',
+    meaning the entry a relative PATH element resolves to in this working directory
+    runs instead of the wrapped one. Nothing may re-point such an entry, so every
+    repair path keeps the default and cannot see it -- shadowing_entry included.
+    The 'unconfigured' gate still comes first: with automatic switching off nothing
+    claims plain `codex` goes through xswap, so the reason to report is the recorded
+    entry's own ('auto-disabled'), not the PATH element.
     """
     wrapper = settings.get('wrapper') or {}
-    entries = codex_path_entries(settings, env)
+    entries = codex_path_entries(settings, env, relative=relative)
     first = entries[0] if entries else None
     if not wrapper.get('path') or not wrapper.get('proxy') or not settings.get('enabled'):
         state = 'unconfigured'
     elif first is None:
         state = 'absent'
+    elif first['kind'] == 'relative':
+        state = 'relative'
     elif first['kind'] == 'wrapper':
         state = 'connected'
     elif first['path'] == wrapper['path']:
@@ -1197,10 +1219,19 @@ def status_data(manager, prune=False, cleanup=True):
     settings = read_settings(manager)
     sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
     drift = wrapper_drift(settings)
+    # relative=True: a `codex` a relative PATH element resolves to runs instead of the wrapped
+    # entry in this working directory, and reading the absolute-only list reported it as wrapped
+    # -- a surface saying the selection is in effect while plain `codex` runs something else,
+    # which is the 2026-09-10 incident (doctor already FAILs on it). Reporting only; the repair
+    # paths keep codex_path_entries' default and never see that entry.
+    state = wrapper_state(settings, relative=True)[0]
     return {'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []),
-                      'codexWrapped': wrapper_state(settings)[0] == 'connected',
-                      'wrapperReason': drift['reason'],
+                      'codexWrapped': state == 'connected',
+                      # The recorded entry's link state says nothing about a PATH element, so name
+                      # the condition that decided codexWrapped. 'auto-disabled' keeps precedence:
+                      # wrapper_state reports 'unconfigured' for it, whatever PATH holds.
+                      'wrapperReason': RELATIVE_ENTRY_REASON if state == 'relative' else drift['reason'],
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
                       'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': reported_sessions(sessions)}
 
