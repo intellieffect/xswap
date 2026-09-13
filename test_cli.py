@@ -1,10 +1,13 @@
 import asyncio
 import contextlib
+import errno
 import fcntl
 import io
 import json
 import os
 import shutil
+import signal
+import stat
 import time
 from unittest import TestCase
 from unittest.mock import patch
@@ -914,7 +917,7 @@ class DocPromiseTests(TestCase):
 class DisconnectNoticeTests(TestCase):
  """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
  setUp=test_codex_swap.AccountTests.setUp
- def serve(self,run,sweep=False):
+ def serve(self,run,sweep=False,deadline=10):
   # Drives serve_cli's real handler and exit path with a fake listener, CLI process, and bridge class.
   # sweep=True removes the run record the way a concurrent prune does, after the listener is
   # up and before the TUI connects: the window between new_run_dir and the bridge's lock.
@@ -929,8 +932,19 @@ class DisconnectNoticeTests(TestCase):
    def __init__(self,handle,*args,**kwargs):self.handle=handle
    async def __aenter__(self):
     if sweep:shutil.rmtree(run_dir)
-    self.task=asyncio.create_task(self.handle(FakeSocket()));return self
-   async def __aexit__(self,*exc):await self.task
+    async def connection():
+     try:
+      await self.handle(FakeSocket())
+     finally:
+      # The real TUI loses its `--remote` connection when the handler returns, however it
+      # returned, and exits; without this the fake one waits for a bridge that never ran.
+      finished.set()
+    self.task=asyncio.create_task(connection());return self
+   async def __aexit__(self,*exc):
+    # Never wait for the handler to finish on its own. A bridge that never returns made this
+    # await forever, and the deadline below could not reach it (cancelling serve_cli unwinds
+    # into here), so the suite hung with no output instead of failing the test.
+    self.task.cancel();await asyncio.gather(self.task,return_exceptions=True)
    def close(self):pass
    async def wait_closed(self):pass
   class FakeBridge:
@@ -951,7 +965,7 @@ class DisconnectNoticeTests(TestCase):
    finished=asyncio.Event()
    # Bounded: a handler that dies before the bridge runs never sets `finished`, so without
    # a deadline the fake TUI's wait() would hang the suite instead of failing the test.
-   return await asyncio.wait_for(serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge),10)
+   return await asyncio.wait_for(serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge),deadline)
   with patch('websockets.asyncio.server.unix_serve',FakeServe),patch('xswap_cli.asyncio.create_subprocess_exec',spawn),contextlib.redirect_stderr(io.StringIO()) as err:
    code=asyncio.run(main())
   return code,err.getvalue(),run_dir
@@ -961,6 +975,9 @@ class DisconnectNoticeTests(TestCase):
   # every five minutes, the alert job every thirty, and every other launch sweeps too).
   # Once past the 60 s floor the sweep removed it and the O_CREAT lock open then killed
   # the session with a bare FileNotFoundError -- no bridge_failed, so no xswap line.
+  # umask 0022: the record holds status.json, bridge.log and .bridge.lock, so the recreate
+  # has to be as private as new_run_dir's own levels (INT-5085), not whatever the umask says.
+  old=os.umask(0o022);self.addCleanup(os.umask,old)
   reached=[]
   async def run(bridge):
    reached.append(bridge.current)
@@ -968,6 +985,44 @@ class DisconnectNoticeTests(TestCase):
   self.assertEqual((code,err),(0,''))
   self.assertEqual(reached,['first'])
   self.assertTrue((run_dir/'.bridge.lock').is_file())
+  self.assertEqual(stat.S_IMODE(run_dir.stat().st_mode),0o700)
+ def test_a_record_that_cannot_be_prepared_ends_the_session_with_a_reason(self):
+  # private_dir refuses a directory it will not trust (SwapError) and propagates the OSError
+  # a second concurrent sweep causes between its own mkdir and its stat/chmod. Sitting above
+  # the try that sets bridge_failed, it was the silent death this recreate removes: no lock,
+  # no bridge, and not one `xswap auto:` line on the way out -- a bare connection failure.
+  import codex_swap
+  def refuse(path):raise FileNotFoundError(errno.ENOENT,'No such file or directory',str(path))
+  reached=[]
+  async def run(bridge):
+   reached.append(bridge.current)
+  with patch.object(codex_swap,'private_dir',refuse):
+   code,err,run_dir=self.serve(run)
+  self.assertEqual((code,reached),(0,[]))
+  self.assertIn(f'xswap auto: CLI bridge disconnected (run record {run_dir} unusable '
+                f'(No such file or directory)); see {run_dir/"bridge.log"} or xswap auto-status.',err)
+  self.assertFalse((run_dir/'.bridge.lock').exists())
+ def test_a_bridge_that_never_returns_fails_the_harness_instead_of_hanging_it(self):
+  # This test guards the harness above. The wait_for deadline only bounds a handler that
+  # finishes or raises: while __aexit__ awaited the handler task, the deadline's cancellation
+  # of serve_cli unwound into that await, nothing ever cancelled the task, and unittest
+  # printed nothing at all -- so the next bridge-hang regression case would hang the suite
+  # rather than fail. The alarm is the same trick test_live uses for a blocking open.
+  class Deadline(BaseException):
+   """Not an Exception: nothing on the path under test may catch it."""
+  def ring(signum,frame):raise Deadline()
+  async def run(bridge):
+   await asyncio.Event().wait()
+  previous=signal.signal(signal.SIGALRM,ring)
+  self.addCleanup(signal.signal,signal.SIGALRM,previous)
+  signal.setitimer(signal.ITIMER_REAL,10.0)
+  self.addCleanup(signal.setitimer,signal.ITIMER_REAL,0)
+  try:
+   with self.assertRaises(TimeoutError):
+    self.serve(run,deadline=0.25)
+  except Deadline:
+   self.fail('the harness hung on a bridge that never returns')
+  signal.setitimer(signal.ITIMER_REAL,0)
  def test_bridge_failure_names_the_log(self):
   async def run(bridge):
    bridge.failure='app-server exited';raise LiveError('app-server exited')

@@ -266,7 +266,7 @@ class WebSocketBridge(Bridge):
 
 async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_class=WebSocketBridge):
     """One TUI and one child server. No TCP listener and no TUI restart."""
-    from codex_swap import private_dir
+    from codex_swap import SwapError, private_dir
     from websockets.asyncio.server import unix_serve
     from websockets.exceptions import ConnectionClosed
     connected = False
@@ -293,9 +293,19 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
         # so a sweep that fires while the TUI is still starting (a cold release on a spun-up
         # volume, a loaded machine) classifies it `empty` and removes it. Recreate it rather
         # than letting the O_CREAT below kill the session with a bare FileNotFoundError.
-        private_dir(status_path.parent)
-        lock = os.open(status_path.parent / '.bridge.lock', os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        # Inside the failure path, not above it: private_dir raises SwapError for a directory
+        # it will not trust and propagates the OSError a second sweep causes between its own
+        # mkdir and its stat/chmod, and anything that escapes this handler leaves
+        # bridge_failed False -- the silent death this recreate was added to remove.
+        try:
+            private_dir(status_path.parent)
+            lock = os.open(status_path.parent / '.bridge.lock', os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except (SwapError, OSError) as error:
+            active_bridge.failure = f'run record {status_path.parent} unusable ' \
+                                    f'({getattr(error, "strerror", None) or type(error).__name__})'
+            bridge_failed = True
+            return
         try:
             await active_bridge.run()
         except Exception:
