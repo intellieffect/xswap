@@ -620,6 +620,26 @@ class CliTests(TestCase):
   self.assertEqual([(h['surface'],h['account'],h['bridgeVersion']) for h in hints],[('cli','main','0.7.2'),('cli','main',None)])
   self.assertEqual(hints[0]['hint'],f'bridge 0.7.2 · reopen with xswap run -- resume {self.THREAD} to load {__version__}')
   self.assertEqual(hints[1]['hint'],f'bridge unknown (older than 0.7.6) · exit and reopen it to load {__version__}')
+ def test_session_report_cap_never_drops_a_running_session(self):
+  # Run dirs are named by uuid4, so the old sessions[-20:] tail dropped whichever records
+  # sorted first: the desktop record, then the oldest CLI ones. A running bridge hidden
+  # from this list takes its reopen hint with it while doctor's own loop still counts it --
+  # "doctor says OK while an old bridge runs", the 2026-09-10 state item 6 exists to end.
+  import xswap_doctor
+  from codex_swap import __version__,atomic_json
+  from xswap_cli import SESSION_REPORT_LIMIT,bridge_hints,status_data
+  atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})
+  self.bridged_run('a-running-old',{'bridgeVersion':'0.7.2'})
+  for index in range(SESSION_REPORT_LIMIT):
+   self.bridged_run(f'z{index:02d}',{'bridgeVersion':__version__},hold_lock=False)
+  state=status_data(self.manager,cleanup=False)
+  self.assertEqual(len(state['sessions']),SESSION_REPORT_LIMIT)
+  self.assertEqual([s['bridgeVersion'] for s in state['sessions'] if s['running']],['0.7.2'])
+  [hint]=bridge_hints(self.manager,state,__version__)
+  self.assertEqual(hint['bridgeVersion'],'0.7.2')
+  row=xswap_doctor.check_auto_runs(self.manager)
+  self.assertEqual(row['status'],'WARN')
+  self.assertIn('21 run(s), 1 running',row['detail'])
  def test_bridge_hint_uses_plain_codex_when_the_wrapper_is_connected(self):
   from codex_swap import __version__,atomic_json
   from xswap_cli import bridge_hints,status_data

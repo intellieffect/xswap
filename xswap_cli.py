@@ -987,6 +987,7 @@ def codex_main():
 STALE_RUN_SECONDS = 7 * 24 * 3600
 STOPPED_RUN_SECONDS = 24 * 3600
 MIN_PRUNE_AGE_SECONDS = 60
+SESSION_REPORT_LIMIT = 20  # how many records status_data reports; running ones are never dropped
 PRUNED_RECORD_KEYS = ('account', 'event', 'bridgeVersion', 'reason')
 # The whitelist of bridge status fields a session record may expose. A constant
 # because a status.json also holds fields no report may carry (a `stopped`
@@ -1123,6 +1124,26 @@ def scan_runs(manager, prune=False, cleanup=True):
     return sessions, pruned
 
 
+def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
+    """At most `limit` records for a report, keeping every running one and the newest of
+    the rest, in scan order.
+
+    The cap bounds `auto-status`, but it must not decide what the version check sees:
+    bridge_hints, doctor's `auto cli-runs` row, `upgrade` and the menu bar all read this
+    list, and run directories are named by uuid4, so a plain tail silently dropped a
+    running bridge once the store held more than `limit` readable records -- the desktop
+    record sorts first and went first. On 2026-09-10 three 0.7.2 bridges running next to
+    an installed 0.7.6 is exactly the state these hints exist to surface.
+    """
+    if len(sessions) <= limit:
+        return list(sessions)
+    room = max(0, limit - sum(1 for session in sessions if session.get('running')))
+    newest = [index for index, session in enumerate(sessions) if not session.get('running')]
+    keep = set(newest[-room:] if room else [])
+    return [session for index, session in enumerate(sessions)
+            if session.get('running') or index in keep]
+
+
 def status_data(manager, prune=False, cleanup=True):
     settings = read_settings(manager)
     sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
@@ -1132,7 +1153,7 @@ def status_data(manager, prune=False, cleanup=True):
                       'codexWrapped': wrapper_state(settings)[0] == 'connected',
                       'wrapperReason': drift['reason'],
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
-                      'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': sessions[-20:]}
+                      'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': reported_sessions(sessions)}
 
 
 SURFACE_LABELS = {'cli': 'CLI', 'desktop': 'Desktop'}
