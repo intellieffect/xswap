@@ -504,6 +504,31 @@ class PathEntriesTests(WrapperFixture):
         self.assertEqual(codex_path_entries({}, {'PATH': str(stray.parent)}),
                          [{'path': str(stray), 'target': None, 'kind': 'foreign'}])
 
+    def test_a_relative_path_directory_is_not_an_entry_and_is_never_rewritten(self):
+        # PATH="bin:/opt/homebrew/bin" with a project-local bin/codex shim (npm's
+        # @openai/codex installs exactly that shape). The shadow repair used to wrap it:
+        # xswap rewrote a link inside the user's repository and recorded `path: bin/codex`,
+        # which `auto-disable` could not find again from any other working directory.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        settings = read_settings(self.manager)
+        project = self.base / 'project'
+        (project / 'bin').mkdir(parents=True)
+        shim = project / 'bin' / 'codex'
+        shim.symlink_to(updated)
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        path = os.pathsep.join(['bin', str(cli.parent)])
+        self.assertEqual([e['path'] for e in codex_path_entries(settings, {'PATH': path})], [str(cli)])
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(shim), str(updated))  # the repository is untouched
+        stored = read_settings(self.manager)['wrapper']
+        self.assertEqual(stored['path'], str(cli))
+        self.assertNotIn('wrappers', read_settings(self.manager))
+
     def test_doctor_fails_naming_the_entry_that_shadows_the_wrapped_one(self):
         settings, cli, proxy, updated = self.fixture()
         stray = self.bin_dir('stray-bin') / 'codex'

@@ -624,8 +624,9 @@ def codex_path_entries(settings, env=None):
     """Every `codex` a PATH lookup can run, in lookup order, classified against the recorded wrapper.
 
     Mirrors shutil.which's per-directory test (an existing file with the execute
-    bit; a dangling link or a directory is skipped), so entries[0] is what plain
-    `codex` runs. A directory listed twice on PATH yields one entry. `kind` is
+    bit; a dangling link or a directory is skipped) over the absolute PATH
+    directories, so entries[0] is what plain `codex` runs from any working
+    directory. A directory listed twice on PATH yields one entry. `kind` is
     'wrapper' when the entry's link target is the recorded proxy or the entry
     resolves to the same file as the proxy, 'foreign' otherwise; `target` is the
     raw link target of a symlink and None for a regular file. `env` supplies PATH
@@ -640,7 +641,11 @@ def codex_path_entries(settings, env=None):
         proxy_real = None
     entries, seen = [], set()
     for directory in os.get_exec_path(env):
-        if not directory:
+        # A relative PATH element (a project's `bin`, a direnv habit) names a different
+        # file in every working directory, so it can never be the recorded entry and must
+        # never be re-pointed: xswap would rewrite a `codex` shim inside the user's own
+        # repository and store a `path` no other directory can find again.
+        if not directory or not os.path.isabs(directory):
             continue
         candidate = Path(directory) / 'codex'
         # Per PATH directory, not per realpath: on this machine several entries
