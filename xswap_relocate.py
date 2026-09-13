@@ -205,6 +205,18 @@ def _rewrite(manager, value, reference, accounts):
     return value
 
 
+def _record_rewrites(manager, record, reference, accounts):
+    """{key: new value} for the paths one wrapper record spells through xswap's root."""
+    rewrites = {}
+    for key in ('realCodex', 'originalTarget'):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            rewritten = _rewrite(manager, value, reference, accounts)
+            if rewritten != value:
+                rewrites[key] = rewritten
+    return rewrites
+
+
 def plan_relocation(manager):
     """Everything relocate() would do, computed without changing anything. Raises
     SwapError for any state it refuses to touch."""
@@ -228,14 +240,20 @@ def plan_relocation(manager):
         homes.append({'home': home, 'packages': packages, 'releases': releases,
                       'current': _current_name(standalone) if standalone.is_dir() else None,
                       'holdsReal': bool(real) and Path(real).is_relative_to(packages)})
-    rewrites = {}
-    for key in ('realCodex', 'originalTarget'):
-        value = wrapper.get(key)
-        if isinstance(value, str) and value:
-            rewritten = _rewrite(manager, value, reference, accounts)
-            if rewritten != value:
-                rewrites[key] = rewritten
-    plan = {'reference': reference, 'homes': homes, 'rewrites': rewrites, 'moves': [], 'current': None, 'wrapper': wrapper}
+    rewrites = _record_rewrites(manager, wrapper, reference, accounts)
+    # 0.8.0 can hold several wrapped entries (`wrappers`), and `auto-disable` restores every
+    # one of them. A secondary record still spelling a release through xswap's own root would
+    # put that path back on PATH with no record left and nothing to repair it, so every
+    # record is rewritten here, not only the entry plain `codex` currently runs through.
+    wrapper_rewrites = {}
+    for record in settings.get('wrappers') or []:
+        if not isinstance(record, dict) or not isinstance(record.get('path'), str) or not record['path']:
+            continue
+        changed = _record_rewrites(manager, record, reference, accounts)
+        if changed:
+            wrapper_rewrites[record['path']] = changed
+    plan = {'reference': reference, 'homes': homes, 'rewrites': rewrites,
+            'wrapperRewrites': wrapper_rewrites, 'moves': [], 'current': None, 'wrapper': wrapper}
     if not homes:
         return plan
     if reference is None:
@@ -301,7 +319,7 @@ def relocate(manager, dry=False):
     kept, running, lines = [], 0, []
     with manager.locked():
         plan = plan_relocation(manager)
-        if not plan['homes'] and not plan['rewrites']:
+        if not plan['homes'] and not plan['rewrites'] and not plan['wrapperRewrites']:
             real = plan['wrapper'].get('realCodex') or 'none recorded'
             print(f'Nothing to relocate: the real Codex ({real}) is outside {manager.root} and no xswap-owned home holds a packages directory.')
             return plan
@@ -318,6 +336,9 @@ def relocate(manager, dry=False):
             lines.append(f"{ref_standalone / 'current'} -> {ref_standalone / 'releases' / plan['current']}")
         for key, value in plan['rewrites'].items():
             lines.append(f'auto.json {key} -> {value}')
+        for record_path, values in plan['wrapperRewrites'].items():
+            for key, value in values.items():
+                lines.append(f'auto.json wrappers {record_path} {key} -> {value}')
         if dry:
             print('\n'.join(lines + ['Dry run: nothing changed.']))
             return plan
@@ -339,18 +360,28 @@ def relocate(manager, dry=False):
                 shutil.rmtree(aside)
             else:
                 kept.append(aside)
-        if plan['rewrites']:
+        if plan['rewrites'] or plan['wrapperRewrites']:
             settings = read_settings(manager)
             wrapper = settings.get('wrapper') or {}
-            old_original = wrapper.get('originalTarget')
-            wrapper.update(plan['rewrites'])
+            updates = [(wrapper, plan['rewrites'])]
+            for record in settings.get('wrappers') or []:
+                if isinstance(record, dict) and plan['wrapperRewrites'].get(record.get('path')):
+                    updates.append((record, plan['wrapperRewrites'][record['path']]))
+            repoints = []
+            for record, values in updates:
+                if not values:
+                    continue
+                old_original = record.get('originalTarget')
+                record.update(values)
+                new_original = values.get('originalTarget')
+                path = Path(record.get('path') or '')
+                # auto-disable restores originalTarget literally, so a disconnected entry
+                # still points into the moved-out directory until it is re-pointed here.
+                if new_original and record.get('path') and path.is_symlink() and os.readlink(path) == old_original:
+                    repoints.append((path, new_original))
             settings['wrapper'] = wrapper
             atomic_json(manager.root / 'auto.json', settings)
-            path = Path(wrapper.get('path', ''))
-            new_original = plan['rewrites'].get('originalTarget')
-            # auto-disable restores originalTarget literally, so a disconnected entry
-            # still points into the moved-out directory until it is re-pointed here.
-            if new_original and wrapper.get('path') and path.is_symlink() and os.readlink(path) == old_original:
+            for path, new_original in repoints:
                 swap_symlink(path, new_original)
                 lines.append(f'{path} -> {new_original}')
     for aside in kept:

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import test_codex_swap
 import xswap_doctor as doctor
 from codex_swap import atomic_json, main
-from xswap_cli import enable, launch_cli, read_settings, reconnect_wrapper
+from xswap_cli import disable, enable, launch_cli, read_settings, reconnect_wrapper
 from xswap_relocate import canonical_codex_path, inside_root, link_packages
 
 NEW = '0.154.0-aarch64-apple-darwin'
@@ -276,6 +276,39 @@ class RelocateTests(TestCase):
         self.assertIn('moved 2 release(s)', out.getvalue())
         self.assertIn(f'auto.json realCodex -> {expected}', out.getvalue())
         self.assertEqual(list(self.source.rglob('auth.json')), [self.source / 'auth.json'])
+
+    def test_relocate_rewrites_a_secondary_wrapper_record_too(self):
+        # The 2026-09-10 shape: the standalone installer wrote a second `codex` ahead of the
+        # wrapped one, so reconnect_wrapper made that the primary and pushed the old record
+        # into `wrappers` -- still spelling the release through xswap's own root. Only the
+        # primary used to be rewritten, so `auto-disable` restored that path back onto PATH
+        # and told the user to run a relocate that then reported nothing to do.
+        runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
+        outside = self.source / 'codex'
+        outside.write_text('fixture')
+        outside.chmod(0o700)
+        shadow = self.base / 'local-bin'
+        shadow.mkdir()
+        shadow_cli = shadow / 'codex'
+        shadow_cli.symlink_to(proxy)
+        settings = read_settings(self.manager)
+        settings['wrappers'] = [settings['wrapper']]
+        settings['wrapper'] = {'path': str(shadow_cli), 'originalTarget': str(outside),
+                               'realCodex': str(outside), 'proxy': str(proxy)}
+        atomic_json(self.manager.root / 'auto.json', settings)
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(['relocate-codex']), 0)
+        expected = str(self.source / 'packages' / 'standalone' / 'current' / 'bin' / 'codex')
+        record = read_settings(self.manager)['wrappers'][0]
+        self.assertEqual((record['realCodex'], record['originalTarget']), (expected, expected))
+        self.assertFalse(inside_root(self.manager, record['realCodex']))
+        self.assertIn(f'auto.json wrappers {cli} realCodex -> {expected}', out.getvalue())
+        # auto-disable restores every record; the secondary now lands outside the root, so
+        # there is nothing left for it to send the user back to relocate-codex about.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            disable(self.manager)
+        self.assertEqual(os.readlink(cli), expected)
+        self.assertEqual(err.getvalue(), '')
 
     def test_dry_run_prints_the_plan_and_changes_nothing(self):
         runtime, standalone, binary, inside, cli, proxy = self.misplaced_install()
