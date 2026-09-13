@@ -4,6 +4,7 @@ import fcntl
 import io
 import json
 import os
+import shutil
 import time
 from unittest import TestCase
 from unittest.mock import patch
@@ -870,8 +871,10 @@ class PassthroughDocsTests(TestCase):
 class DisconnectNoticeTests(TestCase):
  """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
  setUp=test_codex_swap.AccountTests.setUp
- def serve(self,run):
+ def serve(self,run,sweep=False):
   # Drives serve_cli's real handler and exit path with a fake listener, CLI process, and bridge class.
+  # sweep=True removes the run record the way a concurrent prune does, after the listener is
+  # up and before the TUI connects: the window between new_run_dir and the bridge's lock.
   run_dir=self.manager.root/'auto'/'cli-runs'/'notice';run_dir.mkdir(parents=True)
   socket_path=self.base/'rpc.sock';socket_path.touch()
   finished=None
@@ -882,6 +885,7 @@ class DisconnectNoticeTests(TestCase):
   class FakeServe:
    def __init__(self,handle,*args,**kwargs):self.handle=handle
    async def __aenter__(self):
+    if sweep:shutil.rmtree(run_dir)
     self.task=asyncio.create_task(self.handle(FakeSocket()));return self
    async def __aexit__(self,*exc):await self.task
    def close(self):pass
@@ -902,10 +906,25 @@ class DisconnectNoticeTests(TestCase):
   async def main():
    nonlocal finished
    finished=asyncio.Event()
-   return await serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge)
+   # Bounded: a handler that dies before the bridge runs never sets `finished`, so without
+   # a deadline the fake TUI's wait() would hang the suite instead of failing the test.
+   return await asyncio.wait_for(serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge),10)
   with patch('websockets.asyncio.server.unix_serve',FakeServe),patch('xswap_cli.asyncio.create_subprocess_exec',spawn),contextlib.redirect_stderr(io.StringIO()) as err:
    code=asyncio.run(main())
   return code,err.getvalue(),run_dir
+ def test_a_record_swept_before_the_bridge_connects_is_recreated(self):
+  # The run dir is created before the TUI is spawned and holds nothing until the bridge
+  # takes its lock, so it reads as `empty` to a sweep (the menu bar's dashboard runs one
+  # every five minutes, the alert job every thirty, and every other launch sweeps too).
+  # Once past the 60 s floor the sweep removed it and the O_CREAT lock open then killed
+  # the session with a bare FileNotFoundError -- no bridge_failed, so no xswap line.
+  reached=[]
+  async def run(bridge):
+   reached.append(bridge.current)
+  code,err,run_dir=self.serve(run,sweep=True)
+  self.assertEqual((code,err),(0,''))
+  self.assertEqual(reached,['first'])
+  self.assertTrue((run_dir/'.bridge.lock').is_file())
  def test_bridge_failure_names_the_log(self):
   async def run(bridge):
    bridge.failure='app-server exited';raise LiveError('app-server exited')

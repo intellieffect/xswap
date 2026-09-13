@@ -266,6 +266,7 @@ class WebSocketBridge(Bridge):
 
 async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_class=WebSocketBridge):
     """One TUI and one child server. No TCP listener and no TUI restart."""
+    from codex_swap import private_dir
     from websockets.asyncio.server import unix_serve
     from websockets.exceptions import ConnectionClosed
     connected = False
@@ -288,6 +289,11 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
             env, socket=socket, status_path=status_path)
         await client_ready.wait()
         active_bridge.client_pid = cli.pid
+        # The record is created before the TUI is spawned and stays empty until this point,
+        # so a sweep that fires while the TUI is still starting (a cold release on a spun-up
+        # volume, a loaded machine) classifies it `empty` and removes it. Recreate it rather
+        # than letting the O_CREAT below kill the session with a bare FileNotFoundError.
+        private_dir(status_path.parent)
         lock = os.open(status_path.parent / '.bridge.lock', os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
