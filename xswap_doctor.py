@@ -23,6 +23,9 @@ from xswap_relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 TOKEN_WARN_SECONDS = 24 * 3600
+# Everything codex_swap.identity() can return that is not an address: a local label with
+# nothing to compare against the login an app server reports.
+IDENTITY_SENTINELS = ("not signed in", "unreadable auth cache", "API key", "ChatGPT")
 # Never spawn a probe subprocess with a caller's API key or workload identity in its
 # environment; matches the keys Manager.env strips (minus the desktop-only path var).
 SECRET_ENV_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN")
@@ -339,7 +342,11 @@ def check_auto_sessions(manager, accounts):
             current = identity(Path(home))
         except SwapError:
             continue
-        if current not in ("not signed in", "unreadable auth cache", "API key") and current.casefold() != confirmed.casefold():
+        # Every identity() sentinel, not only three of them: "ChatGPT" is what a login with
+        # an access token but no email claim reads as locally (check_credentials accepts it
+        # as OK), and comparing that label with the server's address claimed a session had
+        # changed identity and advised an `xswap switch` that re-verified to the same email.
+        if current not in IDENTITY_SENTINELS and current.casefold() != confirmed.casefold():
             problems.append(f"{surface} pid {pid} verified as {confirmed} but {account} is now signed in as {current}; "
                             f"re-send it: xswap switch {account}")
     if problems:

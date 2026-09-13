@@ -815,11 +815,54 @@ class AutoSessionDoctorTests(unittest.TestCase):
         row = find(self.run_doctor(), "auto sessions")
         self.assertEqual((row["status"], row["detail"]), ("OK", "2 running, 1 verified, 1 on an older bridge (not checked)"))
 
-    def test_row_never_repeats_a_token_from_a_status_record(self):
+    def test_a_local_label_that_is_not_an_address_is_not_a_changed_identity(self):
+        # auth.json with an access token but no id_token (or an id_token without an email
+        # claim) makes identity() return the sentinel "ChatGPT", which check_credentials
+        # accepts as OK. Comparing that label with the address the app server confirmed
+        # claimed the account had been signed in as someone else, and the `xswap switch`
+        # it advised re-verified to the same email, so the WARN came back every run.
+        home = self.base / "home-main"
+        home.mkdir()
+        atomic_json(home / "auth.json", {"auth_mode": "chatgpt", "tokens": {
+            "access_token": fake_jwt(exp=time.time() + 100000), "refresh_token": "fixture-refresh"}})
+        self.manager.register("main", home)
+        self.assertEqual(identity(home), "ChatGPT")
+        self.running_session("live", {"account": "main", "verifiedAccount": "main",
+                                      "verifiedIdentity": "bruce@example.test",
+                                      "verifiedAt": time.time(), "verifyReason": None})
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "1 running, 1 verified"))
+
+    def test_a_signed_out_or_api_key_account_is_not_a_changed_identity_either(self):
+        # `codex logout` in the account's home, or a swap to an API key, while a verified
+        # session runs: identity() returns a sentinel, and the session is still fine.
+        home = self.register_with_email("main", "main@example.test")
+        self.running_session("live", {"account": "main", "verifiedAccount": "main",
+                                      "verifiedIdentity": "main@example.test",
+                                      "verifiedAt": time.time(), "verifyReason": None})
+        (home / "auth.json").unlink()
+        self.assertEqual(identity(home), "not signed in")
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "1 running, 1 verified"))
+        atomic_json(home / "auth.json", {"auth_mode": "apikey", "OPENAI_API_KEY": "fixture-key"})
+        self.assertEqual(identity(home), "API key")
+        row = find(self.run_doctor(), "auto sessions")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "1 running, 1 verified"))
+
+    def test_row_never_repeats_a_status_records_own_text(self):
+        # `accessToken` never reaches this row -- scan_runs' SESSION_KEYS whitelist drops it
+        # before doctor sees it -- so planting only that proved nothing. `reason` does
+        # survive the whitelist, and a `stopped` record's reason can quote a raw payload;
+        # pin the row's own sentence against it, and pin that the row exists at all.
         self.register_with_email("main", "main@example.test")
-        self.running_session("live", {"account": "main", "verifiedAccount": None, "verifyReason": "identity mismatch",
-                                      "accessToken": "must-not-leak"})
-        self.assertNotIn("must-not-leak", json.dumps(self.run_doctor()))
+        self.running_session("live", {"account": "main", "verifiedAccount": None,
+                                      "verifyReason": "identity mismatch",
+                                      "reason": "must-not-leak", "accessToken": "must-not-leak-either"})
+        results = self.run_doctor()
+        row = find(results, "auto sessions")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("server login unverified (identity mismatch)", row["detail"])
+        self.assertNotIn("must-not-leak", json.dumps(results))
 
 
 class WrapperPathTests(unittest.TestCase):
