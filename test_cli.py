@@ -640,6 +640,25 @@ class CliTests(TestCase):
   fd=os.open(desktop/'.bridge.lock',os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(fd,fcntl.LOCK_EX);self.addCleanup(os.close,fd)
   hints=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
   self.assertEqual([h['hint'] for h in hints],[f'bridge 0.7.2 · quit and reopen it with xswap app to load {__version__}',f'bridge 0.7.2 · exit and reopen it to load {__version__}'])
+ def test_bridge_hint_needs_both_a_rollout_file_and_a_pool_of_two_to_name_a_command(self):
+  from codex_swap import __version__,atomic_json
+  from xswap_cli import bridge_hints,status_data
+  # Two independent rules send a session to the generic line, and the fixture above
+  # satisfies neither, so each needs a record where only the other rule could fire:
+  # a thread with no rollout file cannot be resumed at all, and with auto defaults
+  # off the record must name its own pool (a pre-0.8.0 record names none).
+  runtime=self.manager.root/'auto'/'cli-codex';auto=self.manager.root/'auto.json'
+  generic=f'bridge 0.7.2 · exit and reopen it to load {__version__}'
+  atomic_json(auto,{'enabled':True,'accounts':['main','second']})
+  self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime)})
+  [unsaved]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual(unsaved['hint'],generic)  # auto would name it; the thread has no rollout file
+  self.save_thread(runtime)
+  [named]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual(named['hint'],f'bridge 0.7.2 · reopen with xswap run -- resume {self.THREAD} to load {__version__}')
+  atomic_json(auto,{'enabled':False,'accounts':['main','second']})
+  [lone]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
+  self.assertEqual(lone['hint'],generic)  # saved now, but one account is not a pool to reopen with
  def test_list_shows_the_reopen_hint_under_the_running_session(self):
   from codex_swap import __version__,atomic_json
   self.manager.register('main')
