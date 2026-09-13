@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -476,6 +477,26 @@ class DoctorTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(doctor.print_report(results), 0)
         self.assertTrue((self.manager.root / "auto" / "cli-runs" / "legacy" / "status.json").exists())
+
+    def test_auto_runs_row_survives_a_record_removed_by_a_concurrent_sweep(self):
+        # Sweeps fire from every list/usage (the alert job included), the menu bar's
+        # dashboard every five minutes and every bridged launch, so a record can vanish
+        # between this row's exists() test and its lock open. The unguarded os.open
+        # propagated the FileNotFoundError out of doctor.run(), so the one command a user
+        # runs when things are broken printed no report at all and a bogus failure.
+        self.register_main()
+        self.bridged_run("vanishing", {"bridgeVersion": "0.7.2", "event": "stopped"}, running=False)
+        real_open = os.open
+
+        def vanishing(path, *args, **kwargs):
+            if str(path).endswith(".bridge.lock"):
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+            return real_open(path, *args, **kwargs)
+
+        with patch("os.open", side_effect=vanishing):
+            results = self.run_doctor()
+        row = find(results, "auto cli-runs")
+        self.assertEqual((row["status"], row["detail"]), ("OK", "1 run(s), 0 running"))
 
     def test_auto_runs_row_survives_a_corrupted_auto_json(self):
         self.register_main()

@@ -271,7 +271,14 @@ def check_auto_runs(manager):
             lock_path = run_dir / ".bridge.lock"
             if not lock_path.exists():
                 continue
-            fd = os.open(lock_path, os.O_RDONLY)
+            try:
+                fd = os.open(lock_path, os.O_RDONLY)
+            except OSError:
+                # Sweeps now run from every list/usage, the menu bar's dashboard and every
+                # launch, so another one can remove this record between the exists() test
+                # and this open. scan_runs is guarded the same way; one vanished record must
+                # not abort the whole `xswap doctor` report with a bogus OSError.
+                continue
             try:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
