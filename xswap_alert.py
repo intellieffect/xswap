@@ -183,12 +183,16 @@ def validate_every(value):
 
 
 def validate_cached(value):
+    # The same rule as codex_swap.parse_cache_seconds, which is what the installed job's
+    # own `xswap auto-tick --cached N` and `xswap list --cached N` steps go through: it
+    # rejects 0, so accepting 0 here baked `--cached 0` into run.sh and every step of the
+    # job then exited 1 forever -- no warning and, with --auto-switch, no switching either.
     try:
         value = float(value)
     except (TypeError, ValueError):
-        raise AlertError("--cached must be zero or a positive number of seconds.") from None
-    if not math.isfinite(value) or value < 0:
-        raise AlertError("--cached must be zero or a positive number of seconds.")
+        raise AlertError("--cached must be a positive number of seconds.") from None
+    if not math.isfinite(value) or value <= 0:
+        raise AlertError("--cached must be a positive number of seconds.")
     return value
 
 

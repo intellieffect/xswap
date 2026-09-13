@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import xswap_alert
+from codex_swap import SwapError, parse_cache_seconds
 from xswap_alert import (
     AUTO_SWITCH_MARKER,
     AlertError,
@@ -66,10 +67,16 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(AlertError):
             validate_every("2.5")
 
-    def test_cached_rejects_negative_but_allows_zero(self):
-        with self.assertRaises(AlertError):
-            validate_cached(-1)
-        self.assertEqual(validate_cached(0), 0.0)
+    def test_cached_rejects_zero_because_the_steps_it_renders_do(self):
+        # `--cached 0` was accepted here and rendered verbatim into run.sh, but
+        # parse_cache_seconds (what `xswap list --cached N` and `xswap auto-tick --cached N`
+        # both go through) rejects it, so every step of the installed job exited 1 forever.
+        for rejected in (0, "0", -1, -0.5):
+            with self.assertRaises(AlertError):
+                validate_cached(rejected)
+        self.assertEqual(validate_cached(0.5), 0.5)
+        with self.assertRaises(SwapError):
+            parse_cache_seconds("0")  # the rule this one now matches
 
 
 class ResolveXswapTests(unittest.TestCase):
@@ -710,6 +717,22 @@ class MainCLIWiringTests(unittest.TestCase):
                 code = self.codex_swap.main(argv)
             self.assertEqual(code, 1)
             self.assertIn("--auto-switch requires --install.", err.getvalue())
+
+    def test_install_refuses_cached_zero_instead_of_baking_a_dead_job(self):
+        # `--cached 0` used to install cleanly and then render `xswap auto-tick --cached 0`
+        # and `xswap list --warn 15 --cached 0`, both of which parse_cache_seconds rejects:
+        # the job never warned and, with --auto-switch, never switched -- last.log only ever
+        # showed `exited 1`. Refuse at install time, before anything is written.
+        with patch("xswap_alert.sys.platform", "darwin"), \
+             patch("xswap_alert.shutil.which", return_value="/opt/homebrew/bin/xswap"), \
+             patch("xswap_alert.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["alert", "--install", "--auto-switch", "--cached", "0"])
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+        self.assertIn("--cached must be a positive number of seconds.", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(run_script_path(self.store).exists())
 
     def test_dry_run_install_auto_switch_wires_through_main(self):
         with patch("xswap_alert.sys.platform", "darwin"), \
