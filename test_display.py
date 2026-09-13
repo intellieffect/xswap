@@ -137,6 +137,7 @@ class DisplayEnglishTests(unittest.TestCase):
         for status, expected in [('disabled', 'disabled'), ('not signed in', 'sign-in required · xswap login x'),
                                   ('offline', 'offline'), ('usage unavailable: boom', 'unavailable · boom'),
                                   ('usage unavailable: sign in again to read usage', 'sign-in required · xswap login x'),
+                                  ('sign-in required', 'sign-in required · xswap login x'),
                                   ('API key: subscription quota not available', 'unavailable · API key: subscription quota not available')]:
             value = {'name': 'x', 'active': False, 'identity': 'i', 'status': status, 'buckets': []}
             item = summary(value, lang='en')
@@ -144,6 +145,8 @@ class DisplayEnglishTests(unittest.TestCase):
 
     def test_status_notes_korean_keep_original_labels(self):
         value = {'name': 'main', 'active': False, 'identity': 'i', 'status': 'usage unavailable: sign in again to read usage', 'buckets': []}
+        self.assertEqual(summary(value, lang='ko')['summary'], '로그인 필요 · xswap login main')
+        value['status'] = 'sign-in required'
         self.assertEqual(summary(value, lang='ko')['summary'], '로그인 필요 · xswap login main')
         value['status'] = 'usage unavailable: boom'
         self.assertEqual(summary(value, lang='ko')['summary'], '조회 불가 · boom')
@@ -222,6 +225,20 @@ class DisplayEnglishTests(unittest.TestCase):
         self.assertIn('weekly usage unavailable', text)
         self.assertNotIn('[░', text)
         self.assertIn('No running sessions detected', text)
+
+    def test_outdated_bridge_hint_sits_under_its_session_group(self):
+        hint = 'bridge 0.7.2 · reopen with codex resume 00000000-0000-4000-8000-000000000001 to load 0.8.0'
+        sessions = [{'surface': 'cli', 'account': 'second', 'running': True},
+                    {'surface': 'cli', 'account': 'work', 'running': True}]
+        text = render([row()], {}, color=False, now=0, sessions=sessions,
+                      hints=[{'surface': 'cli', 'account': 'second', 'bridgeVersion': '0.7.2', 'hint': hint}])
+        lines = text.splitlines()
+        self.assertEqual(lines[lines.index('  ● CLI · second · 1 session') + 1], '    ⚠ ' + hint)
+        self.assertNotIn('⚠', lines[lines.index('  ● CLI · work · 1 session') + 1])
+        self.assertNotIn('⚠', render([row()], {}, color=False, now=0, sessions=sessions))
+        colored = render([row()], {}, color=True, now=0, sessions=sessions,
+                         hints=[{'surface': 'cli', 'account': 'second', 'bridgeVersion': '0.7.2', 'hint': hint}])
+        self.assertIn('\033[33m⚠ ' + hint + '\033[0m', colored)
 
     def test_render_no_accounts_message(self):
         self.assertEqual(render([], {}, lang='en'), 'No accounts registered. xswap register main')

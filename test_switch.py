@@ -46,8 +46,20 @@ class ManualBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bridge.switches, 0)
         self.assertEqual(self.bridge.manual_state, 'applied')
         self.assertEqual([c[0] for c in self.calls], ['account/login/start'])
-        self.assertEqual(self.calls[0][1]['accessToken'], 'fake-first')
+        self.assertEqual(self.calls[0][1]['chatgptAccountId'], 'first')
+        self.assertTrue(self.calls[0][1]['accessToken'].endswith('.fake-first'))
         self.assertEqual(self.emitted[-1]['method'], 'account/rateLimits/updated')
+
+    async def test_relogin_reverifies_the_same_account(self):
+        # The server confirmed `first` earlier; the re-login's read must refresh that confirmation.
+        self.bridge.record_verification('first', 'first@example.test', None)
+        self.bridge.verified_at = 1.0
+        self.request(name='first')
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        self.assertEqual(len(self.reads), 1)
+        self.assertEqual((self.bridge.verified_account, self.bridge.verified_identity, self.bridge.verify_reason),
+                         ('first', 'first@example.test', None))
+        self.assertGreater(self.bridge.verified_at, 1.0)
 
     async def test_busy_switch_waits_for_all_turns(self):
         self.bridge.active.update(('a', 'b'))
@@ -77,6 +89,7 @@ class ManualBridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.apply_manual_switch()
         self.assertEqual(self.bridge.current, 'first')
         self.assertEqual(self.bridge.manual_state, 'failed')
+        self.assertEqual(self.bridge.manual_reason, 'RuntimeError')  # classified: the type, never the message
         self.assertFalse(await self.bridge.apply_manual_switch())
 
     async def test_stale_instance_and_symlink_are_ignored(self):
@@ -161,6 +174,18 @@ class SwitchCommandTests(unittest.TestCase):
             report = switch_running(self.manager, 'second')
         self.assertEqual(report['applied'], 1)
         self.assertEqual(report['unconfirmed'], 0)
+        self.assertNotIn('reasons', report)
+
+    def test_failed_acknowledgement_carries_the_bridge_reason(self):
+        live = self.session('live')
+        def ack(_):
+            request = read_private_json(live / 'switch.json')
+            atomic_json(live / 'status.json', dict(bridgeInstance='live', manualRequest=request['id'],
+                manualState='failed', manualReason='usage service unavailable'))
+        with patch('xswap_switch.time.sleep', side_effect=ack):
+            report = switch_running(self.manager, 'second')
+        self.assertEqual((report['failed'], report['applied']), (1, 0))
+        self.assertEqual(report['reasons'], ['usage service unavailable'])
 
     def test_default_only_does_not_send_requests(self):
         self.manager.register('main')

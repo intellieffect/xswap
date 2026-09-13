@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import plistlib
 import shlex
@@ -12,11 +13,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import xswap_alert
+from codex_swap import SwapError, parse_cache_seconds
 from xswap_alert import (
+    AUTO_SWITCH_MARKER,
     AlertError,
     LABEL,
     alert_dir,
     build_plist,
+    has_auto_switch,
     install,
     log_path,
     plist_path,
@@ -63,10 +67,16 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(AlertError):
             validate_every("2.5")
 
-    def test_cached_rejects_negative_but_allows_zero(self):
-        with self.assertRaises(AlertError):
-            validate_cached(-1)
-        self.assertEqual(validate_cached(0), 0.0)
+    def test_cached_rejects_zero_because_the_steps_it_renders_do(self):
+        # `--cached 0` was accepted here and rendered verbatim into run.sh, but
+        # parse_cache_seconds (what `xswap list --cached N` and `xswap auto-tick --cached N`
+        # both go through) rejects it, so every step of the installed job exited 1 forever.
+        for rejected in (0, "0", -1, -0.5):
+            with self.assertRaises(AlertError):
+                validate_cached(rejected)
+        self.assertEqual(validate_cached(0.5), 0.5)
+        with self.assertRaises(SwapError):
+            parse_cache_seconds("0")  # the rule this one now matches
 
 
 class ResolveXswapTests(unittest.TestCase):
@@ -206,6 +216,81 @@ class RunScriptTests(unittest.TestCase):
         self.assertNotIn("stale content", log.read_text())
 
 
+class AutoSwitchRunScriptTests(unittest.TestCase):
+    setUp = RunScriptTests.setUp
+    write_fake_osascript = RunScriptTests.write_fake_osascript
+    run_script = RunScriptTests.run_script
+
+    def write_fake_xswap(self, tick_lines, tick_exit, list_exit=0):
+        # Branches on the subcommand like the real xswap would: auto-tick prints its decision
+        # lines on stdout, list just exits.
+        fake = self.dir / "fake-xswap"
+        body = "#!/bin/sh\ncase \"$1\" in\n  auto-tick)\n"
+        for line in tick_lines:
+            body += f"    printf '%s\\n' {shlex.quote(line)}\n"
+        body += f"    exit {tick_exit}\n    ;;\n  list)\n    exit {list_exit}\n    ;;\nesac\nexit 9\n"
+        fake.write_text(body)
+        fake.chmod(0o700)
+        return fake
+
+    def render(self, fake_xswap, log):
+        script_path = self.dir / "run.sh"
+        script_path.write_text(render_run_script(str(fake_xswap), warn=15, cached=600, log=log, auto_switch=True))
+        script_path.chmod(0o700)
+        return script_path
+
+    def test_tick_step_precedes_warn_step_only_with_auto_switch(self):
+        plain = render_run_script("/abs/xswap", warn=15, cached=600, log=self.dir / "last.log")
+        self.assertNotIn("auto-tick", plain)
+        self.assertNotIn(AUTO_SWITCH_MARKER, plain)
+        script = render_run_script("/abs/xswap", warn=15, cached=600, log=self.dir / "last.log", auto_switch=True)
+        self.assertIn(AUTO_SWITCH_MARKER, script)
+        tick = script.index(shlex.quote("/abs/xswap") + " auto-tick --cached 600")
+        warn = script.index(shlex.quote("/abs/xswap") + " list --warn 15 --cached 600")
+        self.assertLess(tick, warn)
+        self.assertNotIn("__XSWAP_ALERT_", script)
+
+    def test_switched_line_becomes_a_notification_and_both_steps_are_logged(self):
+        switched = "switched: main -> second (main weekly 8% left, at or below the 10% reserve; second weekly 80% left)"
+        fake_xswap = self.write_fake_xswap([switched, "Running bridged sessions: applied 1."], tick_exit=0)
+        _, record = self.write_fake_osascript()
+        log = self.dir / "last.log"
+        result = self.run_script(self.render(fake_xswap, log), self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record.read_text().strip("\n"),
+                         'display notification "main -> second (main weekly 8% left, at or below the 10% reserve; second weekly 80% left)" with title "xswap auto-switch"')
+        text = log.read_text()
+        self.assertIn("xswap auto-tick exited 0", text)
+        self.assertIn("xswap list exited 0", text)
+        self.assertLess(text.index("auto-tick exited"), text.index("list exited"))
+        self.assertIn(switched, text)
+        self.assertEqual(oct(stat.S_IMODE(log.stat().st_mode)), oct(0o600))
+        self.assertFalse((self.dir / "last.log.tick.tmp").exists())
+
+    def test_no_action_and_blocked_do_not_notify(self):
+        cases = [(2, "no-action: main weekly 50% left is above the 10% reserve"),
+                 (3, "blocked: main weekly 5% left, at or below the 10% reserve, but no pool account is above the 10% reserve (second 10%)")]
+        for code, line in cases:
+            with self.subTest(code=code):
+                fake_xswap = self.write_fake_xswap([line], tick_exit=code)
+                _, record = self.write_fake_osascript()
+                log = self.dir / "last.log"
+                result = self.run_script(self.render(fake_xswap, log), self.dir)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(record.exists())
+                self.assertIn(f"xswap auto-tick exited {code}", log.read_text())
+                self.assertIn(line, log.read_text())
+
+    def test_quote_and_backslash_in_switched_line_survive(self):
+        line = 'switched: a -> b (label "q" and \\slash\\)'
+        fake_xswap = self.write_fake_xswap([line], tick_exit=0)
+        _, record = self.write_fake_osascript()
+        result = self.run_script(self.render(fake_xswap, self.dir / "last.log"), self.dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = 'display notification "' + line[len("switched: "):].replace("\\", "\\\\").replace('"', '\\"') + '" with title "xswap auto-switch"'
+        self.assertEqual(record.read_text().strip("\n"), expected)
+
+
 class CommandInjectionRegressionTests(unittest.TestCase):
     """render_run_script() used to interpolate install-time paths (the resolved xswap
     binary, and the log path derived from CODEX_SWAP_HOME) into DOUBLE-quoted shell
@@ -307,6 +392,25 @@ class CommandInjectionRegressionTests(unittest.TestCase):
         self.assertFalse(self.marker_backtick.exists())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("exited 0", log.read_text())
+
+    def test_auto_switch_step_quotes_the_same_paths(self):
+        bin_dir = self.dir / "safe-bin"
+        bin_dir.mkdir()
+        self.write_fake_osascript(bin_dir)
+        evil_dir = self.dir / self.evil_component
+        xswap_bin = evil_dir / "xswap"
+        self.write_fake_xswap(xswap_bin, exit_code=0, warn_lines=[])  # answers both auto-tick and list with exit 0
+        log = evil_dir / "last.log"
+        script_path = self.dir / "run.sh"
+        script_path.write_text(render_run_script(str(xswap_bin), warn=15, cached=600, log=log, auto_switch=True))
+        script_path.chmod(0o700)
+        result = self.run_script(script_path, bin_dir, cwd=self.dir)
+        self.assertFalse(self.marker_subshell.exists(), "command substitution $(...) in an interpolated path was executed")
+        self.assertFalse(self.marker_backtick.exists(), "backtick command substitution in an interpolated path was executed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = log.read_text()
+        self.assertIn("xswap auto-tick exited 0", text)
+        self.assertIn("xswap list exited 0", text)
 
 
 class InstallUninstallStatusTests(unittest.TestCase):
@@ -433,6 +537,70 @@ class InstallUninstallStatusTests(unittest.TestCase):
         self.assertIn("line 19", text)
         self.assertNotIn("line 5\n", text)  # only the last 10 lines (10-19) should show
 
+    def install_ok(self, **kwargs):
+        responses = [completed(returncode=1), completed(returncode=0)]  # not already loaded, then bootstrap ok
+        with patch("xswap_alert.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = install(self.root, **kwargs)
+        self.assertEqual(code, 0)
+        return out.getvalue()
+
+    def test_install_auto_switch_writes_tick_step_and_status_reports_it(self):
+        out = self.install_ok(warn=20, every=15, cached=300, auto_switch=True)
+        script = run_script_path(self.root).read_text()
+        self.assertIn(AUTO_SWITCH_MARKER, script)
+        self.assertLess(script.index("auto-tick --cached 300"), script.index("list --warn 20 --cached 300"))
+        self.assertIn("Auto-switch: on", out)
+        self.assertIn("Note: automatic switching is not enabled", out)  # no auto.json under self.root
+        self.assertTrue(has_auto_switch(self.root))
+        with patch("xswap_alert.subprocess.run", return_value=completed(returncode=0)), contextlib.redirect_stdout(io.StringIO()) as status_out:
+            status(self.root)
+        self.assertIn("auto-switch: on", status_out.getvalue())
+
+    def test_install_auto_switch_skips_the_note_when_auto_mode_is_enabled(self):
+        self.root.mkdir(parents=True)
+        (self.root / "auto.json").write_text(json.dumps({"enabled": True, "accounts": ["a", "b"], "weeklyRemainingThreshold": 10}))
+        out = self.install_ok(auto_switch=True)
+        self.assertNotIn("Note:", out)
+        self.assertIn("Auto-switch: on", out)
+
+    def test_reinstall_without_auto_switch_drops_the_tick_step(self):
+        self.install_ok(auto_switch=True)
+        responses = [completed(returncode=0), completed(returncode=0), completed(returncode=0)]  # loaded -> bootout -> bootstrap
+        with patch("xswap_alert.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(install(self.root), 0)
+        self.assertNotIn(AUTO_SWITCH_MARKER, run_script_path(self.root).read_text())
+        self.assertIn("Auto-switch: off", out.getvalue())
+        with patch("xswap_alert.subprocess.run", return_value=completed(returncode=0)), contextlib.redirect_stdout(io.StringIO()) as status_out:
+            status(self.root)
+        self.assertIn("auto-switch: off", status_out.getvalue())
+
+    def test_status_reports_auto_switch_off_before_install(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            status(self.root)
+        self.assertIn("auto-switch: off", out.getvalue())
+
+    def test_dry_run_auto_switch_mentions_the_tick_step_and_writes_nothing(self):
+        with patch("xswap_alert.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            code = install(self.root, auto_switch=True, dry_run=True)
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        self.assertIn("Would run xswap auto-tick --cached 600 before list --warn", out.getvalue())
+        self.assertFalse(run_script_path(self.root).exists())
+        self.assertFalse(plist_path().exists())
+
+    def test_uninstall_notes_that_auto_mode_is_untouched_when_the_tick_step_was_installed(self):
+        self.install_ok(auto_switch=True)
+        with patch("xswap_alert.subprocess.run", return_value=completed(returncode=1, stderr="not loaded")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(uninstall(self.root), 0)
+        self.assertIn("automatic switching itself is unchanged", out.getvalue())
+        self.assertFalse(alert_dir(self.root).exists())
+        self.install_ok()
+        with patch("xswap_alert.subprocess.run", return_value=completed(returncode=1, stderr="not loaded")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(uninstall(self.root), 0)
+        self.assertNotIn("automatic switching itself", out.getvalue())
+
 
 class NonDarwinTests(unittest.TestCase):
     def setUp(self):
@@ -473,6 +641,15 @@ class NonDarwinTests(unittest.TestCase):
             code = status(self.root)
         self.assertEqual(code, 2)
         run.assert_not_called()
+
+    def test_install_auto_switch_prints_a_two_step_crontab_line(self):
+        with patch("xswap_alert.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as out:
+            code = install(self.root, every=45, cached=300, auto_switch=True)
+        self.assertEqual(code, 2)
+        run.assert_not_called()
+        line = [l for l in out.getvalue().splitlines() if l.startswith("*/45 * * * * ")][0]
+        self.assertEqual(line, "*/45 * * * * /usr/local/bin/xswap auto-tick --cached 300; /usr/local/bin/xswap list --warn 15 --cached 300")
+        self.assertFalse(alert_dir(self.root).exists())
 
 
 class MainCLIWiringTests(unittest.TestCase):
@@ -533,6 +710,39 @@ class MainCLIWiringTests(unittest.TestCase):
             code = self.codex_swap.main(["alert", "--status"])
         self.assertEqual(code, 0)
         self.assertIn("plist: absent", out.getvalue())
+
+    def test_auto_switch_requires_install(self):
+        for argv in (["alert", "--status", "--auto-switch"], ["alert", "--uninstall", "--auto-switch"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()) as err:
+                code = self.codex_swap.main(argv)
+            self.assertEqual(code, 1)
+            self.assertIn("--auto-switch requires --install.", err.getvalue())
+
+    def test_install_refuses_cached_zero_instead_of_baking_a_dead_job(self):
+        # `--cached 0` used to install cleanly and then render `xswap auto-tick --cached 0`
+        # and `xswap list --warn 15 --cached 0`, both of which parse_cache_seconds rejects:
+        # the job never warned and, with --auto-switch, never switched -- last.log only ever
+        # showed `exited 1`. Refuse at install time, before anything is written.
+        with patch("xswap_alert.sys.platform", "darwin"), \
+             patch("xswap_alert.shutil.which", return_value="/opt/homebrew/bin/xswap"), \
+             patch("xswap_alert.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = self.codex_swap.main(["alert", "--install", "--auto-switch", "--cached", "0"])
+        self.assertEqual(code, 1)
+        run.assert_not_called()
+        self.assertIn("--cached must be a positive number of seconds.", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(run_script_path(self.store).exists())
+
+    def test_dry_run_install_auto_switch_wires_through_main(self):
+        with patch("xswap_alert.sys.platform", "darwin"), \
+             patch("xswap_alert.shutil.which", return_value="/opt/homebrew/bin/xswap"), \
+             patch("xswap_alert.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            code = self.codex_swap.main(["alert", "--install", "--auto-switch", "--cached", "120", "--dry-run"])
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        self.assertIn("Would run xswap auto-tick --cached 120 before list --warn", out.getvalue())
 
 
 if __name__ == "__main__":

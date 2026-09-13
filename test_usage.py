@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, SwapError, atomic_json, main
+from codex_swap import Manager, SwapError, atomic_json, identity, main
 from xswap_usage import UsageError, normalize_limits, normalize_reset_credits, read_limits, reset_credit_lines, reset_label, short_line, usage_lines, warnings
 
 
@@ -389,6 +389,107 @@ for line in sys.stdin:
         fetch.assert_not_called()  # Fully served from cache.
         self.assertEqual(code, 3)
         self.assertIn("warn: main 7d 1% left", stderr.getvalue())
+
+    # --- auth-state.json: a login the usage service rejected ---
+
+    def test_service_rejected_login_is_recorded_in_a_private_state_file(self):
+        manager = self.manager()
+        label = identity(manager.source)
+        with patch("codex_swap.read_limits", side_effect=UsageError("sign in again to read usage")), patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows()
+        self.assertEqual(rows[0]["status"], "usage unavailable: sign in again to read usage")  # live row text unchanged
+        path = manager.auth_state_path()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        raw = path.read_text()
+        self.assertNotIn("fake-token", raw)
+        state = json.loads(raw)
+        self.assertEqual(set(state["main"]), {"failedAt", "reason", "identity"})
+        self.assertEqual(state["main"]["identity"], label)
+        self.assertEqual(state["main"]["reason"], "sign-in required")
+        self.assertNotIn("second", state)  # never fetched: not signed in
+        self.assertFalse(manager.usage_cache_path().exists())
+
+    def test_other_fetch_failures_leave_no_state_record(self):
+        manager = self.manager()
+        for error in (UsageError("usage service unavailable"), UsageError("usage request timed out"), UsageError("update Codex CLI to read usage")):
+            with self.subTest(error=str(error)), patch("codex_swap.read_limits", side_effect=error), patch.object(manager, "codex", return_value="codex"):
+                manager.account_rows()
+            self.assertFalse(manager.auth_state_path().exists())
+
+    def test_repeated_rejections_keep_the_first_failed_at(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", side_effect=UsageError("sign in again to read usage")), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows()
+            data = json.loads(manager.auth_state_path().read_text())
+            data["main"]["failedAt"] = 1000
+            atomic_json(manager.auth_state_path(), data)
+            manager.account_rows()
+        self.assertEqual(json.loads(manager.auth_state_path().read_text())["main"]["failedAt"], 1000)
+
+    def test_cached_and_offline_views_show_the_rejected_login_without_spawning_codex(self):
+        manager = self.manager()
+        manager.remember_auth_failure("main", identity(manager.source))
+        with patch("codex_swap.read_limits") as fetch, patch.object(manager, "codex", return_value="codex"):
+            cached = manager.account_rows(max_age=60)
+            offline = manager.account_rows(offline=True)
+        fetch.assert_not_called()
+        self.assertEqual(cached[0]["status"], "sign-in required")
+        self.assertFalse(cached[0]["cached"])
+        self.assertEqual(cached[0]["buckets"], [])
+        self.assertEqual(offline[0]["status"], "sign-in required")
+        with patch("codex_swap.read_limits") as fetch, contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(offline=True)
+        fetch.assert_not_called()
+        self.assertIn("sign-in required · xswap login main", output.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(offline=True, short=True)
+        self.assertEqual(output.getvalue(), "*main ?/? · second ?/?\n")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            manager.show_accounts(json_output=True, max_age=60)
+        self.assertEqual(json.loads(output.getvalue())[0]["status"], "sign-in required")
+
+    def test_live_fetch_still_retries_a_rejected_login_and_a_success_clears_it(self):
+        manager = self.manager()
+        manager.remember_auth_failure("main", identity(manager.source))
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertNotIn("main", json.loads(manager.auth_state_path().read_text()))
+        with patch("codex_swap.read_limits") as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        fetch.assert_not_called()
+        self.assertEqual(rows[0]["status"], "ok (cached)")
+
+    def test_rejection_recorded_after_a_success_beats_the_fresh_cache_entry(self):
+        manager = self.manager()
+        with patch("codex_swap.read_limits", return_value=response()), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows(max_age=60)  # populates usage-cache.json
+        with patch("codex_swap.read_limits", side_effect=UsageError("sign in again to read usage")), patch.object(manager, "codex", return_value="codex"):
+            manager.account_rows()  # live read rejected -> auth-state.json
+        with patch("codex_swap.read_limits") as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        fetch.assert_not_called()
+        self.assertEqual(rows[0]["status"], "sign-in required")
+
+    def test_state_recorded_for_a_previous_login_label_is_ignored(self):
+        manager = self.manager()
+        manager.remember_auth_failure("main", "someone-else@example.test")  # a re-login under the same name
+        self.assertEqual(manager.account_rows(offline=True)[0]["status"], "offline")
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        fetch.assert_called_once()
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertNotIn("main", json.loads(manager.auth_state_path().read_text()))  # stale entry swept by the success
+
+    def test_warn_and_short_never_fire_on_a_rejected_login(self):
+        manager = self.manager()
+        manager.remember_auth_failure("main", identity(manager.source))
+        with patch("codex_swap.read_limits") as fetch, patch.object(manager, "codex", return_value="codex"):
+            rows = manager.account_rows(max_age=60)
+        fetch.assert_not_called()
+        self.assertEqual(warnings(rows, 100), [])
+        self.assertEqual(short_line(rows), "*main ?/? · second ?/?")
 
 
 class ShortLineTests(unittest.TestCase):

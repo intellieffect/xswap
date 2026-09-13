@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import sys
 import time
-from xswap_usage import is_ok, reset_credit_lines, usage_lines
+from xswap_usage import AUTH_FAILED_STATUS, is_ok, reset_credit_lines, usage_lines
 
 # Every user-visible string in this module lives here, keyed by a short id.
 # `ko` values are the original hard-coded strings, preserved verbatim.
@@ -115,7 +115,8 @@ def status_note(row, lang="en"):
     """One line for a row without a usable weekly gauge, naming the fix when there is one.
 
     `xswap list` used to collapse every failure to "unavailable"; a login that the
-    usage service rejects now reads as sign-in required with the login command.
+    usage service rejects now reads as sign-in required with the login command, both
+    for the live failure and for the recorded state served to --cached/--offline.
     """
     status = row['status']
     if status == 'disabled':
@@ -125,7 +126,7 @@ def status_note(row, lang="en"):
     if is_ok(status):
         return _t(lang, 'no_weekly_data')
     reason = status[len(UNAVAILABLE_PREFIX):] if status.startswith(UNAVAILABLE_PREFIX) else status
-    if status == 'not signed in' or 'sign in' in reason:
+    if status in ('not signed in', AUTH_FAILED_STATUS) or 'sign in' in reason:
         return _t(lang, 'signin_required') + f" · xswap login {row['name']}"
     return _t(lang, 'unavailable') + (f' · {reason}' if reason else '')
 
@@ -186,7 +187,7 @@ def policy_label(settings, lang="en"):
     return _t(lang, 'autoswitch_on_limit')
 
 
-def render(rows, settings, include_spark=False, details=False, color=None, now=None, lang="en", sessions=None):
+def render(rows, settings, include_spark=False, details=False, color=None, now=None, lang="en", sessions=None, hints=None):
     if not rows:
         return _t(lang, 'no_accounts')
     if color is None:
@@ -234,6 +235,15 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
         for (surface, account), count in counts.items():
             label = {'cli': 'CLI', 'desktop': 'Desktop'}.get(surface, 'Unknown')
             lines.append(f"  ● {label} · {account or 'unknown'} · " + _t(lang, 'session_single' if count == 1 else 'session_count', count=count))
+            # A session still running an older bridge sits under its group with the
+            # command that reopens it on the installed code (xswap_cli.bridge_hints).
+            for hint in hints or []:
+                if (hint.get('surface'), hint.get('account')) != (surface, account):
+                    continue
+                text = f"⚠ {hint['hint']}"
+                if color:
+                    text = f'\033[33m{text}\033[0m'
+                lines.append('    ' + text)
         if not counts:
             lines.append(_t(lang, 'no_sessions'))
         lines.append('')
@@ -248,7 +258,8 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
 
 def dashboard(manager, lang="en"):
     from xswap_cli import status_data
-    state = status_data(manager, cleanup=False)
+    # The menu bar polls this every five minutes: a natural background sweep.
+    state = status_data(manager)
     rows = manager.account_rows()
     return {'accounts': [summary(row, lang=lang) for row in sorted(rows, key=lambda r: not r['active'])],
             'policy': policy_label(state, lang),

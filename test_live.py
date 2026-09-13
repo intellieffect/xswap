@@ -1,13 +1,41 @@
 import asyncio
+import base64
 import copy
+import json
+import os
+from pathlib import Path
+import signal
+import stat
+import tempfile
 import time
 import unittest
 
 import sys
 from unittest.mock import patch
 
-from xswap_live import AccountPool, Bridge, LiveError, failure_reason, quota_available, usage_failure
+from codex_swap import Manager, atomic_json, identity
+from xswap_live import (BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError, SignInRequired, append_log_line,
+                        failure_reason, quota_available, sign_in_required, usage_failure)
 from xswap_usage import UsageError
+
+
+def fake_token(name, email=True):
+    """Unsigned JWT shaped like a real ChatGPT access token: the address lives under the
+    profile namespace and the workspace id under the auth namespace (never top-level)."""
+    def encode(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip('=')
+    claims = {'sub': 'user-' + name, 'exp': int(time.time()) + 3600,
+              'https://api.openai.com/auth': {'chatgpt_account_id': name, 'chatgpt_plan_type': 'pro'}}
+    if email:
+        claims['https://api.openai.com/profile'] = {'email': name + '@example.test', 'email_verified': True}
+    return encode({'alg': 'none'}) + '.' + encode(claims) + '.fake-' + name
+
+
+def token_email(token):
+    """Independent of xswap_live.token_emails: what a server parsing this token would report."""
+    part = token.split('.')[1]
+    claims = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+    return claims.get('email') or (claims.get('https://api.openai.com/profile') or {}).get('email')
 
 
 def limits(left=100, reached=None):
@@ -49,17 +77,56 @@ class Pool:
         self.quota = {'first': limits(), 'second': limits()}
 
     def prepare(self, name, require_quota=True):
-        return {'accessToken': 'fake-' + name, 'chatgptAccountId': name,
+        return {'accessToken': fake_token(name), 'chatgptAccountId': name,
                 'chatgptPlanType': 'pro'}, self.quota[name]
 
     def refresh(self, name):
         return self.prepare(name)[0]
 
+    def credentials(self, name):
+        return self.prepare(name)[0]
+
+    def first_available(self):
+        return self.names[0]
+
+
+class FakeAccountServer:
+    """The app server's side of account/login/start + account/read (codex-cli 0.154.0):
+    account/read answers with the email of the token it holds, or `account: null`
+    before any login. `forced` answers are consumed in order, `always` repeats one,
+    `error` makes the read fail -- a server that kept or installed some other login."""
+
+    def __init__(self):
+        self.installed = None
+        self.forced = []
+        self.always = []
+        self.error = None
+
+    def login(self, params):
+        self.installed = params
+
+    def read(self):
+        if self.error is not None:
+            raise self.error
+        if self.forced:
+            return {'account': self.forced.pop(0), 'requiresOpenaiAuth': True}
+        if self.always:
+            return {'account': self.always[0], 'requiresOpenaiAuth': True}
+        if self.installed is None:
+            return {'account': None, 'requiresOpenaiAuth': True}
+        try:
+            email = token_email(self.installed['accessToken'])
+        except (ValueError, IndexError):
+            email = None
+        return {'account': {'type': 'chatgpt', 'email': email,
+                            'planType': self.installed.get('chatgptPlanType')}, 'requiresOpenaiAuth': True}
+
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.emitted, self.sent, self.calls = [], [], []
+        self.emitted, self.sent, self.calls, self.reads = [], [], [], []
         self.pool = Pool()
+        self.server = FakeAccountServer()
         self.bridge = Bridge(self.pool, [], {}, self.emitted.append)
         self.bridge.booting = False
         self.bridge.initialized = True
@@ -69,7 +136,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.status = lambda *args, **kwargs: None
 
         async def rpc(method, params, timeout=20):
+            # Verification reads are kept apart so call-order assertions stay about logins and turns.
+            if method == 'account/read':
+                self.reads.append(copy.deepcopy(params))
+                return self.server.read()
             self.calls.append((method, copy.deepcopy(params)))
+            if method == 'account/login/start':
+                self.server.login(copy.deepcopy(params))
             return {}
 
         async def send(message):
@@ -188,6 +261,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.continue_failed()
         self.assertFalse(self.calls)
 
+    async def test_turn_start_moves_away_from_a_current_account_the_service_rejected(self):
+        self.bridge.checked_at = 0  # force a fresh check before the turn
+        prepare = self.pool.prepare
+
+        def rejecting(name, require_quota=True):
+            if name == 'first':
+                raise SignInRequired(sign_in_required('first'))
+            return prepare(name, require_quota)
+        self.pool.prepare = rejecting
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertEqual([c[0] for c in self.calls], ['account/login/start'])
+        self.assertEqual(self.calls[0][1]['chatgptAccountId'], 'second')
+        self.assertTrue(self.calls[0][1]['accessToken'].endswith('.fake-second'))
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')
+
+    async def test_turn_start_keeps_the_current_account_through_a_usage_outage(self):
+        self.bridge.checked_at = 0
+        prepare = self.pool.prepare
+
+        def outage(name, require_quota=True):
+            if name == 'first':
+                raise UsageError('usage request timed out')
+            return prepare(name, require_quota)
+        self.pool.prepare = outage
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertFalse(self.calls)
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')
+
 
 class InitializeTests(unittest.IsolatedAsyncioTestCase):
     """A usage-service outage at startup must not kill the session (2026-09-08 incident)."""
@@ -234,22 +337,73 @@ class InitializeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.bridge.quota_known, True)
         self.assertGreater(self.bridge.checked_at, 0)
 
+    async def test_startup_skips_a_pool_member_recorded_as_rejected(self):
+        self.pool.first_available = lambda: 'second'
+        await self.initialize()
+        self.assertTrue(self.bridge.initialized)
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertEqual([c[0] for c in self.calls], ['initialize', 'account/login/start'])
+        self.assertEqual(self.calls[1][1]['chatgptAccountId'], 'second')
+        self.assertTrue(self.calls[1][1]['accessToken'].endswith('.fake-second'))
+        self.assertEqual(self.events[-1][0], 'ready')
+
+    async def test_startup_falls_back_when_the_first_member_is_rejected_live(self):
+        def prepare(name, require_quota=True):
+            if name == 'first':
+                raise SignInRequired(sign_in_required('first'))
+            return {'accessToken': 'fake-' + name, 'chatgptAccountId': name, 'chatgptPlanType': 'pro'}, limits()
+        self.pool.prepare = prepare
+        await self.initialize()
+        self.assertTrue(self.bridge.initialized)
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertEqual([c[0] for c in self.calls], ['initialize', 'account/login/start'])
+        self.assertEqual(self.calls[1][1]['accessToken'], 'fake-second')
+        self.assertEqual(self.emitted[-1]['id'], 1)
+        self.assertEqual(self.events[-1][0], 'ready')
+
+    async def test_startup_stops_with_the_reason_when_every_member_is_rejected(self):
+        def prepare(name, require_quota=True):
+            raise SignInRequired(sign_in_required(name))
+        self.pool.prepare = prepare
+        with self.assertRaises(SignInRequired) as caught:
+            await self.initialize()
+        self.assertFalse(self.bridge.initialized)
+        self.assertEqual(failure_reason(caught.exception), 'sign-in required; run: xswap login first')
+        self.assertEqual(self.events[-1][0], 'no-available-account')
+        # item 4 hands the exception to status(), so the reason is classified there.
+        self.assertIn(('candidate-unavailable', 'second', 'sign-in required; run: xswap login second'),
+                      [(event, extra.get('candidate'), failure_reason(extra['exc']))
+                       for event, extra in self.events if event == 'candidate-unavailable'])
+
 
 class PoolPrepareTests(unittest.TestCase):
     def make_pool(self):
         pool = object.__new__(AccountPool)
         pool.codex = 'fixture-codex'
 
-        class Manager:
+        class FakeManager:
+            def __init__(self):
+                self.recorded, self.cleared = [], []
+
             def enabled_accounts(self):
                 return [('main', None)]
 
             def account(self, name):
-                return name, '/fixture/home'
+                # A Path, not a str: prepare now reads identity(home) before probing.
+                return name, Path('/fixture/home')
 
             def env(self, home):
                 return {}
-        pool.manager = Manager()
+
+            def auth_failure(self, name, label):
+                return None
+
+            def remember_auth_failure(self, name, label):
+                self.recorded.append((name, label))
+
+            def clear_auth_failure(self, name):
+                self.cleared.append(name)
+        pool.manager = FakeManager()
         return pool
 
     def test_quota_outage_is_optional_only_when_asked(self):
@@ -263,6 +417,84 @@ class PoolPrepareTests(unittest.TestCase):
             credentials, raw = pool.prepare('main', require_quota=False)
         self.assertEqual(credentials, {'accessToken': 'x'})
         self.assertIsNone(raw)
+        self.assertEqual(pool.manager.recorded, [])  # an outage is never a sign-in failure
+
+
+def fake_jwt(claims):
+    header = base64.urlsafe_b64encode(b'{}').rstrip(b'=')
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b'=')
+    return (header + b'.' + payload + b'.fixture-sig').decode()
+
+
+class PoolAuthStateTests(unittest.TestCase):
+    """AccountPool.prepare against a real Manager store: the rejected-login record in
+    auth-state.json is written by a live rejection, consulted before any probe, and
+    only counts for the current login label."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.source = self.base / 'original'
+        self.source.mkdir()
+        self.source.joinpath('config.toml').write_text('model = "example"\n')
+        token = fake_jwt({'exp': time.time() + 100000, 'https://api.openai.com/auth': {'chatgpt_account_id': 'acct-main'}})
+        self.auth = {'auth_mode': 'chatgpt', 'tokens': {'access_token': token, 'refresh_token': 'fixture-refresh'}}
+        atomic_json(self.source / 'auth.json', self.auth)
+        self.manager = Manager(self.base / 'store', self.source)
+        self.manager.register('main')
+        second = self.manager.prepare('second')
+        atomic_json(second / 'auth.json', self.auth)
+        self.pool = AccountPool(self.manager, ['main', 'second'], 'fixture-codex')
+        self.label = identity(self.source)
+
+    def test_fresh_rejection_is_recorded_and_raised_as_sign_in_required(self):
+        with patch('xswap_live.read_limits', side_effect=UsageError('sign in again to read usage')) as fetch:
+            with self.assertRaises(SignInRequired) as caught:
+                self.pool.prepare('main')
+        self.assertEqual(str(caught.exception), 'sign-in required; run: xswap login main')
+        self.assertEqual(fetch.call_count, 1)
+        path = self.manager.auth_state_path()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        raw = path.read_text()
+        self.assertNotIn('fixture-refresh', raw)
+        self.assertNotIn(self.auth['tokens']['access_token'], raw)
+        state = json.loads(raw)
+        self.assertEqual(state['main']['identity'], self.label)
+        self.assertEqual(state['main']['reason'], 'sign-in required')
+        self.assertNotIn('second', state)
+
+    def test_recorded_rejection_skips_the_probe_even_when_quota_is_optional(self):
+        self.manager.remember_auth_failure('main', self.label)
+        with patch('xswap_live.read_limits') as fetch:
+            for require_quota in (True, False):
+                with self.subTest(require_quota=require_quota), self.assertRaises(SignInRequired):
+                    self.pool.prepare('main', require_quota=require_quota)
+        fetch.assert_not_called()
+
+    def test_record_for_a_previous_login_label_is_ignored_and_swept_by_a_success(self):
+        self.manager.remember_auth_failure('main', 'previous@example.test')
+        with patch('xswap_live.read_limits', return_value=limits()) as fetch:
+            credentials, raw = self.pool.prepare('main')
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(credentials['chatgptAccountId'], 'acct-main')
+        self.assertEqual(raw['rateLimits']['limitId'], 'codex')  # a real response came back
+        self.assertNotIn('main', json.loads(self.manager.auth_state_path().read_text()))
+
+    def test_first_available_skips_recorded_members_and_falls_back_to_the_first(self):
+        self.assertEqual(self.pool.first_available(), 'main')
+        self.manager.remember_auth_failure('main', self.label)
+        self.assertEqual(self.pool.first_available(), 'second')
+        self.manager.remember_auth_failure('second', identity(self.manager.account('second')[1]))
+        self.assertEqual(self.pool.first_available(), 'main')
+        self.manager.remember_auth_failure('main', 'previous@example.test')  # stale label: main is available again
+        self.assertEqual(self.pool.first_available(), 'main')
+
+    def test_outage_keeps_the_record_untouched(self):
+        with patch('xswap_live.read_limits', side_effect=UsageError('usage request timed out')):
+            with self.assertRaises(UsageError):
+                self.pool.prepare('main')
+        self.assertFalse(self.manager.auth_state_path().exists())
 
 
 class FailureReasonTests(unittest.TestCase):
@@ -274,24 +506,456 @@ class FailureReasonTests(unittest.TestCase):
         self.assertEqual(failure_reason(secret), 'RuntimeError')
         self.assertNotIn('secret', failure_reason(secret))
 
+    def test_store_and_os_errors_are_classified_without_paths(self):
+        from codex_swap import SwapError
+        missing = FileNotFoundError(2, 'No such file or directory', '/Users/x/private/codex')
+        cases = [
+            (SwapError('Cannot read valid config.toml at /Users/x/private'), 'account config.toml is unreadable'),
+            (SwapError("/Users/x/private: credential storage is 'keyring'; this version supports file storage only. No credentials changed."),
+             'account uses non-file credential storage'),
+            (SwapError('No matching account. Run: xswap register main, or xswap add NAME'), 'account is not registered'),
+            (SwapError('Unsafe storage directory: /Users/x/private'), 'account store is unusable (xswap doctor)'),
+            (missing, 'local I/O error: No such file or directory'),
+            (TimeoutError(), 'app-server request timed out'),  # an OSError subclass; must keep its own text
+        ]
+        for exc, expected in cases:
+            self.assertEqual(failure_reason(exc), expected)
+            self.assertNotIn('/Users', failure_reason(exc))
+
+
+def recording_setup(case):
+    """After test_setup: a real run dir, so status.json and bridge.log are written; stderr stays quiet."""
+    case.temporary = tempfile.TemporaryDirectory()
+    case.addCleanup(case.temporary.cleanup)
+    case.run_dir = Path(case.temporary.name)
+    case.bridge.status_path = case.run_dir / 'status.json'
+    del case.bridge.status  # drop BridgeTests' no-op override: the real method writes the records
+    case.bridge.status_log = lambda event: None
+
+
+class BridgeLogTests(unittest.IsolatedAsyncioTestCase):
+    """Every swallowed failure leaves a classified reason in status.json and a line in bridge.log.
+
+    2026-09-10: three manual switches ended as manualState "failed" with reason null and no
+    log; the cause could not be reconstructed.
+    """
+    asyncTearDown = BridgeTests.asyncTearDown
+
+    async def asyncSetUp(self):
+        await test_setup(self)
+        recording_setup(self)
+
+    def state(self):
+        return json.loads((self.run_dir / 'status.json').read_text())
+
+    def log_lines(self):
+        return (self.run_dir / BRIDGE_LOG_NAME).read_text().splitlines()
+
+    def request(self, name='second', request_id='req-1'):
+        from codex_swap import atomic_json
+        atomic_json(self.run_dir / 'switch.json', {'account': name, 'id': request_id, 'instance': self.bridge.instance})
+
+    async def test_failed_manual_switch_records_reason_and_log_line(self):
+        def prepare(name, require_quota=True):
+            raise UsageError('usage service unavailable')
+        self.pool.prepare = prepare
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['event'], state['manualState'], state['account']), ('manual-switch-failed', 'failed', 'first'))
+        self.assertEqual(state['manualReason'], 'usage service unavailable')
+        self.assertEqual(state['reason'], 'usage service unavailable')
+        self.assertEqual(state['candidate'], 'second')
+        self.assertEqual({k: state['lastFailure'][k] for k in ('event', 'account', 'candidate', 'reason')},
+                         {'event': 'manual-switch-failed', 'account': 'first', 'candidate': 'second', 'reason': 'usage service unavailable'})
+        log = self.run_dir / BRIDGE_LOG_NAME
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        lines = self.log_lines()
+        self.assertEqual([line.split(' ')[1] for line in lines], ['manual-switch-applying', 'manual-switch-failed'])
+        self.assertRegex(lines[-1], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} manual-switch-failed ')
+        self.assertTrue(lines[-1].endswith(' account="first" candidate="second" reason="usage service unavailable" exc="UsageError"'), lines[-1])
+
+    async def test_manual_reason_persists_after_later_events_and_clears_on_success(self):
+        # 2026-09-10: `stopped` overwrote `manual-switch-failed`, and the record ended with reason: null.
+        outcomes = iter([RuntimeError('token=sk-secret payload'), None])
+        prepare = self.pool.prepare
+
+        def flaky(name, require_quota=True):
+            error = next(outcomes)
+            if error:
+                raise error
+            return prepare(name, require_quota)
+        self.pool.prepare = flaky
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        self.bridge.status('policy-applied')
+        state = self.state()
+        self.assertEqual((state['event'], state['manualState'], state['manualReason']), ('policy-applied', 'failed', 'RuntimeError'))
+        self.assertNotIn('reason', state)  # `reason` belongs to the current event; manualReason persists
+        self.assertEqual(state['lastFailure']['reason'], 'RuntimeError')
+        self.request(request_id='req-2')
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['manualState'], state['manualReason'], state['account']), ('applied', None, 'second'))
+        self.assertEqual(state['lastFailure']['event'], 'manual-switch-failed')  # history stays until the bridge exits
+        text = (self.run_dir / BRIDGE_LOG_NAME).read_text() + (self.run_dir / 'status.json').read_text()
+        self.assertNotIn('sk-secret', text)
+        self.assertNotIn('fake-', text)
+
+    async def test_pending_manual_switch_says_what_it_waits_for(self):
+        self.bridge.active.update(('t1', 't2'))
+        self.request()
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        state = self.state()
+        self.assertEqual((state['manualState'], state['manualReason']), ('pending', 'waiting for 2 active turn(s) to finish'))
+        self.assertIsNone(state['lastFailure'])
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' manual-switch-pending account="first" candidate="second" reason="waiting for 2 active turn(s) to finish"'))
+        self.bridge.active.clear()
+        self.assertTrue(await self.bridge.apply_manual_switch())
+        self.assertEqual((self.state()['manualState'], self.state()['manualReason']), ('applied', None))
+
+    async def test_no_available_account_summarizes_every_candidate(self):
+        self.pool.names = ['first', 'second', 'third', 'fourth', 'fifth']
+        self.pool.quota.update(third=limits(0), fifth={})
+        prepare = self.pool.prepare
+
+        def flaky(name, require_quota=True):
+            if name == 'second':
+                raise LiveError('ChatGPT access token needs refresh or sign-in')
+            if name == 'fourth':
+                return prepare('first')[0], limits()  # an alias of the exhausted current identity
+            return prepare(name, require_quota)
+        self.pool.prepare = flaky
+        self.bridge.last_quota = limits(0)
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')  # the turn still goes out on the current account
+        state = self.state()
+        self.assertEqual(state['event'], 'no-available-account')
+        self.assertEqual(state['reason'], 'second: ChatGPT access token needs refresh or sign-in; '
+                         'third: no quota above the weekly reserve; fourth: same identity as an excluded account; '
+                         'fifth: quota unknown')
+        self.assertEqual(state['lastFailure']['event'], 'no-available-account')
+        lines = self.log_lines()
+        self.assertEqual([line.split(' ')[1] for line in lines],
+                         ['policy-applied', 'candidate-unavailable', 'candidate-skipped', 'candidate-skipped',
+                          'candidate-skipped', 'no-available-account'])
+        self.assertTrue(lines[1].endswith(
+            ' account="first" candidate="second" reason="ChatGPT access token needs refresh or sign-in" exc="LiveError"'), lines[1])
+
+    async def test_failed_continuation_records_reason(self):
+        async def rpc(method, params, timeout=20):
+            self.calls.append((method, copy.deepcopy(params)))
+            if method == 'turn/start':
+                raise LiveError('Codex rejected turn/start')
+            return {}
+        self.bridge.rpc = rpc
+        self.bridge.starts['thread-1'] = {'threadId': 'thread-1', 'input': []}
+        await BridgeTests.failed(self, 'thread-1')
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertFalse(self.bridge.active)
+        state = self.state()
+        self.assertEqual((state['event'], state['reason']), ('continuation-failed', 'Codex rejected turn/start'))
+        self.assertEqual({k: state['lastFailure'][k] for k in ('event', 'account', 'reason')},
+                         {'event': 'continuation-failed', 'account': 'second', 'reason': 'Codex rejected turn/start'})
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' continuation-failed account="second" reason="Codex rejected turn/start" exc="LiveError"'))
+
+    async def test_failed_quota_check_is_logged_and_does_not_block_the_turn(self):
+        self.bridge.checked_at = 0
+
+        def prepare(name, require_quota=True):
+            raise UsageError('usage request timed out')
+        self.pool.prepare = prepare
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.sent[-1]['method'], 'turn/start')
+        self.assertEqual((self.state()['event'], self.state()['reason']), ('quota-check-failed', 'usage request timed out'))
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' quota-check-failed account="first" reason="usage request timed out" exc="UsageError"'))
+
+    async def test_rejected_candidate_and_its_login_command_reach_the_record_and_the_log(self):
+        prepare = self.pool.prepare
+
+        def rejecting(name, require_quota=True):
+            if name == 'second':
+                raise SignInRequired(sign_in_required('second'))
+            return prepare(name, require_quota)
+        self.pool.prepare = rejecting
+        self.assertFalse(await self.bridge.choose({'first'}))
+        self.assertEqual(self.bridge.current, 'first')
+        state = self.state()
+        self.assertEqual((state['event'], state['reason']),
+                         ('no-available-account', 'second: sign-in required; run: xswap login second'))
+        self.assertEqual({k: state['lastFailure'][k] for k in ('event', 'account', 'reason')},
+                         {'event': 'no-available-account', 'account': 'first',
+                          'reason': 'second: sign-in required; run: xswap login second'})
+        self.assertEqual([line.split(' ')[1] for line in self.log_lines()],
+                         ['candidate-unavailable', 'no-available-account'])
+        self.assertTrue(self.log_lines()[0].endswith(
+            ' candidate-unavailable account="first" candidate="second"'
+            ' reason="sign-in required; run: xswap login second" exc="SignInRequired"'), self.log_lines()[0])
+
+    async def test_rejected_current_account_switches_without_a_quota_check_failure(self):
+        self.bridge.checked_at = 0
+        prepare = self.pool.prepare
+
+        def rejecting(name, require_quota=True):
+            if name == 'first':
+                raise SignInRequired(sign_in_required('first'))
+            return prepare(name, require_quota)
+        self.pool.prepare = rejecting
+        await self.bridge.on_client({'id': 1, 'method': 'turn/start', 'params': {'threadId': 't', 'input': []}})
+        self.assertEqual(self.bridge.current, 'second')
+        # A dead login is not a failed quota read: logging one would misname the cause.
+        self.assertNotIn('quota-check-failed', [line.split(' ')[1] for line in self.log_lines()])
+        self.assertIsNone(self.state()['lastFailure'])
+
+    async def test_failed_refresh_records_reason(self):
+        await self.bridge.refresh({'id': 6, 'params': {'previousAccountId': 'different'}})
+        self.assertEqual((self.state()['event'], self.state()['reason']), ('refresh-failed', 'refresh must keep the current account'))
+        self.assertTrue(self.log_lines()[-1].endswith(
+            ' refresh-failed account="first" reason="refresh must keep the current account" exc="LiveError"'))
+
+
+class BridgeLogFileTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / BRIDGE_LOG_NAME
+
+    def test_log_is_private_regardless_of_umask_and_appends(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        self.assertTrue(append_log_line(self.path, 'one'))
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.path.chmod(0o644)  # a widened file is narrowed again on the next write
+        self.assertTrue(append_log_line(self.path, 'two'))
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual(self.path.read_text(), 'one\ntwo\n')
+
+    def test_symlink_or_directory_is_never_written_through(self):
+        target = Path(self.temporary.name) / 'elsewhere'
+        target.write_text('keep')
+        self.path.symlink_to(target)
+        self.assertFalse(append_log_line(self.path, 'line'))
+        self.assertEqual(target.read_text(), 'keep')
+        self.path.unlink()
+        self.path.mkdir()
+        self.assertFalse(append_log_line(self.path, 'line'))
+
+    def test_a_fifo_is_rejected_without_blocking_the_event_loop(self):
+        # status() calls this synchronously on the bridge's event loop, so an open that
+        # blocks freezes the whole bridge: no status writes, no manual switch ever applied,
+        # no turn forwarded, and the TUI hanging with no timeout and no message. A FIFO at
+        # this path (a debugging leftover, a restore) blocks both opens without O_NONBLOCK,
+        # which also defeats the fstat regular-file guard that follows them.
+        os.mkfifo(self.path)
+
+        class Deadline(BaseException):
+            """Not an Exception: `except OSError` inside append_log_line must not hide it."""
+
+        def ring(signum, frame):
+            raise Deadline()
+
+        previous = signal.signal(signal.SIGALRM, ring)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 2.0)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        try:
+            self.assertFalse(append_log_line(self.path, 'line'))
+        except Deadline:
+            self.fail('append_log_line blocked on a FIFO instead of rejecting it')
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        self.assertTrue(stat.S_ISFIFO(self.path.lstat().st_mode))  # nothing replaced it
+
+    def test_cap_keeps_only_the_newest_lines(self):
+        # 8-byte lines, a 64-byte cap: the 9th write compacts to the newest 3 lines first.
+        with patch('xswap_live.BRIDGE_LOG_MAX_BYTES', 64), patch('xswap_live.BRIDGE_LOG_KEEP_LINES', 3):
+            for index in range(12):
+                self.assertTrue(append_log_line(self.path, f'line-{index:02d}'))
+        self.assertEqual(self.path.read_text().splitlines(), [f'line-{index:02d}' for index in range(5, 12)])
+        self.assertLessEqual(self.path.stat().st_size, 64)
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+        self.assertEqual([p.name for p in Path(self.temporary.name).iterdir()], [BRIDGE_LOG_NAME])  # no temp file left
+
 
 class RunFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_stopped_status_and_bridge_carry_the_reason(self):
-        events = []
-        bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {})
-        bridge.status = lambda event, **extra: events.append((event, extra))
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=run_dir / 'status.json')
+            bridge.status_log = lambda event: None
 
-        async def idle():
-            await asyncio.Event().wait()
-        bridge.client_reader = idle
-        bridge.manual_switch_reader = idle
-        with self.assertRaises(LiveError):
-            await bridge.run()
-        self.assertEqual(events[-1], ('stopped', {'reason': 'app-server exited'}))
+            async def idle():
+                await asyncio.Event().wait()
+            bridge.client_reader = idle
+            bridge.manual_switch_reader = idle
+            with self.assertRaises(LiveError):
+                await bridge.run()
+            state = json.loads((run_dir / 'status.json').read_text())
+            log = (run_dir / BRIDGE_LOG_NAME).read_text().splitlines()
+        self.assertEqual((state['event'], state['reason']), ('stopped', 'app-server exited'))
+        # A bridge that dies after a failure must not overwrite that failure with its own exit.
+        self.assertIsNone(state['lastFailure'])
         self.assertEqual(bridge.failure, 'app-server exited')
+        self.assertTrue(log[-1].endswith(' stopped account="first" reason="app-server exited" exc="LiveError"'), log[-1])
+
+
+class IdentityVerificationTests(unittest.IsolatedAsyncioTestCase):
+    """After every account/login/start the bridge reads the login back (INT-5186 item 9).
+
+    `account` in status.json was only what the bridge believed it installed; a
+    rejected or half-applied login left the record naming an account the server
+    never held (2026-09-10 diagnostics)."""
+
+    asyncTearDown = BridgeTests.asyncTearDown
+
+    async def asyncSetUp(self):
+        await test_setup(self)
+        recording_setup(self)
+        self.events = []
+        original = self.bridge.status
+
+        def status(event, **extra):
+            self.events.append((event, extra))
+            original(event, **extra)
+        self.bridge.status = status
+
+    def state(self):
+        return json.loads((self.run_dir / 'status.json').read_text())
+
+    def request(self, name):
+        atomic_json(self.run_dir / 'switch.json',
+                    {'account': name, 'id': 'req-' + name, 'instance': self.bridge.instance})
+
+    async def test_switch_records_the_login_the_server_confirmed(self):
+        before = time.time()
+        credentials, raw = self.pool.prepare('second')
+        await self.bridge.install('second', credentials, raw)
+        self.assertEqual(self.reads, [{}])  # one read, never refreshToken: nothing leaves the machine
+        state = self.state()
+        self.assertEqual((state['event'], state['account'], state['switches']), ('switched', 'second', 1))
+        self.assertEqual(state['verifiedAccount'], 'second')
+        self.assertEqual(state['verifiedIdentity'], 'second@example.test')
+        self.assertGreaterEqual(state['verifiedAt'], before)
+        self.assertIsNone(state['verifyReason'])
+        self.assertNotIn(credentials['accessToken'], (self.run_dir / 'status.json').read_text())
+
+    async def test_mismatch_keeps_the_previous_login_and_fails_the_switch(self):
+        self.server.forced.append({'type': 'chatgpt', 'email': 'stranger@example.test', 'planType': 'pro'})
+        self.request('second')
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        self.assertEqual((self.bridge.manual_state, self.bridge.current, self.bridge.current_id, self.bridge.switches),
+                         ('failed', 'first', 'first', 0))
+        # login(second) -> read names a stranger -> login(first) re-sent -> read confirms first
+        self.assertEqual([(c[0], c[1]['chatgptAccountId']) for c in self.calls],
+                         [('account/login/start', 'second'), ('account/login/start', 'first')])
+        self.assertEqual(len(self.reads), 2)
+        self.assertEqual([e for e, _ in self.events], ['manual-switch-applying', 'identity-mismatch', 'manual-switch-failed'])
+        self.assertEqual(self.events[1][1], {'candidate': 'second'})
+        state = self.state()
+        self.assertEqual((state['event'], state['account'], state['manualState']), ('manual-switch-failed', 'first', 'failed'))
+        self.assertEqual((state['verifiedAccount'], state['verifiedIdentity']), ('first', 'first@example.test'))
+        self.assertEqual(state['verifyReason'], 'identity mismatch')
+        self.assertNotIn('stranger', (self.run_dir / 'status.json').read_text())
+        self.assertEqual(self.emitted, [])  # no rateLimits/updated for a login that did not happen
+
+    async def test_server_with_no_login_after_start_is_a_mismatch(self):
+        self.server.forced.append(None)
+        with self.assertRaises(LiveError) as caught:
+            await self.bridge.install('second', self.pool.prepare('second')[0], limits())
+        self.assertEqual(failure_reason(caught.exception), 'identity mismatch')
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertEqual(self.state()['verifiedAccount'], 'first')
+
+    async def test_startup_mismatch_stops_the_bridge_instead_of_opening_on_an_unknown_account(self):
+        self.bridge.booting, self.bridge.initialized = True, False
+        self.bridge.current_id, self.bridge.last_quota = None, None
+        self.server.always.append({'type': 'apiKey'})  # login/start "succeeded", server holds an API key
+        with self.assertRaises(LiveError) as caught:
+            await self.bridge.on_client({'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'x'}}})
+        self.assertEqual(failure_reason(caught.exception), 'identity mismatch')
+        self.assertFalse(self.bridge.initialized)
+        self.assertEqual([c[0] for c in self.calls], ['initialize', 'account/login/start'])  # nothing to put back
+        state = self.state()
+        self.assertEqual(state['event'], 'identity-mismatch')
+        self.assertIsNone(state['verifiedAccount'])
+        self.assertEqual(state['verifyReason'], 'identity mismatch')
+
+    async def test_rejected_read_keeps_the_switch_but_leaves_it_unverified(self):
+        self.server.error = LiveError('Codex rejected account/read')  # CLI without account/read
+        credentials, raw = self.pool.prepare('second')
+        await self.bridge.install('second', credentials, raw)
+        self.assertEqual(self.bridge.current, 'second')
+        state = self.state()
+        self.assertEqual((state['event'], state['account']), ('switched', 'second'))
+        self.assertEqual((state['verifiedAccount'], state['verifiedIdentity'], state['verifiedAt']), (None, None, None))
+        self.assertEqual(state['verifyReason'], 'account/read rejected')
+
+    async def test_read_timeout_keeps_the_switch_with_the_curated_reason(self):
+        self.server.error = TimeoutError()
+        await self.bridge.install('second', self.pool.prepare('second')[0], limits())
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertEqual(self.state()['verifyReason'], 'app-server request timed out')
+        self.assertIsNone(self.state()['verifiedAccount'])
+
+    async def test_token_without_an_email_claim_cannot_be_verified(self):
+        credentials = {'accessToken': fake_token('second', email=False), 'chatgptAccountId': 'second', 'chatgptPlanType': 'pro'}
+        await self.bridge.install('second', credentials, limits())
+        self.assertEqual(self.bridge.current, 'second')
+        self.assertEqual(self.state()['verifyReason'], 'no email claim')
+        self.assertIsNone(self.state()['verifiedAccount'])
+
+    async def test_plan_type_is_not_identity(self):
+        # Every account on a plan shares its planType; only the address settles who is signed in.
+        self.server.forced.append({'type': 'chatgpt', 'email': 'Second@Example.test', 'planType': 'plus'})
+        credentials, raw = self.pool.prepare('second')
+        await self.bridge.install('second', credentials, raw)
+        self.assertEqual(self.state()['verifiedAccount'], 'second')
+        self.server.forced.append({'type': 'chatgpt', 'email': 'other@example.test', 'planType': 'pro'})
+        with self.assertRaises(LiveError):
+            await self.bridge.install('first', self.pool.prepare('first')[0], limits())
+        self.assertEqual(self.bridge.current, 'second')
+
+    async def test_failover_skips_a_candidate_the_server_did_not_take(self):
+        self.bridge.starts['thread-1'] = {'threadId': 'thread-1', 'input': []}
+        self.server.forced.append({'type': 'chatgpt', 'email': 'stranger@example.test', 'planType': 'pro'})
+        await BridgeTests.failed(self, 'thread-1')
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertNotIn('turn/start', [c[0] for c in self.calls])
+        self.assertIn('second', [extra.get('candidate') for event, extra in self.events
+                                 if event == 'candidate-unavailable'])
+        state = self.state()
+        self.assertEqual(state['event'], 'no-available-account')
+        self.assertEqual((state['verifiedAccount'], state['verifyReason']), ('first', 'identity mismatch'))
+
+    async def test_failed_rollback_reports_an_unknown_identity(self):
+        self.server.always.append({'type': 'chatgpt', 'email': 'stranger@example.test', 'planType': 'pro'})
+        self.request('second')
+        self.assertFalse(await self.bridge.apply_manual_switch())
+        self.assertEqual(self.bridge.current, 'first')
+        self.assertEqual([e for e, _ in self.events],
+                         ['manual-switch-applying', 'identity-unknown', 'identity-mismatch', 'manual-switch-failed'])
+        state = self.state()
+        self.assertEqual(state['manualState'], 'failed')
+        self.assertEqual((state['verifiedAccount'], state['verifiedIdentity'], state['verifiedAt']), (None, None, None))
+        self.assertEqual(state['verifyReason'], 'identity unknown after rollback')
 
 
 class StatusRecordTests(unittest.TestCase):
+    def test_status_record_starts_with_an_unverified_login(self):
+        # `account` is what the bridge sent; until account/read answers, nothing is confirmed.
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'status.json'
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=path)
+            bridge.status_log = lambda event: None
+            bridge.status('policy-applied')
+            state = json.loads(path.read_text())
+        self.assertEqual({k: state[k] for k in ('verifiedAccount', 'verifiedIdentity', 'verifiedAt', 'verifyReason')},
+                         {'verifiedAccount': None, 'verifiedIdentity': None, 'verifiedAt': None, 'verifyReason': None})
+
     def test_status_record_carries_installed_version_and_persists_quota_known(self):
         # 0.7.5 wrote a hard-coded bridgeVersion and dropped quotaKnown after 'ready' (INT-5085).
         from codex_swap import __version__
@@ -305,6 +969,27 @@ class StatusRecordTests(unittest.TestCase):
         self.assertEqual(state['bridgeVersion'], __version__)
         self.assertIs(state['quotaKnown'], True)
         self.assertEqual(state['event'], 'policy-applied')
+
+    def test_status_record_names_conversation_home_and_pool(self):
+        # list/doctor/upgrade build the reopen hint from these three fields (item 6);
+        # a plain (desktop) Bridge has no conversation to name, so it writes null.
+        import json, pathlib, tempfile
+        thread = '00000000-0000-4000-8000-000000000001'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / 'status.json'
+            env = {'CODEX_HOME': tmp, 'OPENAI_API_KEY': 'must-not-leak'}
+            bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], env, status_path=path)
+            bridge.status('ready')
+            first = json.loads(path.read_text())
+            bridge.resume_thread = thread
+            bridge.status('policy-applied')
+            text = path.read_text()
+            later = json.loads(text)
+        self.assertIsNone(first['conversationId'])
+        self.assertEqual(first['codexHome'], tmp)
+        self.assertEqual(first['accounts'], ['first', 'second'])
+        self.assertEqual(later['conversationId'], thread)
+        self.assertNotIn('must-not-leak', text)
 
 
 async def test_setup(case):

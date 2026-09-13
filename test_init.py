@@ -153,7 +153,9 @@ class InitTests(unittest.TestCase):
             return str(proxy if name == "xswap-codex" else cli)
 
         out = io.StringIO()
-        with patch("shutil.which", side_effect=which), contextlib.redirect_stdout(out):
+        # The closing doctor walks PATH for the wrapper row; pin it to the fixture's own bin.
+        with patch("shutil.which", side_effect=which), patch.dict(os.environ, {"PATH": str(self.base)}), \
+                contextlib.redirect_stdout(out):
             run_init(self.manager, init_args(), ask=scripted("", "y", "n"), interactive=True)
         self.assertTrue(xswap_cli.read_settings(self.manager)["enabled"])
         self.assertIn("auto: enabled across main, work", out.getvalue())

@@ -98,6 +98,9 @@ def switch_running(manager, name, timeout=2, only_current=False):
             outcome = state.get('manualState') if acknowledged else None
             if outcome in ('applied', 'failed'):
                 report[outcome] += 1
+                if outcome == 'failed' and isinstance(state.get('manualReason'), str):
+                    # The bridge's classified reason (never a raw error); shown by use/switch/login.
+                    report.setdefault('reasons', []).append(state['manualReason'][:200])
             elif time.monotonic() >= deadline:
                 report['pending' if outcome in ('pending', 'applying') else 'unconfirmed'] += 1
             else:
