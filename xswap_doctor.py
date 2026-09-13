@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
+from xswap_cli import bridge_hints, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap_relocate import codex_homes_inside_root, inside_root
 
@@ -110,6 +110,17 @@ def check_wrapper(settings, accounts=(), env=None):
             detail += f"; plain codex ignores the xswap selection. Connect it: {reconnect}"
         return check("wrapper", status, detail)
     path = Path(wrapper["path"])
+    # A relative PATH element resolves from the working directory, so xswap never re-points
+    # the `codex` it finds there (codex_path_entries leaves it out of every repair). Plain
+    # `codex` in that directory still runs it, and every other check here reads the absolute
+    # entries only: reporting OK in the one state item 1 exists to surface is what a gate
+    # wired to this exit code would read as "connected".
+    ahead = codex_path_entries(settings, env, relative=True)
+    if ahead and ahead[0]["kind"] == "relative":
+        return check("wrapper", FAIL, f"plain codex runs {_shown(ahead[0])} here, not xswap-codex: it is found "
+                     "through a relative PATH entry, which names a different file in every directory, so xswap "
+                     f"never re-points it and the wrapped entry {path} stays bypassed wherever it resolves. "
+                     "Fix: make that PATH entry absolute.")
     if state == "absent":
         if drift["reason"] == "ok":
             return check("wrapper", WARN, f"{path} -> xswap-codex, but {path.parent} is not on this shell's PATH; "

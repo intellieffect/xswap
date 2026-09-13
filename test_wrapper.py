@@ -16,6 +16,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import stat
 import time
 import unittest
@@ -551,6 +552,39 @@ class PathEntriesTests(WrapperFixture):
         stored = read_settings(self.manager)['wrapper']
         self.assertEqual(stored['path'], str(cli))
         self.assertNotIn('wrappers', read_settings(self.manager))
+        # Never re-pointed, but never hidden either: `codex` in this directory runs the shim,
+        # so the row whose whole job is "what does plain codex run" has to say so. Reporting
+        # OK here (an absolute-only entry list) is the 2026-09-10 bypass with a green light.
+        self.assertEqual([(e['path'], e['kind']) for e in codex_path_entries(settings, {'PATH': path}, relative=True)],
+                         [('bin/codex', 'relative'), (str(cli), 'wrapper')])
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs bin/codex -> {updated} here, not xswap-codex', row['detail'])
+        self.assertIn(f'the wrapped entry {cli} stays bypassed', row['detail'])
+        self.assertIn('Fix: make that PATH entry absolute.', row['detail'])
+
+    def test_enable_refuses_a_codex_found_through_a_relative_path_entry(self):
+        # `auto-enable --wrap-codex` runs its own shutil.which, which joins the raw PATH
+        # element and does not absolutise it: from a project whose PATH starts with `bin`
+        # that returns `bin/codex`, and enable wrapped the repository's own shim and stored
+        # `path: bin/codex`. From any other directory the record then reads as `missing`,
+        # doctor's fix cannot work, and `auto-disable` printed "changed outside xswap; left
+        # it untouched" -- leaving the project's shim on xswap-codex for good.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        project = self.base / 'project'
+        (project / 'bin').mkdir(parents=True)
+        shim = project / 'bin' / 'codex'
+        shim.symlink_to(updated)
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        with patch.dict(os.environ, {'PATH': os.pathsep.join(['bin', str(self.base)])}):
+            self.assertEqual(shutil.which('codex'), 'bin/codex')  # what enable looks up
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(LiveError) as refused:
+                enable(self.manager, 'main,second', wrap=True)
+        self.assertIn('relative PATH entry (bin/codex)', str(refused.exception))
+        self.assertEqual(os.readlink(shim), str(updated))  # the repository is untouched
+        self.assertNotIn('wrapper', read_settings(self.manager))
 
     def test_doctor_fails_naming_the_entry_that_shadows_the_wrapped_one(self):
         settings, cli, proxy, updated = self.fixture()

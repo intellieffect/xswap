@@ -626,7 +626,7 @@ def describe_drift(drift, reconnect):
     return DRIFT_CAUSES[reason].format(**values), DRIFT_FIXES[reason].format(**values)
 
 
-def codex_path_entries(settings, env=None):
+def codex_path_entries(settings, env=None, relative=False):
     """Every `codex` a PATH lookup can run, in lookup order, classified against the recorded wrapper.
 
     Mirrors shutil.which's per-directory test (an existing file with the execute
@@ -638,6 +638,11 @@ def codex_path_entries(settings, env=None):
     raw link target of a symlink and None for a regular file. `env` supplies PATH
     instead of os.environ, which keeps doctor pure and lets a test pin a PATH
     without patching the process environment.
+
+    `relative` also reports the `codex` a relative PATH element resolves to in the
+    current working directory, as kind 'relative'. Nothing may re-point such an
+    entry, so every repair path leaves it out (the default); doctor asks for it
+    because plain `codex` in that directory still runs it.
     """
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
@@ -647,11 +652,16 @@ def codex_path_entries(settings, env=None):
         proxy_real = None
     entries, seen = [], set()
     for directory in os.get_exec_path(env):
+        if not directory:
+            continue
         # A relative PATH element (a project's `bin`, a direnv habit) names a different
         # file in every working directory, so it can never be the recorded entry and must
         # never be re-pointed: xswap would rewrite a `codex` shim inside the user's own
-        # repository and store a `path` no other directory can find again.
-        if not directory or not os.path.isabs(directory):
+        # repository and store a `path` no other directory can find again. Leaving it out
+        # of the report as well is what made the bypass read as OK, so it is still listed
+        # on request -- classified so no repair can mistake it for something to act on.
+        is_relative = not os.path.isabs(directory)
+        if is_relative and not relative:
             continue
         candidate = Path(directory) / 'codex'
         # Per PATH directory, not per realpath: on this machine several entries
@@ -667,7 +677,8 @@ def codex_path_entries(settings, env=None):
             real = os.path.realpath(candidate)
         except OSError:
             continue
-        kind = 'wrapper' if proxy and (target == proxy or real == proxy_real) else 'foreign'
+        kind = 'relative' if is_relative else \
+            'wrapper' if proxy and (target == proxy or real == proxy_real) else 'foreign'
         entries.append({'path': str(candidate), 'target': target, 'kind': kind})
     return entries
 
@@ -830,6 +841,14 @@ def enable(manager, accounts, wrap=False):
             executable = shutil.which('codex')
             if not proxy or not executable:
                 raise LiveError('codex and xswap-codex must both be installed')
+            # shutil.which joins the raw PATH element, so a relative one yields a relative
+            # path: the same entry codex_path_entries refuses to re-point. Absolutising it
+            # would wrap whatever `bin/codex` this directory happens to hold (a project's
+            # own shim) and record a `path` no other directory can find again, which no
+            # later `auto-disable` could restore -- so refuse instead.
+            if not os.path.isabs(executable):
+                raise LiveError(f'codex was found through a relative PATH entry ({executable}), which names a '
+                                'different file in every directory; make that PATH entry absolute, then retry')
             target = Path(executable)
             if target.resolve() != Path(proxy).resolve():
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
