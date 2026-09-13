@@ -78,6 +78,20 @@ xswap alert --install --warn 15 --every 30
 
 macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정한 절대경로의 `xswap`을 호출하는 래퍼 — `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없기 때문이며, `warn:` 줄마다 `osascript` 알림으로 바꿔줍니다)와 `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`를 만든 뒤 `launchctl bootstrap`으로 등록합니다. 매 실행 결과는 `alert/last.log`에 남습니다. 상태 확인은 `xswap alert --status`, 제거는 `xswap alert --uninstall`입니다. macOS가 아니면 `--install`은 아무것도 쓰지 않고 대신 동등한 `cron` 한 줄만 출력합니다.
 
+#### 세션 사이의 선제 전환
+
+세션 안에서는 브리지가 턴 시작 시점에만 판단하고, 세션 밖에서는 아무것도 기본 선택을 옮기지 않습니다. 그래서 선택된 계정의 주간 한도가 바닥난 뒤 새로 여는 세션이나 `codex exec`는 소진된 계정으로 시작됩니다. `xswap auto-tick`이 세션 사이의 점검 명령이며, 알림과 같은 `launchd`/`cron` 주기에서 돌리는 용도입니다.
+
+```sh
+xswap auto-tick --cached 600          # 1회 점검. 종료코드 0 전환함 / 1 오류 / 2 조치 없음 / 3 차단됨
+xswap auto-tick --dry-run             # 판단만 출력하고 아무것도 바꾸지 않음
+xswap alert --install --auto-switch   # 알림 잡에서 warn 단계 전에 실행
+```
+
+자동 전환 설정(`xswap auto-enable`, `xswap auto-policy --weekly-remaining PCT`)의 풀과 주간 예비율을 읽고 `xswap list`와 같은 방식으로 사용량을 조회한 뒤(`xswap list`와 같이 래핑된 `codex` 항목을 필요하면 복구합니다), 브리지가 턴 전에 적용하는 규칙을 그대로 적용합니다. `xswap use`로 선택된 계정이 예비율 이하이거나 한도에 도달했거나 재로그인이 필요하면, 예비율을 **넘는** 풀 계정 중 여유가 가장 큰 계정을 `xswap use NAME`과 같은 경로로 선택합니다 — 새 세션의 기본값이 바뀌고, 풀 순서에서 그 계정이 맨 앞으로 오며, 실행 중인 브리지에는 수동 전환 요청이 전달됩니다(유휴 세션은 즉시, 작업 중인 세션은 턴이 끝난 뒤). 비활성화(disabled)·재로그인 필요 계정은 대상이 되지 않습니다. 잔여량을 알 수 없으면 전환하지 않고(`no-action:`, 종료코드 `2`), 자동 전환이 꺼져 있거나 선택된 계정이 없거나 예비율을 넘는 풀 계정이 없으면 `blocked:`와 함께 `3`으로 끝납니다. 조회 도중 수동으로 `xswap use`를 실행했다면 그 선택이 우선합니다. 규칙이 선택된 계정과 예비율만 비교하고 주간 잔여량은 초기화 때만 늘어나므로 별도의 쿨다운 없이도 전환이 되돌아가며 흔들리지 않습니다. 디렉터리 매핑은 보지 않습니다.
+
+`--auto-switch`로 설치하면 `run.sh`가 `list --warn` 전에 `xswap auto-tick --cached SECONDS`를 실행하고(표와 경고는 전환 후 상태를 같은 캐시로 보여줍니다) `switched:` 줄을 "xswap auto-switch" 제목의 알림으로 바꿉니다. `xswap alert --status`에 `auto-switch: on`으로 표시되며, 플래그 없이 다시 `--install`하면 그 단계가 빠집니다. 자동 전환이 켜져 있어야 실제로 동작하며, 꺼져 있으면 `--install`이 그렇게 알려줍니다.
+
 ### 상태 표시줄(status line)
 
 `xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. 비활성화(disabled)된 계정은 `list --short`에서 제외되지만, `xswap usage <계정명> --short`는 비활성화된 계정이라도 지정한 계정을 항상 표시하며, 계정이 하나도 없으면 `list --short`는 빈 줄을 출력합니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:

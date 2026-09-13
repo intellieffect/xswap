@@ -295,6 +295,41 @@ def window_percent(buckets, minutes):
     return next((w["remainingPercent"] for w in codex_windows(buckets) if w["windowMinutes"] == minutes), None)
 
 
+def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
+    """Pick the row with the most codex headroom: (name or None, {"remaining", "candidates"}).
+
+    Shared by Manager.best_account (exhaustion only, weekly_remaining=0) and
+    `xswap auto-tick` (the configured weekly reserve). Disabled and excluded rows are
+    dropped; only rows with a successful fetch whose buckets_available(...) is True
+    (every applicable window known and above the reserve) are ranked, by the tightest
+    window's remaining percent and then by its earliest reset. `candidates` lists every
+    considered row with its 5h/7d remaining and short status; never tokens.
+    """
+    excluded = set(exclude)
+    candidates = [row for row in rows if not row["disabled"] and row["name"] not in excluded]
+    if not candidates:
+        return None, {"remaining": {}, "candidates": []}
+    summary, ranked = [], []
+    for row in candidates:
+        summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
+                        "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
+        if is_ok(row["status"]) and buckets_available(row["buckets"], model, weekly_remaining) is True:
+            ranked.append(row)
+    if not ranked:
+        return None, {"remaining": {}, "candidates": summary}
+
+    def rank_key(row):
+        known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
+        if not known:
+            return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
+        tightest = min(known, key=lambda w: w["remainingPercent"])
+        return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
+
+    winner = min(ranked, key=rank_key)
+    remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
+    return winner["name"], {"remaining": remaining, "candidates": summary}
+
+
 class Manager:
     def __init__(self, root=None, source=None):
         self.root = Path(root or os.environ.get("CODEX_SWAP_HOME", Path.home() / ".local/share/codex-swap")).expanduser().resolve()
@@ -757,30 +792,8 @@ class Manager:
         A one-shot choice for launchers (like `codex exec`) that have no
         `--remote` hook and so cannot be protected by the live auto bridge.
         """
-        excluded = set(exclude)
-        # Reuse the single parallel-fetch implementation; filter out disabled/excluded rows.
-        candidates = [row for row in self.account_rows(max_age=max_age) if not row["disabled"] and row["name"] not in excluded]
-        if not candidates:
-            return None, {"remaining": {}, "candidates": []}
-        summary, ranked = [], []
-        for row in candidates:
-            summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
-                             "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
-            if is_ok(row["status"]) and buckets_available(row["buckets"], model) is True:
-                ranked.append(row)
-        if not ranked:
-            return None, {"remaining": {}, "candidates": summary}
-
-        def rank_key(row):
-            known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
-            if not known:
-                return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
-            tightest = min(known, key=lambda w: w["remainingPercent"])
-            return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
-
-        winner = min(ranked, key=rank_key)
-        remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
-        return winner["name"], {"remaining": remaining, "candidates": summary}
+        # Reuse the single parallel-fetch implementation; rank_candidates drops disabled/excluded rows.
+        return rank_candidates(self.account_rows(max_age=max_age), model, exclude)
 
     def sync_openclaw(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
         # Directory mappings scope a single launched session; OpenClaw sync mutates
@@ -1085,6 +1098,10 @@ def parser():
     sub.add_parser("status", help="Show selected account and login status")
     st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
     st.add_argument("--prune", action="store_true", help="Remove every non-running CLI run record now, not only stopped ones older than a day, empty ones older than a minute, and others older than 7 days")
+    tick = sub.add_parser("auto-tick", help="One proactive check for launchd/cron: if the selected account is at or below the weekly reserve, select the best pool account (exit 0 switched, 1 error, 2 no action, 3 blocked)")
+    tick.add_argument("--dry-run", action="store_true", help="Print the decision without selecting or signalling anything")
+    tick.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
+    tick.add_argument("--json", action="store_true", dest="json_output", help="Machine-readable decision (names, percentages, short reasons; no tokens)")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
     ae.add_argument("--accounts", required=True)
     ae.add_argument("--wrap-codex", action="store_true", help="Also wrap the user-owned codex symlink, with rollback metadata")
@@ -1108,6 +1125,7 @@ def parser():
     al.add_argument("--warn", type=float, default=15, metavar="PCT", help="Threshold passed to `list --warn` (1-100, default 15)")
     al.add_argument("--every", type=int, default=30, metavar="MINUTES", help="Polling interval in whole minutes (default 30; launchd merges under 60s)")
     al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
+    al.add_argument("--auto-switch", action="store_true", help="With --install: run `xswap auto-tick --cached SECONDS` before the warn step and post a notification when it switches")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name", nargs="?", help="Account name; switch also accepts a 1-based slot from xswap list")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
@@ -1242,13 +1260,19 @@ def main(argv=None):
         elif args.command == "auto-status":
             from xswap_cli import show_status
             show_status(manager, args.prune)
+        elif args.command == "auto-tick":
+            from xswap_tick import run_tick
+            return run_tick(manager, dry_run=args.dry_run, max_age=parse_cache_seconds(args.cached), json_output=args.json_output)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command == "alert":
             if sum((args.install, args.uninstall, args.status)) != 1:
                 raise SwapError("Give exactly one of --install, --uninstall, or --status.")
+            if args.auto_switch and not args.install:
+                raise SwapError("--auto-switch requires --install.")
             if args.install:
-                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached, dry_run=args.dry_run)
+                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached,
+                                     auto_switch=args.auto_switch, dry_run=args.dry_run)
             if args.uninstall:
                 return alert_uninstall(manager.root, dry_run=args.dry_run)
             return alert_status(manager.root)

@@ -1,6 +1,7 @@
 """Install, remove, or inspect a launchd job that polls `list --warn` and posts macOS notifications."""
 from __future__ import annotations
 
+import json
 import math
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ umask 077
 
 LOG=__XSWAP_ALERT_LOG__
 STDERR_TMP="$LOG.stderr.tmp"
+TICK_TMP="$LOG.tick.tmp"
 
 : > "$LOG"
 
@@ -43,7 +45,7 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
   RUNNER=""
 fi
-
+__XSWAP_ALERT_TICK__
 $RUNNER __XSWAP_ALERT_BIN__ list --warn __XSWAP_ALERT_WARN__ --cached __XSWAP_ALERT_CACHED__ >>"$LOG" 2>"$STDERR_TMP"
 status=$?
 
@@ -71,6 +73,38 @@ exit 0
 """
 
 
+AUTO_SWITCH_MARKER = "# xswap-auto-switch: on"
+
+# Substituted for __XSWAP_ALERT_TICK__ by render_run_script(auto_switch=True); the
+# __XSWAP_ALERT_BIN__/__XSWAP_ALERT_CACHED__ placeholders inside it are replaced after
+# this block is spliced in, with the same shlex.quote() protection as the warn step.
+TICK_STEP_TEMPLATE = r"""# xswap-auto-switch: on
+# `xswap auto-tick` moves the default selection off an account at or below the weekly
+# reserve (xswap auto-policy) before `list --warn` runs; a `switched:` line becomes a notification.
+$RUNNER __XSWAP_ALERT_BIN__ auto-tick --cached __XSWAP_ALERT_CACHED__ >"$TICK_TMP" 2>&1
+tick=$?
+
+{
+  printf '%s xswap auto-tick exited %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$tick"
+  cat "$TICK_TMP" 2>/dev/null
+} >>"$LOG"
+
+if [ "$tick" -eq 0 ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      switched:*)
+        msg=${line#switched: }
+        esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        osascript -e "display notification \"$esc\" with title \"xswap auto-switch\"" >>"$LOG" 2>&1
+        ;;
+    esac
+  done < "$TICK_TMP"
+fi
+
+rm -f "$TICK_TMP"
+"""
+
+
 def alert_dir(root):
     return Path(root) / "alert"
 
@@ -85,6 +119,23 @@ def log_path(root):
 
 def plist_path():
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def has_auto_switch(root):
+    """Whether the installed run.sh carries the auto-tick step (its marker line)."""
+    try:
+        return AUTO_SWITCH_MARKER in run_script_path(root).read_text()
+    except OSError:
+        return False
+
+
+def _auto_enabled(root):
+    """Read-only peek at auto.json for the --auto-switch install note; no codex_swap import."""
+    try:
+        value = json.loads((Path(root) / "auto.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get("enabled") is True
 
 
 def resolve_xswap():
@@ -141,13 +192,16 @@ def validate_cached(value):
     return value
 
 
-def render_run_script(xswap_path, warn, cached, log):
+def render_run_script(xswap_path, warn, cached, log, auto_switch=False):
     # xswap_path and log are filesystem paths outside this function's control (the resolved
     # xswap binary, and a path derived from CODEX_SWAP_HOME); shlex.quote() wraps each in
     # POSIX single quotes (escaping any embedded single quote as '\''), so `$(...)`,
     # backticks, spaces, and quotes inside them are inert literal text to the shell that
     # later parses this script, not live syntax. Never substitute either value unquoted.
+    # The tick block is spliced in first so its own __XSWAP_ALERT_* placeholders get the
+    # same quoted values below.
     script = RUN_SCRIPT_TEMPLATE
+    script = script.replace("__XSWAP_ALERT_TICK__", TICK_STEP_TEMPLATE if auto_switch else "")
     script = script.replace("__XSWAP_ALERT_LOG__", shlex.quote(str(log)))
     script = script.replace("__XSWAP_ALERT_BIN__", shlex.quote(str(xswap_path)))
     script = script.replace("__XSWAP_ALERT_WARN__", format_number(warn))
@@ -180,21 +234,27 @@ def _bootstrap_target():
     return f"gui/{os.getuid()}/{LABEL}"
 
 
-def _print_cron_equivalent(warn, every, cached):
+def _print_cron_equivalent(warn, every, cached, auto_switch=False):
     # `every` is already a validated whole number of minutes (validate_every), so this
     # matches the plist's StartInterval = every * 60 exactly, with no silent truncation.
+    # One entry: `;` (not `&&`) because auto-tick exits 2/3 on no action/blocked.
+    xswap = resolve_xswap()
+    steps = []
+    if auto_switch:
+        steps.append(f"{xswap} auto-tick --cached {format_number(cached)}")
+    steps.append(f"{xswap} list --warn {format_number(warn)} --cached {format_number(cached)}")
     print("xswap alert manages launchd, which is macOS-only. Use a crontab entry instead:")
-    print(f"*/{every} * * * * {resolve_xswap()} list --warn {format_number(warn)} --cached {format_number(cached)}")
+    print(f"*/{every} * * * * " + "; ".join(steps))
     return 2
 
 
-def install(root, *, warn=15, every=30, cached=600, dry_run=False):
+def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=False):
     warn = validate_warn(warn)
     every = validate_every(every)
     cached = validate_cached(cached)
 
     if sys.platform != "darwin":
-        return _print_cron_equivalent(warn, every, cached)
+        return _print_cron_equivalent(warn, every, cached, auto_switch)
 
     xswap_path = resolve_xswap()
     a_dir = alert_dir(root)
@@ -203,14 +263,20 @@ def install(root, *, warn=15, every=30, cached=600, dry_run=False):
     plist = plist_path()
     plist_data = build_plist(xswap_path, every, script_path, a_dir / "launchd.out.log", a_dir / "launchd.err.log")
 
+    if auto_switch and not _auto_enabled(root):
+        print("Note: automatic switching is not enabled, so auto-tick reports blocked until: "
+              "xswap auto-enable --accounts NAME,NAME")
+
     if dry_run:
         print(f"Would write {script_path}")
+        if auto_switch:
+            print(f"Would run xswap auto-tick --cached {format_number(cached)} before list --warn in {script_path}")
         print(f"Would write {plist}")
         print(f"Would run: launchctl bootstrap gui/{os.getuid()} {plist}")
         return 0
 
     _private_dir(a_dir)
-    script_path.write_text(render_run_script(xswap_path, warn, cached, log))
+    script_path.write_text(render_run_script(xswap_path, warn, cached, log, auto_switch=auto_switch))
     script_path.chmod(0o700)
 
     plist.parent.mkdir(parents=True, exist_ok=True)
@@ -233,6 +299,7 @@ def install(root, *, warn=15, every=30, cached=600, dry_run=False):
     print(f"Installed {plist}")
     print(f"Wrapper: {script_path}")
     print(f"Log: {log}")
+    print(f"Auto-switch: {'on (xswap auto-tick runs before list --warn)' if auto_switch else 'off'}")
     return 0
 
 
@@ -244,6 +311,7 @@ def uninstall(root, *, dry_run=False):
     plist = plist_path()
     a_dir = alert_dir(root)
     target = _bootstrap_target()
+    had_auto_switch = has_auto_switch(root)
 
     if dry_run:
         print(f"Would run: launchctl bootout {target}")
@@ -260,6 +328,8 @@ def uninstall(root, *, dry_run=False):
     if a_dir.exists():
         shutil.rmtree(a_dir)
     print(f"Removed {plist} and {a_dir}.")
+    if had_auto_switch:
+        print("The auto-tick step went with it; automatic switching itself is unchanged (xswap auto-disable turns it off).")
     return 0
 
 
@@ -278,6 +348,7 @@ def status(root):
 
     print(f"plist: {'present' if exists else 'absent'} ({plist})")
     print(f"loaded: {'yes' if loaded else 'no'} ({target})")
+    print(f"auto-switch: {'on' if has_auto_switch(root) else 'off'}")
 
     log = log_path(root)
     if log.exists():

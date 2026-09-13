@@ -96,6 +96,20 @@ xswap alert --install --warn 15 --every 30
 
 On macOS this writes `~/.local/share/codex-swap/alert/run.sh` (a wrapper that calls the absolute `xswap` path resolved at install time, since `launchd`'s `PATH` lacks `/opt/homebrew/bin`, and turns each `warn:` line into an `osascript` notification) and `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`, then loads it with `launchctl bootstrap`; each run's output lands in `alert/last.log`. Check it with `xswap alert --status` and remove it with `xswap alert --uninstall`. On non-macOS, `--install` prints an equivalent `cron` line instead of writing anything.
 
+### Proactive switching between sessions
+
+Inside a session the bridge decides at turn start; nothing else moves the default selection, so a `codex exec` or a new session opened after the selected account ran down its week starts on an exhausted account. `xswap auto-tick` is the between-sessions check, meant for the same `launchd`/`cron` schedule as the alert:
+
+```sh
+xswap auto-tick --cached 600          # one check; exit 0 switched, 1 error, 2 no action, 3 blocked
+xswap auto-tick --dry-run             # print the decision, change nothing
+xswap alert --install --auto-switch   # run it from the alert job, before the warn step
+```
+
+It reads the pool and the weekly reserve from automatic switching (`xswap auto-enable`, `xswap auto-policy --weekly-remaining PCT`), fetches quota the way `xswap list` does -- reconnecting the wrapped `codex` entry if it needs it, exactly as `xswap list` would -- and applies the rule a bridge applies before a turn: when the account selected with `xswap use` is at or below the reserve (or its `codex` limit is reached, or its login needs a sign-in), it selects the pool account with the most headroom that is **above** the reserve, skipping disabled and sign-in-required accounts, through the same path as `xswap use NAME` -- the default for new sessions changes, the pool order puts that account first, and running bridges receive the manual-switch request (idle ones switch now, busy ones after their turn). It prints one `switched: OLD -> NEW (…)` line and then the bridge report. Unknown quota never causes a switch (`no-action:`, exit `2`), the same rule as `run --best` and the bridge; with automatic switching disabled, nothing selected, or no pool account above the reserve it prints `blocked:` and exits `3`; a manual `xswap use` that lands while quota is being read wins. No cooldown is needed: the rule compares only the selected account with the reserve, and weekly remaining only rises at its reset, so a switch cannot reverse until then. Directory mappings are not consulted. `--json` prints the decision with account names, percentages, and short reasons only.
+
+With `--auto-switch`, `run.sh` runs `xswap auto-tick --cached SECONDS` before `list --warn` (so the table and warnings show the post-switch state from the same cached fetch) and turns a `switched:` line into a notification titled "xswap auto-switch"; `xswap alert --status` shows `auto-switch: on`. Re-run `--install` without the flag to drop the step. Automatic switching must be enabled for the tick to act; `--install` says so when it is not.
+
 ## Status line
 
 `xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). Disabled accounts are omitted from `list --short`, but `xswap usage <name> --short` always shows the named account, even if it is disabled; with no accounts, `list --short` prints an empty line. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
@@ -149,6 +163,7 @@ That updater derives its install location from `CODEX_HOME`, which a bridged ses
 - An interrupt or new user request cancels a queued continuation. General network/authentication errors and arbitrary HTTP 429 errors are not treated as quota exhaustion.
 - An account whose login the usage service rejected (recorded by any xswap quota read, see Cached lookups) is skipped as a candidate without being probed, and the reason is written to the session's status record. If that is the current account, the next idle turn moves to another pool member; a new session starts on the first pool member not recorded as rejected, and stops with `sign-in required; run: xswap login NAME` when every member is. `xswap login NAME` restores the account.
 - After every login the bridge sends to its app server (session start, a proactive or quota-error switch, `xswap switch`, or an `xswap login` re-login), it reads the login back with `account/read` (local, no token refresh) and records the answer next to the self-reported `account` in the session's status record: `verifiedAccount`, `verifiedIdentity` (the address the server reports), `verifiedAt`. If the server holds no login or another one, the switch fails with reason `identity mismatch`, the previous account's login is re-sent, and the session stays on it; at session start the bridge stops with that reason instead of opening on an unknown account. When the server cannot answer (a Codex CLI without `account/read`, a timeout, a token without an email claim) the switch is kept, `verifiedAccount` stays `null`, and `verifyReason` says why. Plan type is never treated as identity: every account on a plan shares it.
+- Between sessions nothing re-checks quota unless `xswap auto-tick` runs (see [Alerts](#alerts)); a new session or `codex exec` otherwise starts on the selected account as it is.
 
 ```sh
 xswap auto-status
@@ -173,6 +188,7 @@ Each run directory also holds a `bridge.log`: one line per bridge event (local t
 | Already-running ordinary sessions | Cannot be attached or upgraded in place |
 | Bridged sessions open during `xswap upgrade` | Keep the previous bridge until reopened; `list`, `doctor`, and `upgrade` name the resume command |
 | Existing ordinary conversation history | Not copied into auto mode; `resume --last` searches the auto-mode store |
+| Between sessions (new sessions, `codex exec`) | `xswap auto-tick` from the alert job moves the selection; there is no daemon |
 | OpenClaw | Explicit one-time sync only, not the CLI/desktop auto-switching loop |
 
 The implementation depends on experimental Codex external-auth/remote interfaces and desktop environment variables. Compatibility may change with updates. CLI 0.153.4 and a macOS desktop-bundled Codex were tested against local fake-auth fixtures; **real subscription quota exhaustion is not part of automated validation**. A real backend/account deployment still requires its own verification.
