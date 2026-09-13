@@ -60,6 +60,8 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 
 `xswap list`·`xswap usage`·`xswap run --best`·`xswap use --best`는 매번 계정당 `codex app-server`를 새로 띄웁니다. 상태표시줄이나 크론처럼 자주 조회하는 호출자를 위해 `--cached SECONDS`를 붙이면 그만큼 신선한 기존 결과를 재사용하고 새로 띄우지 않습니다 — `--cached`를 주지 않으면 기존과 동일하게 항상 실시간 조회입니다. 조회가 성공하면 결과는 항상 `~/.local/share/codex-swap/usage-cache.json`(권한 `0600`)에 계정 이름별로 저장되며, 화면에 보이는 것과 동일한 화이트리스트 필드 — 잔여 비율·초기화 시각·플랜 종류·크레딧, 그리고 이메일일 수도 있는 로컬 계정 라벨 — 만 담고 원본 서버 응답이나 토큰은 담지 않습니다. 저장된 라벨이 현재 로그인 라벨과 다르면(같은 이름으로 재로그인한 경우) 캐시를 재사용하지 않고 새로 조회합니다. `--offline`과 `--cached`는 동시에 쓸 수 없고, `run`·`use`에서는 `--best`와 함께여야 합니다.
 
+사용량 서비스가 로그인을 거부한 경우(조회에 401 계열 응답, 실시간 목록에는 `sign-in required · xswap login 이름`으로 표시)는 `~/.local/share/codex-swap/auth-state.json`(권한 `0600`; 계정 이름·로컬 로그인 라벨·시각·짧은 사유만 담고 토큰은 담지 않음)에도 기록됩니다. 이 기록이 남아 있는 동안 `xswap list`/`usage`의 `--cached`·`--offline`은 Codex를 띄우지 않고 `sign-in required · xswap login 이름`을 표시하고, `run --best`/`use --best`와 자동 전환 풀은 해당 계정을 조회 없이 건너뛰며, `xswap use 이름`은 거부하고, `xswap doctor`가 보고합니다. `--cached` 없는 실시간 `xswap list`/`usage`는 다시 조회하며 성공하면 기록을 지웁니다. `xswap login 이름`도 기록을 지웁니다. 사용량 캐시와 같이, 저장된 라벨이 현재 로그인 라벨과 일치할 때만 유효합니다.
+
 ### 잔여량 알림
 
 ```sh
@@ -232,7 +234,7 @@ uv tool install .
 
 CI는 macOS/Linux, Python 3.11/3.14, Node 22에서 테스트와 설치를 확인합니다. 자동 테스트는 가짜 인증만 사용합니다. 실제 계정·토큰·개인 검증 로그는 저장소와 배포 파일에 포함하지 않습니다.
 
-저장 위치: `~/.local/share/codex-swap/`. 등록 정보는 `accounts.json`, 추가 계정은 `profiles/`, OpenClaw 변경 백업은 `backups/openclaw/`입니다. 테스트·분리 설치에는 `CODEX_SWAP_HOME`을 지정할 수 있습니다.
+저장 위치: `~/.local/share/codex-swap/`. 등록 정보는 `accounts.json`, 추가 계정은 `profiles/`, OpenClaw 변경 백업은 `backups/openclaw/`입니다. 테스트·분리 설치에는 `CODEX_SWAP_HOME`을 지정할 수 있습니다. 사용량 서비스가 거부한 로그인 기록은 `auth-state.json`입니다.
 
 제거 전 `xswap auto-disable`로 codex 링크를 복원한 뒤 `uv tool uninstall intellieffect-xswap`을 실행하십시오. 계정 데이터는 보존됩니다. 기존 계정으로 돌아가려면 `xswap use main --openclaw`를 제거 전에 실행하십시오.
 

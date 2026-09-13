@@ -253,6 +253,49 @@ class AccountTests(unittest.TestCase):
         fetch.assert_not_called()
         signal.assert_not_called()
 
+    def test_login_clears_a_rejected_login_record(self):
+        self.manager.register("main")
+        label = identity(self.source)
+        self.manager.remember_auth_failure("main", label, failed_at=1000)
+        report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", return_value=response()), \
+             patch("xswap_switch.switch_running", return_value=report), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        self.assertIsNone(self.manager.auth_failure("main", label))
+        self.assertNotIn("main", json.loads(self.manager.auth_state_path().read_text()))
+        self.assertIn("main weekly:", out.getvalue())
+
+    def test_login_the_service_still_rejects_records_a_fresh_failure(self):
+        self.manager.register("main")
+        label = identity(self.source)
+        self.manager.remember_auth_failure("main", label, failed_at=1000)
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", side_effect=UsageError("sign in again to read usage")), \
+             patch("xswap_switch.switch_running", return_value=dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        failure = self.manager.auth_failure("main", label)
+        self.assertGreater(failure["failedAt"], 1000)  # the pre-login record was cleared, then re-recorded
+        self.assertIn("Signed in main:", out.getvalue())
+        self.assertIn("main usage: usage unavailable: sign in again to read usage", out.getvalue())
+
+    def test_use_refuses_a_rejected_login_until_relogin(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_auth_failure("second", identity(second))
+        with self.assertRaisesRegex(SwapError, "needs a new login.*Run: xswap login second"):
+            self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "main")
+        # A record left by a previous login under the same name does not block the new login.
+        self.manager.remember_auth_failure("second", "previous@example.test")
+        self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "second")
+
     def test_add_refusal_points_to_login(self):
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
@@ -622,6 +665,17 @@ class AccountTests(unittest.TestCase):
         self.assertNotIn("second", cache)
         self.assertIn("main", cache)
 
+    def test_remove_drops_the_auth_state_entry(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_auth_failure("main", "label-main")
+        self.manager.remember_auth_failure("second", "label-second")
+        self.manager.remove("second")
+        state = json.loads(self.manager.auth_state_path().read_text())
+        self.assertNotIn("second", state)
+        self.assertIn("main", state)
+
     def test_remove_managed_with_purge_deletes_directory(self):
         self.manager.register("main")
         second = self.manager.prepare("second")
@@ -906,6 +960,26 @@ class MainCLITests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
         self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
+
+    def test_use_on_rejected_login_returns_error_via_main(self):
+        manager = self.codex_swap.Manager()
+        manager.remember_auth_failure("second", identity(manager.account("second")[1]))
+        with patch("xswap_switch.switch_running") as broadcast, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
+        broadcast.assert_not_called()
+        self.assertIn("xswap: Account second needs a new login: the usage service rejected it. Run: xswap login second", err.getvalue())
+        self.assertEqual(self.codex_swap.Manager().read()["active"], "main")
+
+    def test_list_cached_reports_a_rejected_login_without_spawning_codex_via_main(self):
+        manager = self.codex_swap.Manager()
+        manager.remember_auth_failure("second", identity(manager.account("second")[1]))
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, \
+             patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["list", "--cached", "60"]), 0)
+        self.assertEqual(fetch.call_count, 1)  # main only; second is served from auth-state.json
+        self.assertIn("sign-in required · xswap login second", out.getvalue())
+        self.assertNotIn("fake-token", out.getvalue())
 
     def test_remove_subcommand_wires_through_main_with_yes(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1549,6 +1623,39 @@ class BestAccountTests(unittest.TestCase):
         self.assertEqual(first, "second")
         self.assertEqual(second, "second")
         self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
+
+    def test_cached_best_never_probes_a_rejected_login_again(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": UsageError("sign in again to read usage"),
+            "second": dual_window_raw(remaining5h=60, remaining7d=60),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake) as fetch, patch.object(Manager, "codex", return_value="codex"):
+            first, _ = self.manager.best_account(max_age=60)
+            self.assertEqual(fetch.call_count, 2)
+            second, reason = self.manager.best_account(max_age=60)
+        self.assertEqual(fetch.call_count, 2)  # main served from auth-state.json, second from usage-cache.json
+        self.assertEqual((first, second), ("second", "second"))
+        statuses = {c["name"]: c["status"] for c in reason["candidates"]}
+        self.assertEqual(statuses["main"], "sign-in required")
+        self.assertEqual(reason["remaining"], {"5h": 60, "7d": 60})
+
+    def test_run_best_dry_run_skips_a_rejected_login_without_spawning_codex(self):
+        self.add("second")
+        self.manager.remember_auth_failure("main", identity(self.source))
+        fake = self.fake_read_limits({"second": dual_window_raw(remaining5h=30, remaining7d=30)})
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stdout = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake) as fetch, \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(stdout):
+            code = main(["run", "--best", "--cached", "60", "--dry-run", "--", "exec", "hi"])
+        self.assertEqual(code, 0)
+        self.assertEqual(fetch.call_count, 1)  # second only
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["account"], "second")
+        self.assertEqual({c["name"]: c["status"] for c in payload["reason"]["candidates"]}["main"], "sign-in required")
 
     def test_dry_run_prints_expected_json_shape(self):
         self.add("second")

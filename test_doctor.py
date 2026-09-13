@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from codex_swap import Manager, atomic_json, main
+from codex_swap import Manager, atomic_json, identity, main
 import xswap_doctor as doctor
 
 
@@ -94,6 +94,63 @@ class DoctorTests(unittest.TestCase):
         self.register_main(exp=time.time() - 3600)
         row = find(self.run_doctor(), "main: token expiry")
         self.assertEqual(row["status"], "FAIL")
+
+    # --- sign-in state (auth-state.json) ---
+
+    def test_no_rejected_login_is_ok(self):
+        self.register_main()
+        row = find(self.run_doctor(), "main: sign-in")
+        self.assertEqual(row["status"], "OK")
+        self.assertEqual(row["detail"], "no rejected login recorded")
+
+    def test_rejected_login_fails_and_names_the_login_command(self):
+        self.register_main()
+        self.manager.remember_auth_failure("main", identity(self.source), failed_at=time.time() - 7200)
+        results = self.run_doctor()
+        row = find(results, "main: sign-in")
+        self.assertEqual(row["status"], "FAIL")
+        self.assertEqual(row["detail"], "sign-in required since 2.0h ago · xswap login main")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 1)
+
+    def test_rejected_login_on_disabled_account_warns_and_exit_is_0(self):
+        self.register_main()
+        second_home = self.manager.prepare("second")
+        atomic_json(second_home / "auth.json", {"auth_mode": "chatgpt",
+            "tokens": {"access_token": fake_jwt(exp=time.time() + 100000), "refresh_token": "fixture-refresh"}})
+        self.manager.set_disabled("second", True)
+        self.manager.remember_auth_failure("second", identity(second_home), failed_at=time.time() - 60)
+        results = self.run_doctor()
+        row = find(results, "second: sign-in")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("sign-in required since 1m ago", row["detail"])
+        self.assertIn("xswap login second", row["detail"])
+        self.assertIn("(disabled)", row["detail"])
+        self.assertFalse(any(r["status"] == "FAIL" for r in results))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(doctor.print_report(results), 0)
+
+    def test_rejection_recorded_for_another_login_label_is_ignored(self):
+        self.register_main()
+        self.manager.remember_auth_failure("main", "previous@example.test", failed_at=time.time() - 60)
+        row = find(self.run_doctor(), "main: sign-in")
+        self.assertEqual(row["status"], "OK")
+
+    def test_missing_credentials_have_no_sign_in_row(self):
+        self.register_main()
+        (self.source / "auth.json").unlink()
+        results = self.run_doctor()
+        self.assertFalse(any(r["name"] == "main: sign-in" for r in results))
+
+    def test_doctor_reads_the_auth_state_without_writing_it(self):
+        self.register_main()
+        self.manager.remember_auth_failure("main", identity(self.source), failed_at=time.time() - 60)
+        path = self.manager.auth_state_path()
+        before = path.read_bytes()
+        mtime = path.stat().st_mtime_ns
+        self.run_doctor()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(path.stat().st_mtime_ns, mtime)
 
     # --- missing / broken credentials ---
 

@@ -1,4 +1,4 @@
-"""Read-only diagnostics: codex binary, wrapper, credential store, accounts, auto pool, OpenClaw, storage.
+"""Read-only diagnostics: codex binary, wrapper, credential store, accounts (login, token expiry, rejected logins), auto pool, OpenClaw, storage.
 
 No mutations, no network, and no secrets in output: only local labels, paths, and short
 status messages that already appear elsewhere in xswap's own error text.
@@ -201,6 +201,20 @@ def check_token_expiry(name, home, disabled):
         detail = f"expires in {_human_delta(remaining)}; run: xswap login {name}"
         return check(label, WARN, detail + (" (disabled)" if disabled else ""))
     return check(label, OK, f"expires in {_human_delta(remaining)}")
+
+
+def check_sign_in(name, home, disabled, manager):
+    """The usage service rejected this account's login on a recent quota read
+    (auth-state.json) and nothing has cleared it: `xswap login NAME` or a later
+    successful live fetch does. Only a record for the current login label counts
+    (the usage-cache identity rule). Reads one local file; no process, no network.
+    """
+    label = f"{name}: sign-in"
+    failure = manager.auth_failure(name, identity(home))
+    if failure is None:
+        return check(label, OK, "no rejected login recorded")
+    delta = _human_delta(time.time() - failure["failedAt"])
+    return _finish(label, FAIL, f"sign-in required since {delta} ago · xswap login {name}", disabled)
 
 
 def check_plugins(name, home):
@@ -488,6 +502,7 @@ def run(manager):
         results.append(credentials_check)
         if credentials_check["status"] == OK:
             results.append(check_token_expiry(name, home, disabled))
+            results.append(check_sign_in(name, home, disabled, manager))
         results.append(check_plugins(name, home))
 
     if settings_ok:

@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import sys
 import time
-from xswap_usage import is_ok, reset_credit_lines, usage_lines
+from xswap_usage import AUTH_FAILED_STATUS, is_ok, reset_credit_lines, usage_lines
 
 # Every user-visible string in this module lives here, keyed by a short id.
 # `ko` values are the original hard-coded strings, preserved verbatim.
@@ -115,7 +115,8 @@ def status_note(row, lang="en"):
     """One line for a row without a usable weekly gauge, naming the fix when there is one.
 
     `xswap list` used to collapse every failure to "unavailable"; a login that the
-    usage service rejects now reads as sign-in required with the login command.
+    usage service rejects now reads as sign-in required with the login command, both
+    for the live failure and for the recorded state served to --cached/--offline.
     """
     status = row['status']
     if status == 'disabled':
@@ -125,7 +126,7 @@ def status_note(row, lang="en"):
     if is_ok(status):
         return _t(lang, 'no_weekly_data')
     reason = status[len(UNAVAILABLE_PREFIX):] if status.startswith(UNAVAILABLE_PREFIX) else status
-    if status == 'not signed in' or 'sign in' in reason:
+    if status in ('not signed in', AUTH_FAILED_STATUS) or 'sign in' in reason:
         return _t(lang, 'signin_required') + f" · xswap login {row['name']}"
     return _t(lang, 'unavailable') + (f' · {reason}' if reason else '')
 

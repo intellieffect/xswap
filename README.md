@@ -108,6 +108,8 @@ set -g status-right '#(xswap list --short)'
 
 `xswap list`, `xswap usage`, `xswap run --best`, and `xswap use --best` fetch live quota by default, spawning one `codex app-server` per account; add `--cached SECONDS` to reuse a still-fresh result instead, which matters for status-line and cron callers that check quota often. The default remains uncached unless `--cached` is passed. A successful fetch is always saved to `~/.local/share/codex-swap/usage-cache.json` (mode `0600`), keyed by account name, holding the same whitelisted fields shown on screen for that account — remaining percentages, reset times, plan type, credits, and the local account label (which can be an email address) — never raw server responses or tokens. A cache entry is only reused while its saved label still matches the account's current login; a re-login under the same name is treated as a miss. `--cached` cannot be combined with `--offline`, and on `run`/`use` it requires `--best`.
 
+A login that the usage service rejects (a 401-class answer to the quota read, shown live as `sign-in required · xswap login NAME`) is also recorded, in `~/.local/share/codex-swap/auth-state.json` (mode `0600`; the account name, its local login label, the time, and the short reason — never tokens). While that record stands, `xswap list`/`usage` with `--cached` or `--offline` show `sign-in required · xswap login NAME` without spawning Codex, `run --best`/`use --best` and the automatic-switching pool skip the account without probing it, `xswap use NAME` refuses it, and `xswap doctor` reports it. A live `xswap list`/`usage` (no `--cached`) still tries again and a success clears the record; so does `xswap login NAME`. As with the usage cache, the record only counts while its saved label matches the account's current login.
+
 ## Automatic switching
 
 Start with an explicit pool of at least two signed-in accounts:
@@ -145,6 +147,7 @@ That updater derives its install location from `CODEX_HOME`, which a bridged ses
 - If Codex reports the structured `usageLimitExceeded` terminal error, xswap can change authentication and append a continuation to the **same thread** after observed active turns finish. It does not resend the original prompt or replay tool calls. Model actions are not guaranteed exactly-once.
 - With no eligible candidate, a proactive switch leaves the current account selected; a quota-error continuation stops. Unknown quotas are not treated as available, and retries are bounded by account identity.
 - An interrupt or new user request cancels a queued continuation. General network/authentication errors and arbitrary HTTP 429 errors are not treated as quota exhaustion.
+- An account whose login the usage service rejected (recorded by any xswap quota read, see Cached lookups) is skipped as a candidate without being probed, and the reason is written to the session's status record. If that is the current account, the next idle turn moves to another pool member; a new session starts on the first pool member not recorded as rejected, and stops with `sign-in required; run: xswap login NAME` when every member is. `xswap login NAME` restores the account.
 
 ```sh
 xswap auto-status
@@ -185,6 +188,7 @@ Default data root: `~/.local/share/codex-swap/` (override with `CODEX_SWAP_HOME`
 | `auto.json`, `auto/**/status.json` | Pool, wrapper recovery (`wrapper`, plus `wrappers` for previously wrapped entries), threshold, operational status, and the login label each session's app server confirmed |
 | `auto/*/packages`, `profiles/<name>/codex/packages` | Links to the reference Codex home's `packages`, so a Codex update from inside a session installs there, never here |
 | `auto/**/bridge.log` | Per-run bridge event log: timestamps, events, local account labels, short reasons; no tokens, prompts, or raw errors |
+| `auth-state.json` | Accounts whose login the usage service rejected: name, local login label, time, short reason |
 | `backups/openclaw/` | Sensitive backups from explicitly requested OpenClaw sync |
 
 Auto mode reads tokens from their original account homes and sends them to its local child server in memory; it does not copy them into the auto conversation home. xswap's status records exclude tokens and prompts, but contain local account labels/PIDs. Codex itself persists conversation data in its normal runtime store. xswap adds no telemetry service.

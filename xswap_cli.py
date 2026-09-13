@@ -895,7 +895,7 @@ def passthrough_account(manager):
     None when the selection decided. Raises SwapError with a short, non-secret reason
     when no usable account resolves; the caller then keeps the caller's own home.
     """
-    from codex_swap import SwapError, check_file_store, identity
+    from codex_swap import SwapError, check_file_store, identity, is_auth_failed
     name, mapped = manager.resolve_default()
     if not name:
         raise SwapError('no account selected; run: xswap use NAME')
@@ -905,6 +905,9 @@ def passthrough_account(manager):
     check_file_store(home)
     if identity(home) in ('not signed in', 'unreadable auth cache'):
         raise SwapError(f'account {name} is not signed in; run: xswap login {name}')
+    if is_auth_failed(manager, name):
+        raise SwapError(f'account {name} needs a new login: the usage service rejected it; '
+                        f'run: xswap login {name}')
     return name, home, mapped
 
 

@@ -21,12 +21,25 @@ import tempfile
 import time
 import uuid
 
-from xswap_usage import UsageError, clean, normalize_limits, read_limits
+from xswap_usage import UsageError, clean, is_sign_in_failure, normalize_limits, read_limits
 from xswap_credentials import CredentialError, read_auth
 
 
 class LiveError(Exception):
     pass
+
+
+class SignInRequired(LiveError):
+    """The usage service rejected this account's login (recorded in auth-state.json).
+
+    Raised by AccountPool.prepare instead of UsageError so the bridge can tell a dead
+    login (skip it, move away from it) from a usage-service outage (tolerate it). The
+    message is a hand-written constant: safe for status.json and the disconnect line.
+    """
+
+
+def sign_in_required(name):
+    return f'sign-in required; run: xswap login {name}'
 
 
 BRIDGE_LOG_NAME = 'bridge.log'
@@ -229,7 +242,7 @@ class AccountPool:
 
     def prepare(self, name, require_quota=True):
         # Manual selections may be outside the automatic fallback pool.
-        from codex_swap import check_file_store
+        from codex_swap import check_file_store, identity
         if name not in {n for n, _ in self.manager.enabled_accounts()}:
             raise LiveError('selected account is disabled or removed')
         _, home = self.manager.account(name)
@@ -239,20 +252,43 @@ class AccountPool:
             read_auth(home)
         except CredentialError as exc:
             raise LiveError(str(exc)) from None
+        # A login the usage service already rejected (auth-state.json) is not probed
+        # again by the pool; `xswap login NAME` or a successful live `xswap list` clears it.
+        label = identity(home)
+        if self.manager.auth_failure(name, label) is not None:
+            raise SignInRequired(sign_in_required(name))
         # The official CLI refreshes its own source credentials if required.
         try:
             raw = read_limits(self.codex, self.manager.env(home), timeout=8)
-        except UsageError:
+        except UsageError as exc:
+            if is_sign_in_failure(exc):
+                self.manager.remember_auth_failure(name, label)
+                raise SignInRequired(sign_in_required(name)) from None
             # Credentials are already validated; a usage-service outage is not
             # a login problem. Callers that can re-check later may continue.
             if require_quota:
                 raise
             raw = None
+        else:
+            self.manager.clear_auth_failure(name)
         return load_credentials(home), raw
 
     def refresh(self, name):
         credentials, _ = self.prepare(name)
         return credentials
+
+    def first_available(self):
+        """The first pool member whose current login is not recorded as rejected; the
+        pool's first name when every member is (prepare then reports the reason)."""
+        from codex_swap import SwapError, identity
+        for name in self.names:
+            try:
+                label = identity(self.homes[name])
+            except SwapError:
+                continue
+            if self.manager.auth_failure(name, label) is None:
+                return name
+        return self.names[0]
 
 
 class Bridge:
@@ -463,6 +499,11 @@ class Bridge:
                 _, raw = await asyncio.to_thread(self.pool.prepare, self.current)
                 self.last_quota, self.checked_at, self.checked_model = raw, time.monotonic(), model
                 available = quota_available(raw, model, self.threshold())
+            except SignInRequired:
+                # The service rejected the current login: move before this turn, not
+                # after it fails with an auth error that no continuation can retry.
+                # Not a 'quota-check-failed': nothing went wrong with the check.
+                available = False
             except Exception as exc:
                 self.status('quota-check-failed', exc=exc)
                 available = None
@@ -570,8 +611,15 @@ class Bridge:
             await self.send({'method': 'initialized', 'params': {}})
             # A usage-service outage at startup must not close the session;
             # quota is re-read before the first turn (2026-09-08 incident).
-            credentials, raw = await asyncio.to_thread(self.pool.prepare, self.current, require_quota=False)
-            await self.install(self.current, credentials, raw)
+            # A login the service rejected is different: start on another pool
+            # member instead of installing tokens the server will refuse.
+            start = await asyncio.to_thread(self.pool.first_available)
+            try:
+                credentials, raw = await asyncio.to_thread(self.pool.prepare, start, require_quota=False)
+                await self.install(start, credentials, raw)
+            except SignInRequired:
+                if not await self.choose({start}):
+                    raise
             self.booting, self.initialized = False, True
             self.emit({'id': message['id'], 'result': result})
             return

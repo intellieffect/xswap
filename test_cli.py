@@ -753,6 +753,19 @@ class PassthroughTests(TestCase):
   _,_,env,err=self.run_wrapper(['exec','hi'])
   self.assertNotIn('CODEX_HOME',env)
   self.assertEqual(err,f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection (account second is not signed in; run: xswap login second)\n')
+ def test_rejected_login_falls_back_with_the_login_command(self):
+  # A login the usage service rejected (auth-state.json) must not run `codex exec` against
+  # a dead account: the wrapper keeps the caller's own home and names the one fix.
+  from codex_swap import identity
+  self.wrap()
+  self.manager.remember_auth_failure('main',identity(self.source))
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertNotIn('CODEX_HOME',env);self.assertEqual(env['OPENAI_API_KEY'],'do-not-inherit')
+  self.assertEqual(err,f'xswap: codex exec is running with its own home {self.manager.source}, not the xswap selection (account main needs a new login: the usage service rejected it; run: xswap login main)\n')
+  # `xswap login main` clears the record; the next pass-through runs as the account again.
+  with self.manager.locked():self.manager._forget_auth_failure('main')
+  _,_,env,err=self.run_wrapper(['exec','hi'])
+  self.assertEqual(env['CODEX_HOME'],str(self.source));self.assertEqual(err,'xswap: running codex exec as main\n')
  def test_no_selected_account_falls_back_with_a_warning(self):
   from codex_swap import atomic_json
   self.wrap()

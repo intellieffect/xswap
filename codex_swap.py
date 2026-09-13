@@ -19,7 +19,7 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
+from xswap_usage import AUTH_FAILED_STATUS, UsageError, is_ok, is_sign_in_failure, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_display import resolve_lang
 from xswap_live import LiveError, buckets_available, jwt_claims
@@ -176,6 +176,19 @@ def identity(home):
         raise SwapError(str(exc)) from None
     except (ValueError, OSError, IndexError, TypeError):
         return "unreadable auth cache"
+
+
+def is_auth_failed(manager, name):
+    """True while the usage service's rejection of NAME's current login still stands.
+
+    Module-level so callers and tests can reach it without a Manager method lookup;
+    the state itself lives in Manager.auth_failure (auth-state.json).
+    """
+    try:
+        _, home = manager.account(name)
+        return manager.auth_failure(name, identity(home)) is not None
+    except SwapError:
+        return False
 
 
 def plain_codex_notice(manager, selected_home):
@@ -425,8 +438,12 @@ class Manager:
             name, home = self.account(name)
             self.require_enabled(name)
             check_file_store(home)
-            if identity(home) in ("not signed in", "unreadable auth cache"):
+            label = identity(home)
+            if label in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
+            if self.auth_failure(name, label) is not None:
+                raise SwapError(f"Account {name} needs a new login: the usage service rejected it. "
+                                f"Run: xswap login {name} (a live xswap usage {name} re-checks it)")
             data = self.read()
             # New automatic CLI/app sessions must follow the same selection as
             # the live-switch broadcast, even when it was outside the old pool.
@@ -521,6 +538,7 @@ class Manager:
                 data["active"] = None
             atomic_json(self.registry, data)
             self._forget_usage(name)
+            self._forget_auth_failure(name)
             purged = False
             kept = entry["home"]
             if purge and entry.get("managed"):
@@ -608,6 +626,59 @@ class Manager:
             data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label, "resetCredits": reset_credits}
             atomic_json(self.usage_cache_path(), data)
 
+    def auth_state_path(self):
+        return self.root / "auth-state.json"
+
+    def _read_auth_state(self):
+        """{name: {"failedAt", "reason", "identity"}} or {} when absent/unreadable/not an object."""
+        try:
+            data = json.loads(self.auth_state_path().read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def auth_failure(self, name, label):
+        """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
+        nothing has cleared it since, else None. Like cached_usage, an entry recorded under
+        another login label (a re-login under the same name) is a miss, not reused.
+        Read-only: doctor and offline views call this without taking the lock.
+        """
+        entry = self._read_auth_state().get(name)
+        if not isinstance(entry, dict) or entry.get("identity") != label:
+            return None
+        failed_at = entry.get("failedAt")
+        if not isinstance(failed_at, (int, float)) or isinstance(failed_at, bool):
+            return None
+        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
+
+    def remember_auth_failure(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
+        """Record a service-rejected login for NAME's current label. Keeps the first failedAt
+        while the same login keeps failing, so doctor's "since" is the first rejection and a
+        30-minute alert job does not rewrite the file. Labels only (may be an email); never
+        tokens. Always 0600 through atomic_json.
+        """
+        with self.locked():
+            data = self._read_auth_state()
+            current = data.get(name)
+            if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
+                    and isinstance(current.get("failedAt"), (int, float)) and not isinstance(current.get("failedAt"), bool)):
+                return
+            data[name] = {"failedAt": time.time() if failed_at is None else failed_at, "reason": reason, "identity": label}
+            atomic_json(self.auth_state_path(), data)
+
+    def _forget_auth_failure(self, name):
+        """Drop NAME's entry whatever its label. Caller holds the lock (mirrors _forget_usage)."""
+        data = self._read_auth_state()
+        if data.pop(name, None) is not None:
+            atomic_json(self.auth_state_path(), data)
+
+    def clear_auth_failure(self, name):
+        """A successful fetch clears the record; no lock and no write when there is none."""
+        if name not in self._read_auth_state():
+            return
+        with self.locked():
+            self._forget_auth_failure(name)
+
     def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
         label = identity(home)
         row = {"name": name, "identity": label, "status": "offline", "buckets": [], "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
@@ -617,6 +688,11 @@ class Manager:
             row["status"] = label
         elif label == "API key":
             row["status"] = "API key: subscription quota not available"
+        elif (offline or max_age) and self.auth_failure(name, label) is not None:
+            # The usage service rejected this login and nothing has cleared it: cached and
+            # offline views say so without spawning Codex and without reusing an older cache
+            # entry. A live read (no --cached) still tries again; a success clears the record.
+            row["status"] = AUTH_FAILED_STATUS
         elif not offline:
             cached = self.cached_usage(name, label, max_age)
             if cached is not None:
@@ -629,8 +705,11 @@ class Manager:
                     row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
                                resetCredits=normalize_reset_credits(response))
                     self.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
+                    self.clear_auth_failure(name)
                 except (UsageError, SwapError) as error:
                     row["status"] = f"usage unavailable: {error}"
+                    if is_sign_in_failure(error):
+                        self.remember_auth_failure(name, label)
                 except OSError:
                     row["status"] = "usage unavailable: cannot start Codex CLI"
         return row
@@ -869,6 +948,7 @@ class Manager:
         from xswap_switch import switch_running
         with self.locked():
             self._forget_usage(name)
+            self._forget_auth_failure(name)
         row = self.account_usage(name, home)
         if row["status"] == "ok":
             item = summary(row, lang=lang)
