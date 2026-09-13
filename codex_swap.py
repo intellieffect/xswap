@@ -19,17 +19,18 @@ import tempfile
 import tomllib
 import time
 
-from xswap_usage import UsageError, is_ok, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
+from xswap_usage import AUTH_FAILED_STATUS, UsageError, is_ok, is_sign_in_failure, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
 from xswap_usage import warnings as usage_warnings
 from xswap_display import resolve_lang
 from xswap_live import LiveError, buckets_available, jwt_claims
 from xswap_plugins import ensure_plugins
+from xswap_relocate import link_packages
 from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 
-__version__ = "0.7.8"
+__version__ = "0.8.0"
 
 
 class SwapError(Exception):
@@ -177,25 +178,45 @@ def identity(home):
         return "unreadable auth cache"
 
 
+def is_auth_failed(manager, name):
+    """True while the usage service's rejection of NAME's current login still stands.
+
+    Module-level so callers and tests can reach it without a Manager method lookup;
+    the state itself lives in Manager.auth_failure (auth-state.json).
+    """
+    try:
+        _, home = manager.account(name)
+        return manager.auth_failure(name, identity(home)) is not None
+    except SwapError:
+        return False
+
+
 def plain_codex_notice(manager, selected_home):
     """Explain when the ordinary `codex` command still bypasses the xswap selection.
 
-    Returns None when the codex wrapper is connected or when plain codex already
+    Checks what a PATH lookup of `codex` runs, not only the entry recorded in
+    auto.json (2026-09-10: a standalone install ahead of the wrapped entry bypassed
+    xswap while the record looked fine), and names the classified reason when xswap
+    deliberately left an entry alone -- including the `codex` a relative PATH element
+    resolves to, which is what plain `codex` runs in this working directory and the one
+    entry xswap can never wrap. Returns None when the entry plain `codex`
+    runs is xswap-codex with automatic switching on, or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import read_settings, reconnect_wrapper
+    from xswap_cli import (RELATIVE_ENTRY_REASON, describe_drift, entry_drift, read_settings, reconnect_wrapper,
+                           wrapper_drift, wrapper_state)
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
-        wrapper = read_settings(manager).get("wrapper") or {}
+        settings = read_settings(manager)
     except LiveError:
-        wrapper = {}
-    try:
-        path = Path(wrapper.get("path", ""))
-        if wrapper and path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
-            return None
-    except OSError:
-        pass
+        settings = {}
+    # relative=True: this notice only reports what plain `codex` runs, and the entry a relative
+    # PATH element resolves to is exactly what it runs in this directory. reconnect_wrapper above
+    # keeps the default, so nothing re-points it.
+    state, first, _ = wrapper_state(settings, relative=True)
+    if state == "connected":
+        return None
     if Path(selected_home).expanduser().resolve() == manager.source:
         return None
     try:
@@ -203,9 +224,32 @@ def plain_codex_notice(manager, selected_home):
     except SwapError:
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
+    connect = f"xswap auto-enable --accounts {names} --wrap-codex"
+    if state in ("drifted", "shadowed", "relative"):
+        shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
+        # A relative entry is a skip by construction -- nothing may re-point one -- so it carries
+        # entry_drift's shape with the reason whose cause and fix name the PATH element and the
+        # working directory it resolves against, and the line below keeps the one shape every
+        # other skip reason prints in.
+        drift = ({"action": "skip", "reason": RELATIVE_ENTRY_REASON, "path": first["path"]} if state == "relative"
+                 else wrapper_drift(settings) if state == "drifted"
+                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"]))
+        if drift["action"] == "reconnect":
+            fix_text = f"Connect it: {connect}"
+        else:
+            cause, fix = describe_drift(drift, connect)
+            fix_text = f"xswap cannot wrap {first['path']} ({drift['reason']}): {cause}. Fix: {fix}"
+        return (f"Note: plain `codex` runs {shown}, not xswap-codex, so it keeps using {manager.source} ({label}); "
+                f"this selection applies only to xswap and xswap app. {fix_text}")
+    drift = wrapper_drift(settings)
+    cause, fix = describe_drift(drift, connect)
+    if cause:
+        return (f"Note: the codex command is not connected to xswap ({drift['reason']}): {cause}. "
+                f"Plain `codex` keeps using {manager.source} ({label}); this selection applies only "
+                f"to xswap and xswap app. Fix: {fix}")
     return ("Note: the codex command is not connected to xswap. Plain `codex` keeps using "
             f"{manager.source} ({label}); this selection applies only to xswap and xswap app. "
-            f"Connect it: xswap auto-enable --accounts {names} --wrap-codex")
+            f"Connect it: {connect}")
 
 
 def describe_switch_report(report, name):
@@ -214,7 +258,7 @@ def describe_switch_report(report, name):
     if unsafe:
         return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
                 f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
-    counts = {key: value for key, value in report.items() if value}
+    counts = {key: value for key, value in report.items() if value and key != "reasons"}
     if not counts:
         return f"No running bridged sessions; new sessions start as {name}."
     text = "Running bridged sessions: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
@@ -222,9 +266,16 @@ def describe_switch_report(report, name):
         text += " Pending requests apply when the current turn finishes."
     if counts.get("unsupported"):
         text += " Bridges older than 0.7.2 need reopening once."
+    text += failure_reasons_text(report)
     if counts.get("failed") or counts.get("unconfirmed"):
         text += " Check xswap auto-status for the sessions that did not confirm."
     return text
+
+
+def failure_reasons_text(report):
+    """` Failed: reason; reason.` from the bridges' own classified reasons, deduplicated, or empty."""
+    reasons = list(dict.fromkeys(r for r in report.get("reasons") or [] if isinstance(r, str) and r))
+    return " Failed: " + "; ".join(reasons) + "." if reasons else ""
 
 
 def describe_login_report(report, name):
@@ -233,7 +284,7 @@ def describe_login_report(report, name):
     if unsafe:
         return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
                 f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
-    counts = {key: value for key, value in report.items() if value}
+    counts = {key: value for key, value in report.items() if value and key != "reasons"}
     if not counts:
         return f"No running bridged session is on {name}; sessions on other accounts re-read it when needed."
     text = f"Running bridged sessions on {name}: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
@@ -241,6 +292,7 @@ def describe_login_report(report, name):
         text += " Pending requests re-authenticate when the current turn finishes."
     if counts.get("unsupported"):
         text += " Bridges older than 0.7.2 need reopening once."
+    text += failure_reasons_text(report)
     if counts.get("failed") or counts.get("unconfirmed"):
         text += " Check xswap auto-status for the sessions that did not confirm."
     return text
@@ -252,6 +304,41 @@ def codex_windows(buckets):
 
 def window_percent(buckets, minutes):
     return next((w["remainingPercent"] for w in codex_windows(buckets) if w["windowMinutes"] == minutes), None)
+
+
+def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
+    """Pick the row with the most codex headroom: (name or None, {"remaining", "candidates"}).
+
+    Shared by Manager.best_account (exhaustion only, weekly_remaining=0) and
+    `xswap auto-tick` (the configured weekly reserve). Disabled and excluded rows are
+    dropped; only rows with a successful fetch whose buckets_available(...) is True
+    (every applicable window known and above the reserve) are ranked, by the tightest
+    window's remaining percent and then by its earliest reset. `candidates` lists every
+    considered row with its 5h/7d remaining and short status; never tokens.
+    """
+    excluded = set(exclude)
+    candidates = [row for row in rows if not row["disabled"] and row["name"] not in excluded]
+    if not candidates:
+        return None, {"remaining": {}, "candidates": []}
+    summary, ranked = [], []
+    for row in candidates:
+        summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
+                        "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
+        if is_ok(row["status"]) and buckets_available(row["buckets"], model, weekly_remaining) is True:
+            ranked.append(row)
+    if not ranked:
+        return None, {"remaining": {}, "candidates": summary}
+
+    def rank_key(row):
+        known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
+        if not known:
+            return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
+        tightest = min(known, key=lambda w: w["remainingPercent"])
+        return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
+
+    winner = min(ranked, key=rank_key)
+    remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
+    return winner["name"], {"remaining": remaining, "candidates": summary}
 
 
 class Manager:
@@ -387,6 +474,7 @@ class Manager:
                 if src.exists() and not dst.exists() and not dst.is_symlink():
                     dst.symlink_to(src, target_is_directory=src.is_dir())
             ensure_plugins(home, self.source)
+            link_packages(self, home, data["accounts"])
             data["accounts"][name] = {"home": str(home), "managed": True}
             atomic_json(self.registry, data)
         return home
@@ -396,8 +484,12 @@ class Manager:
             name, home = self.account(name)
             self.require_enabled(name)
             check_file_store(home)
-            if identity(home) in ("not signed in", "unreadable auth cache"):
+            label = identity(home)
+            if label in ("not signed in", "unreadable auth cache"):
                 raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
+            if self.auth_failure(name, label) is not None:
+                raise SwapError(f"Account {name} needs a new login: the usage service rejected it. "
+                                f"Run: xswap login {name} (a live xswap usage {name} re-checks it)")
             data = self.read()
             # New automatic CLI/app sessions must follow the same selection as
             # the live-switch broadcast, even when it was outside the old pool.
@@ -492,6 +584,7 @@ class Manager:
                 data["active"] = None
             atomic_json(self.registry, data)
             self._forget_usage(name)
+            self._forget_auth_failure(name)
             purged = False
             kept = entry["home"]
             if purge and entry.get("managed"):
@@ -527,8 +620,23 @@ class Manager:
         if wrapper and Path(executable).resolve() == Path(wrapper["proxy"]).resolve():
             real = wrapper["realCodex"]
             if not Path(real).is_file() or Path(real).resolve() == Path(executable).resolve():
-                raise SwapError("Original Codex binary is unavailable.")
+                names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
+                raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
+                                f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
             return real
+        # shutil.which joins the raw PATH element, so a relative one (a project's `bin`, the empty
+        # element POSIX reads as the working directory) returns a relative path: the `codex` of
+        # whatever directory xswap happens to run in. Every caller execs this with a pool account's
+        # CODEX_HOME, which would hand a project-controlled file that account's auth.json, and the
+        # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
+        # refuses and doctor reports as bypassed, so run the recorded release instead of it.
+        if not os.path.isabs(executable):
+            real = (wrapper or {}).get("realCodex")
+            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+                return real
+            raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
+                            "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
+                            "then retry.")
         return executable
 
     def usage_cache_path(self):
@@ -577,6 +685,59 @@ class Manager:
             data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label, "resetCredits": reset_credits}
             atomic_json(self.usage_cache_path(), data)
 
+    def auth_state_path(self):
+        return self.root / "auth-state.json"
+
+    def _read_auth_state(self):
+        """{name: {"failedAt", "reason", "identity"}} or {} when absent/unreadable/not an object."""
+        try:
+            data = json.loads(self.auth_state_path().read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def auth_failure(self, name, label):
+        """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
+        nothing has cleared it since, else None. Like cached_usage, an entry recorded under
+        another login label (a re-login under the same name) is a miss, not reused.
+        Read-only: doctor and offline views call this without taking the lock.
+        """
+        entry = self._read_auth_state().get(name)
+        if not isinstance(entry, dict) or entry.get("identity") != label:
+            return None
+        failed_at = entry.get("failedAt")
+        if not isinstance(failed_at, (int, float)) or isinstance(failed_at, bool):
+            return None
+        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
+
+    def remember_auth_failure(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
+        """Record a service-rejected login for NAME's current label. Keeps the first failedAt
+        while the same login keeps failing, so doctor's "since" is the first rejection and a
+        30-minute alert job does not rewrite the file. Labels only (may be an email); never
+        tokens. Always 0600 through atomic_json.
+        """
+        with self.locked():
+            data = self._read_auth_state()
+            current = data.get(name)
+            if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
+                    and isinstance(current.get("failedAt"), (int, float)) and not isinstance(current.get("failedAt"), bool)):
+                return
+            data[name] = {"failedAt": time.time() if failed_at is None else failed_at, "reason": reason, "identity": label}
+            atomic_json(self.auth_state_path(), data)
+
+    def _forget_auth_failure(self, name):
+        """Drop NAME's entry whatever its label. Caller holds the lock (mirrors _forget_usage)."""
+        data = self._read_auth_state()
+        if data.pop(name, None) is not None:
+            atomic_json(self.auth_state_path(), data)
+
+    def clear_auth_failure(self, name):
+        """A successful fetch clears the record; no lock and no write when there is none."""
+        if name not in self._read_auth_state():
+            return
+        with self.locked():
+            self._forget_auth_failure(name)
+
     def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
         label = identity(home)
         row = {"name": name, "identity": label, "status": "offline", "buckets": [], "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
@@ -586,6 +747,11 @@ class Manager:
             row["status"] = label
         elif label == "API key":
             row["status"] = "API key: subscription quota not available"
+        elif (offline or max_age) and self.auth_failure(name, label) is not None:
+            # The usage service rejected this login and nothing has cleared it: cached and
+            # offline views say so without spawning Codex and without reusing an older cache
+            # entry. A live read (no --cached) still tries again; a success clears the record.
+            row["status"] = AUTH_FAILED_STATUS
         elif not offline:
             cached = self.cached_usage(name, label, max_age)
             if cached is not None:
@@ -598,8 +764,11 @@ class Manager:
                     row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
                                resetCredits=normalize_reset_credits(response))
                     self.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
+                    self.clear_auth_failure(name)
                 except (UsageError, SwapError) as error:
                     row["status"] = f"usage unavailable: {error}"
+                    if is_sign_in_failure(error):
+                        self.remember_auth_failure(name, label)
                 except OSError:
                     row["status"] = "usage unavailable: cannot start Codex CLI"
         return row
@@ -634,9 +803,11 @@ class Manager:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return rows
         from xswap_display import render
-        from xswap_cli import status_data
-        state = status_data(self, cleanup=False)
-        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"]))
+        from xswap_cli import bridge_hints, status_data
+        # The text dashboard is a sweep point; --json/--short above stay read-only.
+        state = status_data(self)
+        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"],
+                     hints=bridge_hints(self, state, __version__)))
         return rows
 
     def best_account(self, model=None, exclude=(), max_age=None):
@@ -645,30 +816,8 @@ class Manager:
         A one-shot choice for launchers (like `codex exec`) that have no
         `--remote` hook and so cannot be protected by the live auto bridge.
         """
-        excluded = set(exclude)
-        # Reuse the single parallel-fetch implementation; filter out disabled/excluded rows.
-        candidates = [row for row in self.account_rows(max_age=max_age) if not row["disabled"] and row["name"] not in excluded]
-        if not candidates:
-            return None, {"remaining": {}, "candidates": []}
-        summary, ranked = [], []
-        for row in candidates:
-            summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
-                             "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
-            if is_ok(row["status"]) and buckets_available(row["buckets"], model) is True:
-                ranked.append(row)
-        if not ranked:
-            return None, {"remaining": {}, "candidates": summary}
-
-        def rank_key(row):
-            known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
-            if not known:
-                return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
-            tightest = min(known, key=lambda w: w["remainingPercent"])
-            return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
-
-        winner = min(ranked, key=rank_key)
-        remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
-        return winner["name"], {"remaining": remaining, "candidates": summary}
+        # Reuse the single parallel-fetch implementation; rank_candidates drops disabled/excluded rows.
+        return rank_candidates(self.account_rows(max_age=max_age), model, exclude)
 
     def sync_openclaw(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
         # Directory mappings scope a single launched session; OpenClaw sync mutates
@@ -836,6 +985,7 @@ class Manager:
         from xswap_switch import switch_running
         with self.locked():
             self._forget_usage(name)
+            self._forget_auth_failure(name)
         row = self.account_usage(name, home)
         if row["status"] == "ok":
             item = summary(row, lang=lang)
@@ -857,7 +1007,18 @@ class Manager:
             print(json.dumps({"account": name, "CODEX_HOME": str(home), "argv": command}, indent=2))
             return 0
         ensure_plugins(home, self.source)
-        return subprocess.call(command, env=self.env(home))
+        link_packages(self, home)  # no-op for a registered external home
+        try:
+            return subprocess.call(command, env=self.env(home))
+        finally:
+            # `upgrade`/`update` reach this branch (they are non-interactive), and Codex's
+            # standalone updater re-points the wrapped `codex` entry on its way out. xswap
+            # still holds this process, so repair the entry here the way launch_cli's own
+            # exit path does; without it `xswap run -- upgrade` left plain `codex` running
+            # against the caller's home -- the 2026-09-10 bypass, re-created by xswap.
+            with contextlib.suppress(LiveError, OSError, SwapError):
+                from xswap_cli import reconnect_wrapper
+                reconnect_wrapper(self)
 
     def launch_auto_app(self, accounts, app=None, dry=False):
         from xswap_live import AccountPool, LiveError
@@ -898,6 +1059,7 @@ class Manager:
             if src.exists() and not dst.exists() and not dst.is_symlink():
                 dst.symlink_to(src, target_is_directory=src.is_dir())
         ensure_plugins(home, source)
+        link_packages(self, home)
         result = subprocess.run(command, env=self.env(home), capture_output=True)
         if result.returncode:
             raise SwapError("Auto desktop launch failed.")
@@ -922,6 +1084,7 @@ class Manager:
         private_dir(desktop.parent)
         private_dir(desktop)
         ensure_plugins(home, self.source)
+        link_packages(self, home)  # no-op for a registered external home
         result = subprocess.run(command, env=self.env(home), capture_output=True)
         if result.returncode:
             raise SwapError("Desktop launch failed. Confirm that the app path exists and macOS permits launching it.")
@@ -968,7 +1131,11 @@ def parser():
     dash.add_argument("--lang", choices=["en", "ko"], help="Text output language")
     sub.add_parser("status", help="Show selected account and login status")
     st = sub.add_parser("auto-status", help="Show desktop/CLI automatic switching state (no credentials)")
-    st.add_argument("--prune", action="store_true", help="Remove non-running CLI run records now, not only ones older than 7 days")
+    st.add_argument("--prune", action="store_true", help="Remove every non-running CLI run record now, not only stopped ones older than a day, empty ones older than a minute, and others older than 7 days")
+    tick = sub.add_parser("auto-tick", help="One proactive check for launchd/cron: if the selected account is at or below the weekly reserve, select the best pool account (exit 0 switched, 1 error, 2 no action, 3 blocked)")
+    tick.add_argument("--dry-run", action="store_true", help="Print the decision without selecting or signalling anything")
+    tick.add_argument("--cached", metavar="SECONDS", help="Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex")
+    tick.add_argument("--json", action="store_true", dest="json_output", help="Machine-readable decision (names, percentages, short reasons; no tokens)")
     ae = sub.add_parser("auto-enable", help="Enable automatic switching for new xswap CLI/app sessions")
     ae.add_argument("--accounts", required=True)
     ae.add_argument("--wrap-codex", action="store_true", help="Also wrap the user-owned codex symlink, with rollback metadata")
@@ -976,6 +1143,8 @@ def parser():
     policy.add_argument("--weekly-remaining", type=float, required=True)
     rp = sub.add_parser("repair-plugins", help="Materialize legacy shared plugin links without stopping sessions")
     rp.add_argument("--dry-run", action="store_true")
+    rc = sub.add_parser("relocate-codex", help="Move a Codex release that an in-session update installed inside xswap's state directory to the reference Codex home, and link xswap's homes to it")
+    rc.add_argument("--dry-run", action="store_true", help="Print the planned moves without changing anything")
     dr = sub.add_parser("doctor", help="Diagnose codex install, accounts, plugins, and OpenClaw (read-only, no network)")
     dr.add_argument("--json", action="store_true", dest="json_output")
     sub.add_parser("auto-disable", help="Disable auto defaults and restore the codex symlink")
@@ -990,6 +1159,7 @@ def parser():
     al.add_argument("--warn", type=float, default=15, metavar="PCT", help="Threshold passed to `list --warn` (1-100, default 15)")
     al.add_argument("--every", type=int, default=30, metavar="MINUTES", help="Polling interval in whole minutes (default 30; launchd merges under 60s)")
     al.add_argument("--cached", type=float, default=600, metavar="SECONDS", help="Freshness passed to `list --cached` (default 600)")
+    al.add_argument("--auto-switch", action="store_true", help="With --install: run `xswap auto-tick --cached SECONDS` before the warn step and post a notification when it switches")
     u = sub.add_parser("use", aliases=["switch"], help="Select the default account for xswap and xswap app")
     u.add_argument("name", nargs="?", help="Account name; switch also accepts a 1-based slot from xswap list")
     u.add_argument("--best", action="store_true", help="Select the account with the most remaining quota right now")
@@ -1109,6 +1279,9 @@ def main(argv=None):
         elif args.command == "repair-plugins":
             from xswap_plugins import repair
             repair(manager, args.dry_run)
+        elif args.command == "relocate-codex":
+            from xswap_relocate import relocate
+            relocate(manager, dry=args.dry_run)
         elif args.command == "doctor":
             from xswap_doctor import run, print_report
             return print_report(run(manager), args.json_output)
@@ -1121,13 +1294,19 @@ def main(argv=None):
         elif args.command == "auto-status":
             from xswap_cli import show_status
             show_status(manager, args.prune)
+        elif args.command == "auto-tick":
+            from xswap_tick import run_tick
+            return run_tick(manager, dry_run=args.dry_run, max_age=parse_cache_seconds(args.cached), json_output=args.json_output)
         elif args.command == "upgrade":
             return upgrade(__version__, args.tag, args.dry_run)
         elif args.command == "alert":
             if sum((args.install, args.uninstall, args.status)) != 1:
                 raise SwapError("Give exactly one of --install, --uninstall, or --status.")
+            if args.auto_switch and not args.install:
+                raise SwapError("--auto-switch requires --install.")
             if args.install:
-                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached, dry_run=args.dry_run)
+                return alert_install(manager.root, warn=args.warn, every=args.every, cached=args.cached,
+                                     auto_switch=args.auto_switch, dry_run=args.dry_run)
             if args.uninstall:
                 return alert_uninstall(manager.root, dry_run=args.dry_run)
             return alert_status(manager.root)

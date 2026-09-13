@@ -9,7 +9,7 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.8.0'
 xswap --version
 ```
 
@@ -60,6 +60,8 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 
 `xswap list`·`xswap usage`·`xswap run --best`·`xswap use --best`는 매번 계정당 `codex app-server`를 새로 띄웁니다. 상태표시줄이나 크론처럼 자주 조회하는 호출자를 위해 `--cached SECONDS`를 붙이면 그만큼 신선한 기존 결과를 재사용하고 새로 띄우지 않습니다 — `--cached`를 주지 않으면 기존과 동일하게 항상 실시간 조회입니다. 조회가 성공하면 결과는 항상 `~/.local/share/codex-swap/usage-cache.json`(권한 `0600`)에 계정 이름별로 저장되며, 화면에 보이는 것과 동일한 화이트리스트 필드 — 잔여 비율·초기화 시각·플랜 종류·크레딧, 그리고 이메일일 수도 있는 로컬 계정 라벨 — 만 담고 원본 서버 응답이나 토큰은 담지 않습니다. 저장된 라벨이 현재 로그인 라벨과 다르면(같은 이름으로 재로그인한 경우) 캐시를 재사용하지 않고 새로 조회합니다. `--offline`과 `--cached`는 동시에 쓸 수 없고, `run`·`use`에서는 `--best`와 함께여야 합니다.
 
+사용량 서비스가 로그인을 거부한 경우(조회에 401 계열 응답, 실시간 목록에는 `sign-in required · xswap login 이름`으로 표시)는 `~/.local/share/codex-swap/auth-state.json`(권한 `0600`; 계정 이름·로컬 로그인 라벨·시각·짧은 사유만 담고 토큰은 담지 않음)에도 기록됩니다. 이 기록이 남아 있는 동안 `xswap list`/`usage`의 `--cached`·`--offline`은 Codex를 띄우지 않고 `sign-in required · xswap login 이름`을 표시하고, `run --best`/`use --best`와 자동 전환 풀은 해당 계정을 조회 없이 건너뛰며, `xswap use 이름`은 거부하고, `xswap doctor`가 보고합니다. `--cached` 없는 실시간 `xswap list`/`usage`는 다시 조회하며 성공하면 기록을 지웁니다. `xswap login 이름`도 기록을 지웁니다. 사용량 캐시와 같이, 저장된 라벨이 현재 로그인 라벨과 일치할 때만 유효합니다.
+
 ### 잔여량 알림
 
 ```sh
@@ -75,6 +77,20 @@ xswap alert --install --warn 15 --every 30
 ```
 
 macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정한 절대경로의 `xswap`을 호출하는 래퍼 — `launchd`의 `PATH`에는 `/opt/homebrew/bin`이 없기 때문이며, `warn:` 줄마다 `osascript` 알림으로 바꿔줍니다)와 `~/Library/LaunchAgents/com.intellieffect.xswap.alert.plist`를 만든 뒤 `launchctl bootstrap`으로 등록합니다. 매 실행 결과는 `alert/last.log`에 남습니다. 상태 확인은 `xswap alert --status`, 제거는 `xswap alert --uninstall`입니다. macOS가 아니면 `--install`은 아무것도 쓰지 않고 대신 동등한 `cron` 한 줄만 출력합니다.
+
+#### 세션 사이의 선제 전환
+
+세션 안에서는 브리지가 턴 시작 시점에만 판단하고, 세션 밖에서는 아무것도 기본 선택을 옮기지 않습니다. 그래서 선택된 계정의 주간 한도가 바닥난 뒤 새로 여는 세션이나 `codex exec`는 소진된 계정으로 시작됩니다. `xswap auto-tick`이 세션 사이의 점검 명령이며, 알림과 같은 `launchd`/`cron` 주기에서 돌리는 용도입니다.
+
+```sh
+xswap auto-tick --cached 600          # 1회 점검. 종료코드 0 전환함 / 1 오류 / 2 조치 없음 / 3 차단됨
+xswap auto-tick --dry-run             # 판단만 출력하고 선택·전달은 하지 않음
+xswap alert --install --auto-switch   # 알림 잡에서 warn 단계 전에 실행
+```
+
+자동 전환 설정(`xswap auto-enable`, `xswap auto-policy --weekly-remaining PCT`)의 풀과 주간 예비율을 읽고 `xswap list`와 같은 방식으로 사용량을 조회한 뒤(`xswap list`와 같이 래핑된 `codex` 항목을 필요하면 복구합니다), 브리지가 턴 전에 적용하는 규칙을 그대로 적용합니다. `xswap use`로 선택된 계정이 예비율 이하이거나 한도에 도달했거나 재로그인이 필요하면, 예비율을 **넘는** 풀 계정 중 여유가 가장 큰 계정을 `xswap use NAME`과 같은 경로로 선택합니다 — 새 세션의 기본값이 바뀌고, 풀 순서에서 그 계정이 맨 앞으로 오며, 실행 중인 브리지에는 수동 전환 요청이 전달됩니다(유휴 세션은 즉시, 작업 중인 세션은 턴이 끝난 뒤). 비활성화(disabled)·재로그인 필요 계정은 대상이 되지 않습니다. 잔여량을 알 수 없으면 전환하지 않고(`no-action:`, 종료코드 `2`), 자동 전환이 꺼져 있거나 선택된 계정이 없거나 예비율을 넘는 풀 계정이 없으면 `blocked:`와 함께 `3`으로 끝납니다. 조회 도중 수동으로 `xswap use`를 실행했다면 그 선택이 우선합니다. 규칙이 선택된 계정과 예비율만 비교하고 주간 잔여량은 초기화 때만 늘어나므로 별도의 쿨다운 없이도 전환이 되돌아가며 흔들리지 않습니다. 디렉터리 매핑은 보지 않습니다.
+
+`--auto-switch`로 설치하면 `run.sh`가 `list --warn` 전에 `xswap auto-tick --cached SECONDS`를 실행하고(표와 경고는 전환 후 상태를 같은 캐시로 보여줍니다) `switched:` 줄을 "xswap auto-switch" 제목의 알림으로 바꿉니다. `xswap alert --status`에 `auto-switch: on`으로 표시되며, 플래그 없이 다시 `--install`하면 그 단계가 빠집니다. 자동 전환이 켜져 있어야 실제로 동작하며, 꺼져 있으면 `--install`이 그렇게 알려줍니다.
 
 ### 상태 표시줄(status line)
 
@@ -94,7 +110,7 @@ xswap upgrade --dry-run          # 실행 없이 명령만 출력
 또는 아래 명령을 직접 실행:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.7.8'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.8.0'
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
@@ -113,7 +129,7 @@ xswap auto-status
 xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 ```
 
-`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원하며, `codex exec`, login/logout 등 비대화형 명령과 명시적 `--remote` 연결은 원래 Codex로 전달되어 자동 전환 대상이 아닙니다. `codex exec`에는 `--remote`가 없어 이 실시간 전환이 보호하지 못하므로, 실행 직전 잔여량이 가장 많은 계정을 한 번만 고르는 `xswap run --best`로만 다룹니다.
+`--accounts`는 본인이 로그인한 계정 이름을 우선순위 순서로 지정합니다. 최소 두 개가 필요합니다. 자동 기본 설정을 켜기 전에는 기존 실행 동작을 유지합니다. `xswap run --account 이름`과 `xswap app 이름`은 고정 계정으로 실행합니다. CLI의 대화형 실행·resume·fork·agents를 지원합니다. `codex exec`, `review` 등 `--remote` 훅이 없는 비대화형 명령은 실행 중 전환되지는 않지만, `codex` 명령이 연결된 뒤에는 `xswap run -- exec …`와 같은 규칙(현재 디렉터리 매핑, 없으면 `xswap use`로 선택한 계정)으로 선택 계정의 `CODEX_HOME`을 넣고 셸의 `OPENAI_API_KEY`/`CODEX_API_KEY`/`CODEX_ACCESS_TOKEN`을 제거한 채 한 번 실행되며, stderr에 `xswap: running codex exec as work` 한 줄을 남깁니다(`XSWAP_QUIET=1`은 이 줄만 숨깁니다). `CODEX_HOME`이 이미 설정됐거나 `XSWAP_BYPASS=1`인 경우, `--help`/`--version`/`--remote` 형식, 그리고 `login`, `logout`, `app`, `app-server`, `completion`, `help`, `update`, `upgrade`는 알림 없이 원래 홈으로 전달됩니다(`codex update`·`codex upgrade`가 계정 프로필 안에 릴리스를 설치하면 안 되기 때문입니다). `xswap run -- upgrade`도 자동 풀을 쓰지 않고 선택된 계정의 홈으로 실행되며, 릴리스는 `packages` 링크를 통해 기준 Codex 홈에 설치됩니다. 선택 계정이 비활성·미로그인 등으로 쓸 수 없으면 원래 홈으로 실행하고 이유와 조치를 한 줄 경고로 출력합니다. 잔여량 기준으로 고르려면 `xswap run --best -- exec …`를 사용하십시오. 0.8.0 이전에 저장된 `codex exec` 세션은 `~/.codex/sessions`에 남아 있으며 `XSWAP_BYPASS=1 codex exec resume …`로 이어갈 수 있습니다.
 
 자동 모드 앱과 CLI는 각각 **실행 중인 한 개의 Codex 서버와 대화 저장소를 유지**합니다. CLI는 원본 TUI 프로세스도 그대로 유지하며 사용자 전용 Unix WebSocket으로 서버와 연결합니다. TCP 포트를 열지 않습니다. 앱과 CLI 저장소는 분리되어 있습니다. 새 턴 전에 현재 사용량을 확인하고, 적용되는 한도가 소진되면 잔여량이 확인된 다음 계정으로 인증을 바꿉니다. 한도 정보는 최대 30초 동안 재사용하며, Codex의 한도 알림으로 갱신합니다. 모델별 한도를 확인할 수 없는 후보는 선택하지 않습니다.
 
@@ -123,11 +139,17 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 
 **처음 한 번은 자동 모드로 앱/CLI 세션을 시작해야 합니다.** 이미 실행 중인 일반 창이나 CLI 프로세스에 연결을 끼워 넣지 않습니다. 자동 모드에서 시작한 대화는 이후 계정 전환에도 유지되지만, 기존 계정별 창의 대화는 자동 복사하지 않습니다. 모든 풀 계정은 이 창의 대화·파일 작업 문맥을 공유하므로 개인 계정과 다른 조직의 계정을 섞지 마십시오.
 
-인증은 원래 각 계정의 `auth.json`에서 메모리로 읽고, 만료 시 원래 계정의 공식 CLI를 통해 갱신합니다. 자동 모드 홈에 인증 파일을 복사하지 않으며, 기존 계정 선택·OpenClaw·이미 실행 중인 일반 CLI 세션을 변경하지 않습니다. 토큰 갱신 요청은 같은 계정으로만 처리합니다. `auto/status.json`과 `auto/cli-runs/*/status.json`에는 선택 계정, PID, 전환 횟수, 마지막 상태만 저장하며 토큰·대화 내용은 저장하지 않습니다. `auto-status`는 호출될 때마다 부수 효과로 실행 중이 아닌 `auto/cli-runs/` 기록 중 7일 지난 것을 정리하며, `--prune`을 주면 실행 중이 아닌 기록을 즉시 전부 정리합니다. 두 경우 모두 생성된 지 60초 미만인 기록은 브리지가 아직 잠금을 잡기 전일 수 있으므로 절대 정리하지 않습니다.
+인증은 원래 각 계정의 `auth.json`에서 메모리로 읽고, 만료 시 원래 계정의 공식 CLI를 통해 갱신합니다. 자동 모드 홈에 인증 파일을 복사하지 않으며, 기존 계정 선택·OpenClaw·이미 실행 중인 일반 CLI 세션을 변경하지 않습니다. 토큰 갱신 요청은 같은 계정으로만 처리합니다. `auto/status.json`과 `auto/cli-runs/*/status.json`에는 선택 계정, PID, 전환 횟수, 마지막 상태만 저장하며 토큰·대화 내용은 저장하지 않습니다. 다시 읽을 일이 없는 `auto/cli-runs/` 기록은 `xswap auto-status`, `xswap list`/`usage`의 텍스트 출력(`alert` 작업이 주기마다 정리), 메뉴 막대의 `dashboard` 갱신, 새 브리지 CLI 실행마다 부수 효과로 정리합니다. 브리지가 정상 종료(`reason` 없는 `stopped`)한 기록은 24시간 뒤, 실패 `reason`이 있는 `stopped` 기록이나 `stopped` 기록 없이 브리지가 사라진 기록(강제 종료·크래시·재부팅)은 비정상 종료를 확인할 수 있도록 7일 뒤, 잠금 파일 외에 아무것도 없는 디렉터리(브리지 연결 전에 TUI가 종료된 경우)는 1분 뒤에 제거합니다. `auto-status --prune`은 실행 중이 아닌 기록을 즉시 전부 정리합니다. 어느 경우에도 실행 중인 브리지(잠금 보유)와 생성된 지 60초 미만인 기록은 브리지가 아직 잠금을 잡기 전일 수 있으므로 절대 정리하지 않습니다. `auto-status`는 제거한 기록을 `prunedRuns`(실행 ID·규칙·경과 시간·계정·마지막 이벤트·브리지 버전·종료 사유)로 보고하며, `list --json`/`--short`, `doctor`, `upgrade`는 아무것도 제거하지 않습니다.
+
+각 실행 디렉터리에는 `bridge.log`(0600)도 남습니다. 브리지 이벤트마다 한 줄(로컬 시각, 이벤트, 계정, 요청·후보 계정, 짧은 원인, 실패 시 예외 종류)을 기록하며 토큰·프롬프트·원본 오류는 절대 담지 않고, 1 MiB를 넘으면 오래된 줄부터 버립니다. 실패 원인은 `usage service unavailable`, `ChatGPT access token needs refresh or sign-in`, `selected account is disabled or removed`, `Codex rejected account/login/start`, `app-server request timed out` 같은 짧은 문구로 분류되어 `status.json`의 `reason`·`manualReason`(수동 전환이 대기·실패한 이유, 다음 요청 전까지 유지)·`lastFailure`(세션의 마지막 실패 이벤트)에 기록되고, `xswap auto-status`는 세션별 `log` 경로도 보여줍니다. `xswap use`/`switch`/`login`은 브리지가 요청을 거부한 이유를 `Failed: …`로 출력합니다.
+
+브리지는 앱 서버에 로그인을 보낼 때마다(세션 시작, 자동 전환, `xswap switch`, `xswap login` 재로그인) `account/read`로 서버가 실제로 들고 있는 로그인을 다시 읽어 `verifiedAccount`·`verifiedIdentity`·`verifiedAt`으로 기록합니다(`account`는 브리지가 보냈다고 믿는 계정일 뿐입니다). 서버가 로그인을 갖고 있지 않거나 다른 로그인을 들고 있으면 전환을 `identity mismatch` 사유로 실패 처리하고 이전 계정의 로그인을 다시 보내 세션을 이전 계정에 유지하며, 세션 시작 시점이면 알 수 없는 계정으로 열지 않고 브리지를 중단합니다. 서버가 답할 수 없으면(`account/read`가 없는 Codex CLI, 시간 초과, 이메일 클레임이 없는 토큰) 전환은 유지하고 `verifyReason`에 이유를 남깁니다. 플랜 종류는 신원이 아닙니다. `xswap doctor`의 `auto sessions` 항목이 확인되지 않은 실행 세션과, 확인 이후 다른 사용자로 로그인이 바뀐 계정을 경고합니다.
 
 `codex` 명령이 아직 연결되지 않았으면 `xswap use`가 일반 `codex`가 계속 쓰는 홈과 계정을 출력하고, 계정이 2개 이상이면 `xswap doctor`가 경고합니다.
 
-구현은 데스크톱의 `CODEX_CLI_PATH`, CLI의 `--remote unix://` 연결과 App Server의 실험적 `chatgptAuthTokens` 인터페이스를 사용합니다. 앱 바이너리/설치 파일은 수정하지 않습니다. 이 인터페이스들의 호환성이 바뀔 수 있으며, 오류 시 자동 모드가 중단됩니다. `--wrap-codex`는 사용자 소유 심볼릭 링크만 교체합니다. Codex 업데이트(TUI의 ctrl+u, `codex upgrade`, 설치 스크립트)는 이 링크를 새 릴리스로 되돌려 일반 `codex`가 xswap을 우회하게 만듭니다. 자동 전환이 켜져 있으면 다음 `xswap` 실행, `xswap list`/`usage`, `xswap use`/`switch`가 링크를 다시 연결하고 새 릴리스를 실제 Codex로 기록하며, 업데이트를 실행한 브리지 세션도 종료 시 다시 연결합니다. 그 전까지는 `xswap doctor`가 끊김을 표시하고 수동 명령을 안내합니다. `xswap auto-disable`은 현재 릴리스로 링크를 되돌립니다. 일반 모드로 돌아가려면 `xswap auto-disable`을 실행하십시오. 이미 실행 중인 자동 세션은 계속 유지됩니다.
+구현은 데스크톱의 `CODEX_CLI_PATH`, CLI의 `--remote unix://` 연결과 App Server의 실험적 `chatgptAuthTokens` 인터페이스를 사용합니다. 앱 바이너리/설치 파일은 수정하지 않습니다. 이 인터페이스들의 호환성이 바뀔 수 있으며, 오류 시 자동 모드가 중단됩니다. `--wrap-codex`는 사용자 소유 심볼릭 링크만 교체합니다. xswap 밖에서 연결이 풀리는 경우는 두 가지입니다. Codex 업데이트(TUI의 ctrl+u, `codex upgrade`, 설치 스크립트)는 이 링크를 새 릴리스로 되돌리고, Codex 설치는 PATH에서 래핑된 항목보다 앞에 두 번째 `codex`를 추가할 수 있습니다(standalone 설치 스크립트는 `~/.local/bin/codex`를 만듭니다. 2026-09-10에 이 항목이 래핑된 `/opt/homebrew/bin/codex`를 가렸습니다). 자동 전환이 켜져 있으면 다음 `xswap` 실행, `xswap list`/`usage`, `xswap use`/`switch`가 둘 다 복구합니다. 되돌려진 링크는 `xswap-codex`로 다시 연결하고 새 릴리스를 실제 Codex로 기록하며, 래핑된 항목 앞에 새로 생긴 사용자 소유 `codex` 심볼릭 링크도 래핑해 xswap이 실행하는 항목으로 삼습니다(이전 항목은 `auto.json`의 `wrappers`에 보관). 업데이트를 실행한 브리지 세션도 종료 시 복구합니다. `xswap doctor`는 PATH의 모든 `codex`를 검사해 첫 항목이 `xswap-codex`가 아니면 FAIL(항목·대상·다음 실행에서 복구되는지 표시. 일반 파일이나 다른 사용자 소유 링크는 절대 바꾸지 않음), 래핑된 항목 뒤에 전체 경로로만 실행되는 다른 `codex`가 있으면 WARN을 표시하고, `xswap use`도 선택이 우회될 때 같은 내용을 출력합니다. `xswap auto-disable`은 래핑된 모든 항목을 현재 릴리스로 되돌립니다. PATH는 xswap을 실행한 셸의 것이며 launchd·cron 작업은 자기 PATH를 봅니다. xswap은 확신할 수 없는 항목은 고쳐 쓰지 않습니다: 링크 대상이 없거나 실행 파일이 아니거나, 항목이 일반 파일이거나 없거나 다른 사용자 소유이거나, 자동 전환이 꺼져 있으면 항목을 그대로 두고 `xswap doctor`와 `xswap use`/`switch`가 어느 경우인지와 수동 조치 방법을 알려줍니다(`xswap auto-status`에는 `wrapperReason`으로 표시됩니다). 상대 경로 PATH 항목(프로젝트의 `bin`, direnv 습관)으로 찾은 `codex`도 래핑하거나 되돌려 쓰지 않습니다 — 디렉터리마다 다른 파일을 가리키기 때문입니다. `xswap auto-enable --wrap-codex`는 현재 디렉터리의 그 파일을 래핑하지 않고 거부합니다. 그래도 그 디렉터리에서는 일반 `codex`가 그 항목을 실행하므로, 보고만 하는 모든 표면이 명령을 실행한 디렉터리 기준으로 이를 알립니다: `xswap doctor`는 FAIL로 보고하고 해당 PATH 항목을 절대 경로로 바꾸라는 조치를 알려주며, `xswap auto-status`는 `codexWrapped: false`와 `wrapperReason: relative-path-entry`를 보고하고, `xswap use`/`switch`는 그 항목을 명시하며 xswap이 래핑할 수 없다고 알립니다. 빈 PATH 항목도 같은 항목입니다 — POSIX는 이를 작업 디렉터리로 읽으므로 `./codex`로 보고합니다. 그 항목의 `codex`가 `xswap-codex`에 도달하면 그 디렉터리의 일반 `codex`는 실제로 xswap을 거치므로 FAIL이 아니라 WARN으로 보고하고(무엇이 실행되는지는 디렉터리에 따라 달라집니다) `codexWrapped`는 `true`로 유지합니다. xswap 자신도 상대 경로 `codex`를 실행하지 않습니다: 기록된 실제 Codex를 사용하거나 거부합니다. 이전 버전이 상대 경로로 기록한 `wrapper.path`(0.7.8은 조회 결과를 그대로 저장했습니다)도 작업 디렉터리 기준으로 해석하지 않습니다: `xswap doctor`는 `relative-record`와 수동 조치를 FAIL로 보고하고, `auto-disable`은 손대지 않은 기록을 명시합니다. 일반 모드로 돌아가려면 `xswap auto-disable`을 실행하십시오. 이미 실행 중인 자동 세션은 계속 유지됩니다.
+
+이 업데이터는 설치 위치를 `CODEX_HOME`에서 정하는데, 브리지 세션은 `CODEX_HOME`을 xswap 런타임 홈으로 두므로 세션 안에서 시작한 업데이트는 `~/.local/share/codex-swap/auto/cli-codex/packages`에 설치되어 `auto/`를 정리하면 함께 사라집니다. xswap은 자신이 소유한 홈(`auto/cli-codex`, `auto/codex`, `profiles/<이름>/codex`)의 `packages`를 기준 Codex 홈(`~/.codex` 또는 `CODEX_HOME`, 혹은 실제 Codex를 이미 보유한 등록 홈)의 `packages`로 링크해 업데이트가 원래 위치에 설치되게 하고, 실제 Codex를 그 홈 경로로 기록합니다. xswap 상태 디렉터리 안에 남아 있는 실제 Codex는 `xswap doctor`가 `real codex` FAIL로 보고하며, `xswap relocate-codex`(`--dry-run`으로 미리보기)가 릴리스를 기준 홈으로 옮기고 `current`와 `auto.json`을 다시 씁니다. 릴리스를 삭제하지 않고, 대상이 이미 있으면 거부하며, 셸 설정은 수정하지 않습니다. 일반 `codex`가 실제 Codex 실행 파일이 없다고 알리면 `xswap auto-disable` 후 Codex를 다시 설치하고 `xswap auto-enable --accounts … --wrap-codex`를 실행하십시오.
 
 실제 Codex CLI 0.153.4와 macOS 앱 내장 바이너리에 가짜 계정/로컬 HTTP 서버를 연결하여 검증했습니다. `첫 계정 응답 → 한도 오류 → 두 번째 계정 응답`에서 서버 PID·대화 ID가 유지되고 3개 턴이 보존됐습니다. 실제 TUI를 PTY로 실행한 검사에서도 TUI/서버 PID와 대화 ID가 유지되며 자동 전환 후 다음 사용자 요청을 처리하고 Ctrl-C로 정상 종료됐습니다. 실제 구독 한도를 소진시키는 테스트는 하지 않습니다.
 
@@ -205,7 +227,7 @@ OpenClaw 연결은 실행 시점의 인증을 동기화합니다. 이미 OpenCla
 
 ## 오류가 나면
 
-먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, `codex` 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료, 플러그인 링크, 자동 전환 풀, OpenClaw plugin SDK를 점검합니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
+먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, PATH의 모든 `codex`와 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료·사용량 조회에서 거부된 로그인 기록, 플러그인 링크, 자동 전환 풀, 실제 Codex 실행 파일 위치(`real codex`, `packages link`), 설치된 xswap보다 낮은 브리지로 실행 중인 세션, 실행 중인 자동 세션의 서버 확인 로그인, OpenClaw plugin SDK를 점검합니다. Codex 업데이트가 다른 실행 파일로 되돌려 놓은 `codex` 항목은 FAIL로 보고하며, 다음 `xswap` 실행·`list`·`use`가 다시 연결할 때까지 `xswap doctor`는 종료 코드 1을 반환합니다. xswap이 래핑할 수 없는 항목(링크 대상이 없거나 실행 파일이 아님, 심볼릭 링크 자리의 일반 파일, 다른 사용자 소유 링크, 상대 경로 PATH 항목으로 찾은 `codex`, 자동 전환이 꺼진 경우)은 항목이 알려주는 조치를 직접 할 때까지 FAIL과 종료 코드 1이 유지됩니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
 
 | 상황 | 다음 행동 |
 |---|---|
@@ -228,7 +250,7 @@ uv tool install .
 
 CI는 macOS/Linux, Python 3.11/3.14, Node 22에서 테스트와 설치를 확인합니다. 자동 테스트는 가짜 인증만 사용합니다. 실제 계정·토큰·개인 검증 로그는 저장소와 배포 파일에 포함하지 않습니다.
 
-저장 위치: `~/.local/share/codex-swap/`. 등록 정보는 `accounts.json`, 추가 계정은 `profiles/`, OpenClaw 변경 백업은 `backups/openclaw/`입니다. 테스트·분리 설치에는 `CODEX_SWAP_HOME`을 지정할 수 있습니다.
+저장 위치: `~/.local/share/codex-swap/`. 등록 정보는 `accounts.json`, 추가 계정은 `profiles/`, OpenClaw 변경 백업은 `backups/openclaw/`입니다. 테스트·분리 설치에는 `CODEX_SWAP_HOME`을 지정할 수 있습니다. 사용량 서비스가 거부한 로그인 기록은 `auth-state.json`입니다.
 
 제거 전 `xswap auto-disable`로 codex 링크를 복원한 뒤 `uv tool uninstall intellieffect-xswap`을 실행하십시오. 계정 데이터는 보존됩니다. 기존 계정으로 돌아가려면 `xswap use main --openclaw`를 제거 전에 실행하십시오.
 
@@ -286,6 +308,15 @@ xswap auto-policy --weekly-remaining 0    # 완전 소진 때만 전환 (기존 
 설정/설치는 기존 세션을 종료하지 않습니다. `auto-status`의 전역 값은 저장된 기준이며,
 각 세션의 `bridgeVersion`/`weeklyRemainingThreshold`는 실제 실행 코드의 지원·상태를 나타냅니다.
 
+`xswap upgrade` 시점에 이미 열려 있던 세션은 다시 열 때까지 이전 브리지를 계속 실행합니다. 각 브리지는
+현재 대화(`conversationId`), `codexHome`, 풀(`accounts`)을 `status.json`에 기록하므로, `xswap list`는 실행
+세션 아래에 다시 여는 명령을 표시하고(`⚠ bridge 0.7.8 · reopen with codex resume UUID to load 0.8.0`,
+`codex` 명령이 연결돼 있지 않으면 `xswap run -- resume UUID`), `xswap doctor`는 `auto cli-runs` 행을
+WARN으로 보고하며, `xswap upgrade`는 설치 성공 후 같은 줄을 출력합니다. 대화는 0.8.0 이상 브리지가 한 번
+이상 턴을 저장한 뒤에만 이름으로 지목됩니다. 그 전의 기록이나 저장된 대화가 없는 세션은 `exit and reopen it`,
+데스크톱 세션은 `quit and reopen it with xswap app`으로 표시됩니다. 이전 세션이 대화의 쓰기 잠금을 아직
+쥐고 있으므로 다시 열기 전에 종료하십시오. 아무 세션도 자동으로 중단·재시작되지 않습니다.
+
 `XSWAP_TEST_RESERVE=1`로 실제 Codex 서버/CLI 회귀 검사를 실행하면, 모의 weekly 10% 알림 후
 한도 오류 없이 다음 계정이 다음 사용자 턴을 처리하는지 확인합니다.
 
@@ -322,7 +353,7 @@ xswap switch work --default-only      # 새 실행의 기본값만 변경
 
 자동 모드의 재개 목록은 다른 서버가 쓰고 있는 대화를 제외합니다. UUID 직접 재개도 대화가 다른 창에 열려 있으면 TUI 시작 전에 안내합니다. 기존 창으로 돌아가거나 해당 세션을 종료한 뒤 재개하십시오. 잠금 파일은 삭제하지 않습니다. 종료 후 재개 안내에는 실제 저장된 대화 ID만 사용합니다.
 
-CLI 계정 전환 로그는 실행 중인 TUI 화면에 직접 출력하지 않으며 `xswap auto-status`에서 확인할 수 있습니다. 연결 오류 안내는 TUI 종료 후 출력합니다.
+CLI 계정 전환 로그는 실행 중인 TUI 화면에 직접 출력하지 않으며 `xswap auto-status`와 실행 디렉터리의 `bridge.log`에서 확인할 수 있습니다. 실패 이벤트(`manual-switch-failed`, `candidate-unavailable`, `no-available-account`, `continuation-failed`, `refresh-failed`, `quota-check-failed`)에는 짧게 분류한 `reason`이 붙고 그중 가장 최근 항목이 `lastFailure`에 남습니다. 브리지가 죽은 `stopped` 기록도 자체 `reason`을 담지만 `lastFailure`를 덮지 않으므로, 전환 실패 뒤 브리지가 죽어도 원래 원인이 남습니다. 연결 오류 안내는 TUI 종료 후 출력하며, 세션이 실패했거나 실패를 기록했다면 그 안내에 `bridge.log` 경로를 함께 표시합니다.
 
 `xswap switch NAME` / `use NAME`은 자동 모드 풀에서도 해당 계정을 맨 앞으로 옮겨 새 CLI·앱 세션에 적용합니다. 실행 중인 호환 브리지는 유휴 상태에서 적용하고 진행 중인 턴은 종료 후 적용합니다. `--default-only`는 기존 세션에 전달하지 않고 새 실행만 변경합니다.
 

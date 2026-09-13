@@ -15,6 +15,19 @@ class UsageError(Exception):
     pass
 
 
+# read_limits' curated text for a 401-class answer (wording unchanged since 0.7.6). A fetch
+# classified this way is recorded per account in auth-state.json (codex_swap.Manager): before
+# 0.8.0 a rejected login was visible only in the one live `xswap list` that hit it.
+SIGN_IN_REQUIRED = "sign in again to read usage"
+# Row status served from that record by cached/offline views; never a live fetch result.
+AUTH_FAILED_STATUS = "sign-in required"
+
+
+def is_sign_in_failure(error):
+    """True only for read_limits' own sign-in classification, never for outages or timeouts."""
+    return isinstance(error, UsageError) and str(error) == SIGN_IN_REQUIRED
+
+
 def read_limits(codex, env, timeout=12):
     """Start only our own server; never create a thread/turn or change accounts."""
     process = subprocess.Popen([codex, "app-server", "--stdio"], stdin=subprocess.PIPE,
@@ -49,7 +62,7 @@ def read_limits(codex, env, timeout=12):
                         raise UsageError("update Codex CLI to read usage")
                     description = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
                     if any(word in description for word in ("401", "unauthorized", "sign in", "authentication", "not authenticated")):
-                        raise UsageError("sign in again to read usage")
+                        raise UsageError(SIGN_IN_REQUIRED)
                     raise UsageError("usage service unavailable")
                 result = message.get("result")
                 if not isinstance(result, dict):

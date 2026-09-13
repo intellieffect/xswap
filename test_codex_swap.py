@@ -253,6 +253,49 @@ class AccountTests(unittest.TestCase):
         fetch.assert_not_called()
         signal.assert_not_called()
 
+    def test_login_clears_a_rejected_login_record(self):
+        self.manager.register("main")
+        label = identity(self.source)
+        self.manager.remember_auth_failure("main", label, failed_at=1000)
+        report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", return_value=response()), \
+             patch("xswap_switch.switch_running", return_value=report), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        self.assertIsNone(self.manager.auth_failure("main", label))
+        self.assertNotIn("main", json.loads(self.manager.auth_state_path().read_text()))
+        self.assertIn("main weekly:", out.getvalue())
+
+    def test_login_the_service_still_rejects_records_a_fresh_failure(self):
+        self.manager.register("main")
+        label = identity(self.source)
+        self.manager.remember_auth_failure("main", label, failed_at=1000)
+        with patch("codex_swap.subprocess.call", return_value=0), \
+             patch("codex_swap.read_limits", side_effect=UsageError("sign in again to read usage")), \
+             patch("xswap_switch.switch_running", return_value=dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.manager.login("main"), 0)
+        failure = self.manager.auth_failure("main", label)
+        self.assertGreater(failure["failedAt"], 1000)  # the pre-login record was cleared, then re-recorded
+        self.assertIn("Signed in main:", out.getvalue())
+        self.assertIn("main usage: usage unavailable: sign in again to read usage", out.getvalue())
+
+    def test_use_refuses_a_rejected_login_until_relogin(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_auth_failure("second", identity(second))
+        with self.assertRaisesRegex(SwapError, "needs a new login.*Run: xswap login second"):
+            self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "main")
+        # A record left by a previous login under the same name does not block the new login.
+        self.manager.remember_auth_failure("second", "previous@example.test")
+        self.manager.use("second")
+        self.assertEqual(self.manager.account()[0], "second")
+
     def test_add_refusal_points_to_login(self):
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
@@ -309,15 +352,111 @@ class AccountTests(unittest.TestCase):
 
     def test_use_stays_quiet_when_codex_wrapper_is_connected(self):
         self.manager.register("main")
-        link = self.base / "codex-link"
-        link.symlink_to("/fixture/xswap-codex")
+        bin_dir = self.base / "bin"
+        bin_dir.mkdir()
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
+        (bin_dir / "codex").symlink_to(proxy)
         def connect():
             atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
-                        "wrapper": {"path": str(link), "proxy": "/fixture/xswap-codex",
+                        "wrapper": {"path": str(bin_dir / "codex"), "proxy": str(proxy),
                                     "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
-        text = self._add_work_and_use("work", before=connect)
+        with patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            text = self._add_work_and_use("work", before=connect)
         self.assertIn("Selected work.", text)
         self.assertNotIn("not connected", text)
+        self.assertNotIn("not xswap-codex", text)
+
+    def _shadowed_wrapper(self, shadow_is_symlink):
+        # 2026-09-10 layout: bin-a/codex (a standalone install) ahead of the wrapped bin-b/codex on PATH.
+        bin_a, bin_b = self.base / "bin-a", self.base / "bin-b"
+        bin_a.mkdir()
+        bin_b.mkdir()
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
+        (bin_b / "codex").symlink_to(proxy)
+        standalone = self.base / "standalone-codex"
+        standalone.write_text("fixture")
+        standalone.chmod(0o700)
+        if shadow_is_symlink:
+            (bin_a / "codex").symlink_to(standalone)
+        else:
+            (bin_a / "codex").write_text("fixture")
+            (bin_a / "codex").chmod(0o700)
+        def connect():
+            atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(bin_b / "codex"), "proxy": str(proxy),
+                                    "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
+        return bin_a, bin_b, proxy, standalone, connect
+
+    def test_use_names_the_codex_entry_that_bypasses_xswap(self):
+        self.manager.register("main")
+        bin_a, bin_b, proxy, _, connect = self._shadowed_wrapper(shadow_is_symlink=False)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join([str(bin_a), str(bin_b)])}):
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertIn(f"plain `codex` runs {bin_a / 'codex'}, not xswap-codex", text)
+        self.assertIn(f"{self.source} (ChatGPT)", text)
+        self.assertIn(f"cannot wrap {bin_a / 'codex'}", text)
+        self.assertIn("xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertNotIn("fake-token", text)
+        self.assertEqual(os.readlink(bin_b / "codex"), str(proxy))  # a regular file is never re-pointed
+
+    def test_use_wraps_a_standalone_link_that_shadows_the_wrapped_entry_and_stays_quiet(self):
+        self.manager.register("main")
+        bin_a, bin_b, proxy, standalone, connect = self._shadowed_wrapper(shadow_is_symlink=True)
+        with patch.dict(os.environ, {"PATH": os.pathsep.join([str(bin_a), str(bin_b)])}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertNotIn("not connected", text)
+        self.assertNotIn("not xswap-codex", text)
+        self.assertEqual(os.readlink(bin_a / "codex"), str(proxy))
+        self.assertIn("connected it to xswap-codex", err.getvalue())
+        settings = json.loads((self.manager.root / "auto.json").read_text())
+        self.assertEqual(settings["wrapper"]["realCodex"], str(standalone))
+        self.assertEqual([w["path"] for w in settings["wrappers"]], [str(bin_b / "codex")])
+
+    def test_use_names_why_the_codex_entry_was_left_alone(self):
+        # A recorded wrapper whose link now dangles: reconnect_wrapper stays silent, so the
+        # selection notice carries the classified reason and the manual fix, exactly once.
+        self.manager.register("main")
+        link = self.base / "codex-link"
+        gone = self.base / "gone"
+        link.symlink_to(gone)
+        def connect():
+            atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
+                                    "originalTarget": "/fixture/codex", "realCodex": "/fixture/codex"}})
+        # A pinned PATH keeps the notice off this machine's own `codex`.
+        with patch.dict(os.environ, {"PATH": str(self.base)}):
+            text = self._add_work_and_use("work", before=connect)
+        self.assertIn("Selected work.", text)
+        self.assertIn(f"Note: the codex command is not connected to xswap (dangling-target): {link} -> {gone} does not exist, so xswap leaves it alone. Plain `codex` keeps using {self.source} (ChatGPT)", text)
+        self.assertIn("Fix: reinstall Codex or point the link at a Codex executable, then run: xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertEqual(text.count("not connected"), 1)
+        self.assertNotIn("fake-token", text)
+        self.assertEqual(os.readlink(link), str(gone))
+
+    def test_use_says_switching_is_off_instead_of_blaming_an_outside_change(self):
+        self.manager.register("main")
+        release = self.base / "release-codex"
+        release.write_text("fixture")
+        release.chmod(0o700)
+        link = self.base / "codex-link"
+        link.symlink_to(release)
+        def disabled():
+            atomic_json(self.manager.root / "auto.json", {"enabled": False, "accounts": ["main", "work"],
+                        "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
+                                    "originalTarget": str(release), "realCodex": str(release)}})
+        with patch.dict(os.environ, {"PATH": str(self.base)}):
+            text = self._add_work_and_use("work", before=disabled)
+        self.assertIn(f"(auto-disabled): automatic switching is disabled, so xswap leaves {link} alone (-> {release}).", text)
+        self.assertIn("Fix: enable automatic switching and connect it: xswap auto-enable --accounts main,work --wrap-codex", text)
+        self.assertEqual(text.count("not connected"), 1)
+        self.assertEqual(os.readlink(link), str(release))
 
     def test_use_without_bridges_says_so_instead_of_dumping_zero_counters(self):
         from codex_swap import describe_switch_report
@@ -327,6 +466,13 @@ class AccountTests(unittest.TestCase):
                          'Running bridged sessions: applied 2, pending 1. Pending requests apply when the current turn finishes.')
         self.assertIn('Check xswap auto-status', describe_switch_report({'applied': 0, 'failed': 1, 'unconfirmed': 0}, 'work'))
         self.assertIn('chmod 700 /x/auto', describe_switch_report({'applied': 0, 'unsafe': '/x/auto'}, 'work'))
+        failed = {'applied': 0, 'failed': 2, 'unconfirmed': 0, 'reasons': ['usage service unavailable', 'usage service unavailable']}
+        self.assertEqual(describe_switch_report(failed, 'work'),
+                         'Running bridged sessions: failed 2. Failed: usage service unavailable. '
+                         'Check xswap auto-status for the sessions that did not confirm.')
+        from codex_swap import describe_login_report
+        self.assertIn(' Failed: usage service unavailable.', describe_login_report({'failed': 1, 'reasons': ['usage service unavailable']}, 'work'))
+        self.assertNotIn('reasons', describe_login_report({'failed': 1, 'reasons': ['usage service unavailable']}, 'work'))
         self.manager.register("main")
         env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
         with patch.dict(os.environ, env), \
@@ -518,6 +664,17 @@ class AccountTests(unittest.TestCase):
         cache = json.loads(self.manager.usage_cache_path().read_text())
         self.assertNotIn("second", cache)
         self.assertIn("main", cache)
+
+    def test_remove_drops_the_auth_state_entry(self):
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_auth_failure("main", "label-main")
+        self.manager.remember_auth_failure("second", "label-second")
+        self.manager.remove("second")
+        state = json.loads(self.manager.auth_state_path().read_text())
+        self.assertNotIn("second", state)
+        self.assertIn("main", state)
 
     def test_remove_managed_with_purge_deletes_directory(self):
         self.manager.register("main")
@@ -803,6 +960,26 @@ class MainCLITests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
         self.assertIn("second is disabled. Run: xswap enable second", err.getvalue())
+
+    def test_use_on_rejected_login_returns_error_via_main(self):
+        manager = self.codex_swap.Manager()
+        manager.remember_auth_failure("second", identity(manager.account("second")[1]))
+        with patch("xswap_switch.switch_running") as broadcast, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.codex_swap.main(["use", "second"]), 1)
+        broadcast.assert_not_called()
+        self.assertIn("xswap: Account second needs a new login: the usage service rejected it. Run: xswap login second", err.getvalue())
+        self.assertEqual(self.codex_swap.Manager().read()["active"], "main")
+
+    def test_list_cached_reports_a_rejected_login_without_spawning_codex_via_main(self):
+        manager = self.codex_swap.Manager()
+        manager.remember_auth_failure("second", identity(manager.account("second")[1]))
+        with patch("codex_swap.read_limits", return_value=response()) as fetch, \
+             patch.object(self.codex_swap.Manager, "codex", return_value="codex"), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.codex_swap.main(["list", "--cached", "60"]), 0)
+        self.assertEqual(fetch.call_count, 1)  # main only; second is served from auth-state.json
+        self.assertIn("sign-in required · xswap login second", out.getvalue())
+        self.assertNotIn("fake-token", out.getvalue())
 
     def test_remove_subcommand_wires_through_main_with_yes(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1446,6 +1623,39 @@ class BestAccountTests(unittest.TestCase):
         self.assertEqual(first, "second")
         self.assertEqual(second, "second")
         self.assertEqual(reason["remaining"], {"5h": 90, "7d": 90})
+
+    def test_cached_best_never_probes_a_rejected_login_again(self):
+        self.add("second")
+        fake = self.fake_read_limits({
+            "main": UsageError("sign in again to read usage"),
+            "second": dual_window_raw(remaining5h=60, remaining7d=60),
+        })
+        with patch("codex_swap.read_limits", side_effect=fake) as fetch, patch.object(Manager, "codex", return_value="codex"):
+            first, _ = self.manager.best_account(max_age=60)
+            self.assertEqual(fetch.call_count, 2)
+            second, reason = self.manager.best_account(max_age=60)
+        self.assertEqual(fetch.call_count, 2)  # main served from auth-state.json, second from usage-cache.json
+        self.assertEqual((first, second), ("second", "second"))
+        statuses = {c["name"]: c["status"] for c in reason["candidates"]}
+        self.assertEqual(statuses["main"], "sign-in required")
+        self.assertEqual(reason["remaining"], {"5h": 60, "7d": 60})
+
+    def test_run_best_dry_run_skips_a_rejected_login_without_spawning_codex(self):
+        self.add("second")
+        self.manager.remember_auth_failure("main", identity(self.source))
+        fake = self.fake_read_limits({"second": dual_window_raw(remaining5h=30, remaining7d=30)})
+        env = {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}
+        stdout = io.StringIO()
+        with patch.dict(os.environ, env, clear=False), \
+             patch("codex_swap.read_limits", side_effect=fake) as fetch, \
+             patch.object(Manager, "codex", return_value="/usr/bin/codex"), \
+             contextlib.redirect_stdout(stdout):
+            code = main(["run", "--best", "--cached", "60", "--dry-run", "--", "exec", "hi"])
+        self.assertEqual(code, 0)
+        self.assertEqual(fetch.call_count, 1)  # second only
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["account"], "second")
+        self.assertEqual({c["name"]: c["status"] for c in payload["reason"]["candidates"]}["main"], "sign-in required")
 
     def test_dry_run_prints_expected_json_shape(self):
         self.add("second")

@@ -107,7 +107,7 @@ class UpgradeTests(unittest.TestCase):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
              patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=responses) as run, \
-             patch("xswap_upgrade.count_running_sessions", return_value=0), \
+             patch("xswap_upgrade.running_session_hints", return_value=[]), \
              contextlib.redirect_stdout(io.StringIO()) as out:
             result = upgrade("0.4.2")
         self.assertEqual(result, 0)
@@ -115,15 +115,61 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn("xswap 0.5.0", out.getvalue())
         self.assertNotIn("previous bridge", out.getvalue())
 
-    def test_install_tells_how_many_running_sessions_keep_the_old_bridge(self):
+    def test_install_lists_running_sessions_with_their_reopen_hints(self):
         responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")]
+        hints = ["CLI · ai · bridge 0.4.2 · reopen with codex resume 00000000-0000-4000-8000-000000000001 to load 0.5.0",
+                 "CLI · ai · bridge 0.4.2 · exit and reopen it to load 0.5.0",
+                 "Desktop · work · bridge 0.4.2 · quit and reopen it with xswap app to load 0.5.0"]
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
              patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=responses), \
-             patch("xswap_upgrade.count_running_sessions", return_value=3), \
+             patch("xswap_upgrade.running_session_hints", return_value=hints) as gather, \
              contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(upgrade("0.4.2"), 0)
-        self.assertIn("3 running xswap session(s) still use the previous bridge; reopen them to load v0.5.0.", out.getvalue())
+        gather.assert_called_once_with("0.5.0")
+        self.assertEqual(out.getvalue().splitlines()[:4], [
+            "3 running xswap session(s) still use the previous bridge; reopen them to load v0.5.0:",
+            "  " + hints[0], "  " + hints[1], "  " + hints[2]])
+
+    def test_session_records_are_read_before_the_reinstall_replaces_the_code(self):
+        order = []
+
+        def run(command, **kwargs):
+            order.append("install" if command[:3] == ["uv", "tool", "install"] else "version")
+            return subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")
+
+        def gather(target):
+            order.append("gather")
+            return []
+
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("xswap_upgrade.subprocess.run", side_effect=run), \
+             patch("xswap_upgrade.running_session_hints", side_effect=gather), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(upgrade("0.4.2"), 0)
+        self.assertEqual(order, ["gather", "install", "version"])
+
+    def test_running_session_hints_come_from_the_store_and_carry_no_secrets(self):
+        import fcntl, os, tempfile
+        from codex_swap import atomic_json
+        from xswap_upgrade import running_session_hints
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp).resolve()
+            (base / "codex-home").mkdir()
+            store = base / "store"
+            run_dir = store / "auto" / "cli-runs" / "old"
+            run_dir.mkdir(parents=True)
+            atomic_json(run_dir / "status.json", {"account": "ai", "bridgeVersion": "0.7.8", "updatedAt": 0,
+                                                  "accessToken": "must-not-leak"})
+            fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with patch.dict(os.environ, {"CODEX_SWAP_HOME": str(store), "CODEX_HOME": str(base / "codex-home")}):
+                    hints = running_session_hints("0.8.0")
+            finally:
+                os.close(fd)
+        self.assertEqual(hints, ["CLI · ai · bridge 0.7.8 · exit and reopen it to load 0.8.0"])
 
     def test_readme_install_snippets_pin_the_current_release(self):
         # README pinned v0.6.1 through four releases; keep the snippets on __version__ (INT-5085).

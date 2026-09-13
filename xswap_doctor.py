@@ -1,4 +1,4 @@
-"""Read-only diagnostics: codex binary, wrapper, credential store, accounts, auto pool, OpenClaw, storage.
+"""Read-only diagnostics: codex binary, wrapper, credential store, accounts (login, token expiry, rejected logins), auto pool, OpenClaw, storage.
 
 No mutations, no network, and no secrets in output: only local labels, paths, and short
 status messages that already appear elsewhere in xswap's own error text.
@@ -14,14 +14,18 @@ import stat
 import subprocess
 import time
 
-from codex_swap import SwapError, check_file_store, identity, resolve_openclaw_package_root
+from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import read_settings
+from xswap_cli import RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+from xswap_relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 TOKEN_WARN_SECONDS = 24 * 3600
+# Everything codex_swap.identity() can return that is not an address: a local label with
+# nothing to compare against the login an app server reports.
+IDENTITY_SENTINELS = ("not signed in", "unreadable auth cache", "API key", "ChatGPT")
 # Never spawn a probe subprocess with a caller's API key or workload identity in its
 # environment; matches the keys Manager.env strips (minus the desktop-only path var).
 SECRET_ENV_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN")
@@ -74,21 +78,103 @@ def check_codex_binary():
     return check("codex binary", OK, f"{executable} ({output})" if output else executable)
 
 
-def check_wrapper(settings, accounts=()):
-    wrapper = settings.get("wrapper")
+def _shown(entry):
+    return f"{entry['path']} -> {entry['target']}" if entry.get("target") else entry["path"]
+
+
+def check_wrapper(settings, accounts=(), env=None):
+    """What a PATH lookup of `codex` runs, not only the entry recorded in auto.json.
+
+    2026-09-10: a standalone install at ~/.local/bin/codex preceded the wrapped
+    /opt/homebrew/bin/codex on PATH, plain codex bypassed xswap, and this row said OK.
+    An entry that bypasses the selection right now is FAIL, which 0.7.8 reported as
+    WARN -- the exit code is the only signal a cron or CI check reads. Read-only:
+    the xswap_cli helpers only stat and readlink. `env` pins PATH for tests.
+    """
+    wrapper = settings.get("wrapper") or {}
     names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
     reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
-    if not wrapper:
-        if len(names) >= 2:
-            return check("wrapper", WARN, "codex command not connected; plain codex ignores the xswap "
-                         f"selection. Connect it: {reconnect}")
-        return check("wrapper", OK, "codex command not connected")
-    path = Path(wrapper.get("path", ""))
-    if path.is_symlink() and os.readlink(path) == wrapper.get("proxy"):
-        return check("wrapper", OK, f"{path} -> xswap-codex")
-    return check("wrapper", WARN, "codex entry changed outside xswap (a Codex update replaces the link); "
-                 f"plain codex is disconnected until the next xswap launch, list, or use reconnects it. "
-                 f"Reconnect it now: {reconnect}")
+    state, first, entries = wrapper_state(settings, env)
+    drift = wrapper_drift(settings)
+    if state == "unconfigured":
+        status = WARN if len(names) >= 2 else OK
+        # xswap deliberately left the entry alone: say which condition and the manual fix, since no
+        # later launch, list, or use will close this gap -- promising one (as 0.7.8 did for every
+        # non-ok entry) is what kept the 2026-09-10 bypass looking temporary. After `auto-disable`
+        # this is the normal state and reads like "not connected".
+        cause, fix = describe_drift(drift, reconnect)
+        if cause:
+            return check("wrapper", status, f"codex command not connected ({drift['reason']}): {cause}. Fix: {fix}")
+        detail = "codex command not connected"
+        if status == WARN:
+            detail += f"; plain codex ignores the xswap selection. Connect it: {reconnect}"
+        return check("wrapper", status, detail)
+    # The recorded path itself is not absolute (0.7.8 stored shutil.which's result verbatim), so
+    # it names a different file in every working directory: every repair skips it, nothing will
+    # close the gap, and the entry xswap really wrapped keeps running xswap-codex with no record
+    # left to restore it. Reported before the rows below, which all name wrapper["path"].
+    if drift["reason"] == RELATIVE_RECORD_REASON:
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"the wrapper record xswap stored is unusable ({drift['reason']}): {cause}. Fix: {fix}")
+    path = Path(wrapper["path"])
+    # A relative PATH element resolves from the working directory, so xswap never re-points
+    # the `codex` it finds there (codex_path_entries leaves it out of every repair). Plain
+    # `codex` in that directory still runs it, and every other check here reads the absolute
+    # entries only: reporting OK in the one state item 1 exists to surface is what a gate
+    # wired to this exit code would read as "connected". The condition lives in wrapper_state,
+    # so this row, auto-status's codexWrapped, and the use/switch notice cannot disagree on it.
+    relative_state, ahead, _ = wrapper_state(settings, env, relative=True)
+    if relative_state == "relative":
+        return check("wrapper", FAIL, f"plain codex runs {_shown(ahead)} here, not xswap-codex: it is found "
+                     "through a relative PATH entry, which names a different file in every directory, so xswap "
+                     f"never re-points it and the wrapped entry {path} stays bypassed wherever it resolves. "
+                     "Fix: make that PATH entry absolute.")
+    if ahead is not None and ahead["kind"] == "wrapper" and not os.path.isabs(ahead["path"]):
+        # The same element, resolving to xswap-codex in this directory: plain `codex` here does
+        # go through xswap, so FAIL ("not xswap-codex", "keeps using ...") would have been false.
+        # It is still the one entry xswap never re-points, and the next directory decides again.
+        return check("wrapper", WARN, f"plain codex runs {_shown(ahead)} here, which is xswap-codex, but it is found "
+                     "through a relative PATH entry: it names a different file in every directory, which xswap never "
+                     f"re-points, so whether plain codex reaches the wrapped entry {path} depends on the directory "
+                     "you run it from. Fix: make that PATH entry absolute.")
+    if state == "absent":
+        if drift["reason"] == "ok":
+            return check("wrapper", WARN, f"{path} -> xswap-codex, but {path.parent} is not on this shell's PATH; "
+                         "plain codex is not found here")
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"no codex on PATH and the wrapped entry {path} no longer runs "
+                     f"({drift['reason']}): {cause}. Fix: {fix}")
+    shown = _shown(first)
+    if state == "connected":
+        shadowed = [entry for entry in entries[1:] if entry["kind"] == "foreign"]
+        if shadowed:
+            return check("wrapper", WARN, f"{first['path']} -> xswap-codex; shadowed on PATH, bypassing xswap "
+                         f"only when run by full path: {'; '.join(_shown(entry) for entry in shadowed)}")
+        if len(entries) > 1:
+            return check("wrapper", OK, f"{first['path']} -> xswap-codex; {len(entries)} codex entries on PATH, all wrapped")
+        return check("wrapper", OK, f"{first['path']} -> xswap-codex")
+    if state == "drifted":
+        if drift["action"] == "reconnect":
+            return check("wrapper", FAIL, f"codex entry changed outside xswap (a Codex update replaces the link): {shown}; "
+                         "plain codex bypasses the xswap selection until the next xswap launch, list, or use "
+                         f"reconnects it. Reconnect it now: {reconnect}")
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"codex entry changed outside xswap ({drift['reason']}): {cause}. Fix: {fix}")
+    if shadowing_entry(settings, env) is not None:
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; it shadows the wrapped entry {path} "
+                     f"on PATH until the next xswap launch, list, or use wraps it. Wrap it now: {reconnect}")
+    shadow = entry_drift(first["path"], wrapper["proxy"])
+    if shadow["action"] == "reconnect":
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} is not "
+                     f"on this shell's PATH. Wrap it: {reconnect}")
+    cause, fix = describe_drift(shadow, reconnect)
+    if not cause:
+        # `ok` and `not-wrapped` have no cause sentence; reachable here only when the
+        # proxy's realpath could not be read, so the entry was classified foreign.
+        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} "
+                     f"is not on this shell's PATH. Wrap it: {reconnect}")
+    return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex, and xswap cannot wrap it "
+                 f"({shadow['reason']}): {cause}. The wrapped entry {path} is shadowed. Fix: {fix}")
 
 
 def check_credential_store(manager):
@@ -147,6 +233,20 @@ def check_token_expiry(name, home, disabled):
     return check(label, OK, f"expires in {_human_delta(remaining)}")
 
 
+def check_sign_in(name, home, disabled, manager):
+    """The usage service rejected this account's login on a recent quota read
+    (auth-state.json) and nothing has cleared it: `xswap login NAME` or a later
+    successful live fetch does. Only a record for the current login label counts
+    (the usage-cache identity rule). Reads one local file; no process, no network.
+    """
+    label = f"{name}: sign-in"
+    failure = manager.auth_failure(name, identity(home))
+    if failure is None:
+        return check(label, OK, "no rejected login recorded")
+    delta = _human_delta(time.time() - failure["failedAt"])
+    return _finish(label, FAIL, f"sign-in required since {delta} ago · xswap login {name}", disabled)
+
+
 def check_plugins(name, home):
     label = f"{name}: plugins"
     target = home / "plugins"
@@ -184,26 +284,104 @@ def check_auto_dir(manager):
 
 
 def check_auto_runs(manager):
+    """Count CLI run records and flag live bridges (CLI or desktop) that still run code
+    other than the installed xswap, each with the command that reopens it.
+
+    2026-09-10: three 0.7.2 bridges ran next to an installed 0.7.6 and this row said OK.
+    Read-only: status_data(cleanup=False) prunes nothing, and the conversation lookup
+    only globs the session store. A corrupted auto.json is reported by its own row.
+    """
     run_root = manager.root / "auto" / "cli-runs"
-    if not run_root.is_dir():
-        return check("auto cli-runs", OK, "0 run(s)")
     total = running = 0
-    for run_dir in sorted(run_root.iterdir()):
-        if not run_dir.is_dir() or run_dir.is_symlink():
-            continue
-        total += 1
-        lock_path = run_dir / ".bridge.lock"
-        if not lock_path.exists():
-            continue
-        fd = os.open(lock_path, os.O_RDONLY)
-        try:
+    if run_root.is_dir():
+        for run_dir in sorted(run_root.iterdir()):
+            if not run_dir.is_dir() or run_dir.is_symlink():
+                continue
+            total += 1
+            lock_path = run_dir / ".bridge.lock"
+            if not lock_path.exists():
+                continue
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                running += 1
-        finally:
-            os.close(fd)
-    return check("auto cli-runs", OK, f"{total} run(s), {running} running")
+                fd = os.open(lock_path, os.O_RDONLY)
+            except OSError:
+                # Sweeps now run from every list/usage, the menu bar's dashboard and every
+                # launch, so another one can remove this record between the exists() test
+                # and this open. scan_runs is guarded the same way; one vanished record must
+                # not abort the whole `xswap doctor` report with a bogus OSError.
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    running += 1
+            finally:
+                os.close(fd)
+    summary = f"{total} run(s), {running} running" if run_root.is_dir() else "0 run(s)"
+    try:
+        hints = bridge_hints(manager, status_data(manager, cleanup=False), __version__)
+    except (LiveError, OSError):
+        hints = []
+    if not hints:
+        return check("auto cli-runs", OK, summary)
+    detail = (f"{summary}; {len(hints)} still running an older bridge, reopen to load {__version__}: "
+              + "; ".join(describe_bridge_hint(hint) for hint in hints))
+    return check("auto cli-runs", WARN, detail)
+
+
+def check_auto_sessions(manager, accounts):
+    """Running bridges: what their own app server confirmed after the last login (0.8.0).
+
+    `account` in a status record is what the bridge believes it installed;
+    `verifiedAccount`/`verifiedIdentity` are the app server's answer to account/read.
+    2026-09-10: a failed session's record still named the account it had asked for.
+    A session on an older bridge has no such answer and is left to the version
+    check. A running session whose server never confirmed its login, or whose
+    account has since been signed in as someone else, names the command that
+    re-sends the account's current login to running bridges. Read-only: status
+    records and lock probes only, no process is spawned.
+    """
+    try:
+        sessions = [s for s in status_data(manager, cleanup=False)["sessions"] if s.get("running")]
+    except LiveError as exc:
+        return check("auto sessions", WARN, f"not checked: {exc}")
+    if not sessions:
+        return check("auto sessions", OK, "no running sessions")
+    older = verified = 0
+    problems = []
+    for session in sessions:
+        surface = session.get("surface") or "unknown"
+        pid = session.get("cliPid") or session.get("bridgePid") or "?"
+        account = session.get("account")
+        if session.get("bridgeVersion") != __version__:
+            older += 1
+            continue
+        if not account or session.get("verifiedAccount") != account:
+            reason = session.get("verifyReason") or "not verified"
+            problems.append(f"{surface} pid {pid} on {account or 'unknown'}: server login unverified ({reason}); "
+                            f"re-send it: xswap switch {account or 'NAME'}")
+            continue
+        verified += 1
+        home = (accounts.get(account) or {}).get("home")
+        confirmed = session.get("verifiedIdentity")
+        if not home or not isinstance(confirmed, str) or not Path(home).is_dir():
+            continue
+        try:
+            current = identity(Path(home))
+        except SwapError:
+            continue
+        # Every identity() sentinel, not only three of them: "ChatGPT" is what a login with
+        # an access token but no email claim reads as locally (check_credentials accepts it
+        # as OK), and comparing that label with the server's address claimed a session had
+        # changed identity and advised an `xswap switch` that re-verified to the same email.
+        if current not in IDENTITY_SENTINELS and current.casefold() != confirmed.casefold():
+            problems.append(f"{surface} pid {pid} verified as {confirmed} but {account} is now signed in as {current}; "
+                            f"re-send it: xswap switch {account}")
+    if problems:
+        return check("auto sessions", WARN, "; ".join(problems))
+    detail = f"{len(sessions)} running, {verified} verified"
+    if older:
+        detail += f", {older} on an older bridge (not checked)"
+    return check("auto sessions", OK, detail)
 
 
 OPENCLAW_ENTRY_POINTS = ("provider-auth", "agent-runtime", "config-runtime")
@@ -314,6 +492,86 @@ def check_openclaw_cooldowns(accounts, cache_path):
     return rows
 
 
+def check_real_codex(manager, settings, accounts):
+    """Where each wrapped codex entry's real executable lives (INT-5186, item 2). Empty when
+    the codex command is not connected. Paths are compared, never moved.
+
+    One row per recorded entry, not only the primary: 0.8.0 keeps the entries a Codex
+    install pushed aside in `wrappers`, `auto-disable` restores every one of them, and
+    `relocate-codex` rewrites every one of them. Reading only `wrapper` meant the 2026-09-10
+    shape -- the standalone installer's entry became the primary with a `realCodex` outside
+    the root, the inside-root record moved to `wrappers` -- produced no row at all, so the
+    repair relocate was taught to make was never the one doctor asked for.
+    """
+    wrapper = settings.get("wrapper") or {}
+    if not wrapper or not isinstance(wrapper.get("realCodex"), str) or not wrapper["realCodex"]:
+        return []
+    names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
+    reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
+    rows = [_real_codex_row(manager, "real codex", wrapper, reconnect, primary=True)]
+    for record in settings.get("wrappers") or []:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str) or not record["path"]:
+            continue
+        if not isinstance(record.get("realCodex"), str) or not record["realCodex"]:
+            continue
+        rows.append(_real_codex_row(manager, f"real codex: {record['path']}", record, reconnect, primary=False))
+    return rows
+
+
+def _real_codex_row(manager, label, record, reconnect, primary):
+    """One `real codex` row. A secondary record is not what plain `codex` runs today, but
+    `auto-disable` puts its path back on PATH pointing at exactly this executable."""
+    real = record["realCodex"]
+    consequence = ("plain codex cannot start" if primary else
+                   f"xswap auto-disable would restore {record['path']} to a Codex that cannot start")
+    if not Path(real).is_file():
+        return check(label, FAIL, f"{real} is missing; {consequence}. Recover: xswap auto-disable, "
+                     f"reinstall Codex, then {reconnect}")
+    if inside_root(manager, real) or inside_root(manager, record.get("originalTarget")):
+        broken = ("purging or resetting auto/ would break plain codex" if primary else
+                  f"xswap auto-disable would put {record['path']} back on PATH pointing inside it, and purging or "
+                  "resetting auto/ would then break plain codex")
+        return check(label, FAIL, f"{real} is inside the xswap state directory ({manager.root}): a Codex update "
+                     f"ran inside a bridged session, and {broken}. Fix: xswap relocate-codex")
+    return check(label, OK, real)
+
+
+def check_packages_links(manager, accounts):
+    """One row per xswap-owned Codex home whose `packages` entry exists, plus every auto
+    runtime home that exists at all: the entry must link to a home outside xswap's root
+    so Codex's updater installs there (see xswap_relocate)."""
+    rows = []
+    for home in codex_homes_inside_root(manager, accounts):
+        packages = home / "packages"
+        is_runtime = home.parent == manager.root / "auto"
+        if not home.is_dir() or not (is_runtime or packages.is_symlink() or packages.exists()):
+            continue
+        label = f"packages link: {home.relative_to(manager.root)}"
+        if packages.is_symlink():
+            target = os.readlink(packages)
+            absolute = Path(link_target_path(packages, target))
+            # install.sh runs `mkdir -p "$STANDALONE_ROOT"` first, and that fails on a
+            # broken link -- an in-session update would die instead of installing.
+            if not absolute.exists():
+                rows.append(check(label, WARN, f"{packages} -> {target} does not exist: a Codex update from inside "
+                                               "a session fails here. Fix: xswap relocate-codex"))
+                continue
+            try:
+                stays_inside = absolute.resolve().is_relative_to(manager.root)
+            except (OSError, RuntimeError):
+                stays_inside = absolute.is_relative_to(manager.root)
+            if stays_inside:
+                rows.append(check(label, WARN, f"{packages} -> {target} stays inside {manager.root}; run: xswap relocate-codex"))
+            else:
+                rows.append(check(label, OK, f"{packages} -> {target}"))
+        elif packages.is_dir():
+            rows.append(check(label, WARN, f"{packages} is a real directory: a Codex update from inside a session "
+                                          "installs here. Fix: xswap relocate-codex"))
+        else:
+            rows.append(check(label, OK, "not created yet; linked on the next launch"))
+    return rows
+
+
 def check_storage(manager):
     try:
         info = manager.root.lstat()
@@ -362,12 +620,16 @@ def run(manager):
         results.append(credentials_check)
         if credentials_check["status"] == OK:
             results.append(check_token_expiry(name, home, disabled))
+            results.append(check_sign_in(name, home, disabled, manager))
         results.append(check_plugins(name, home))
 
     if settings_ok:
         results.append(check_auto_pool(settings, accounts))
+        results.extend(check_real_codex(manager, settings, accounts))
     results.append(check_auto_dir(manager))
+    results.extend(check_packages_links(manager, accounts))
     results.append(check_auto_runs(manager))
+    results.append(check_auto_sessions(manager, accounts))
     results.extend(check_openclaw())
     results.extend(check_openclaw_cooldowns(accounts, manager.usage_cache_path()))
     results.append(check_storage(manager))

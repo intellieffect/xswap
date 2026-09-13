@@ -8,17 +8,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+from datetime import datetime
 import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import signal
+import stat
 import sys
+import tempfile
 import time
 import uuid
 
-from xswap_usage import UsageError, normalize_limits, read_limits
+from xswap_usage import UsageError, clean, is_sign_in_failure, normalize_limits, read_limits
 from xswap_credentials import CredentialError, read_auth
 
 
@@ -26,17 +29,120 @@ class LiveError(Exception):
     pass
 
 
-def failure_reason(exc):
-    """Curated, non-secret one-liner for status.json and the disconnect message.
+class SignInRequired(LiveError):
+    """The usage service rejected this account's login (recorded in auth-state.json).
 
-    LiveError/UsageError carry hand-written constants only. Anything else may
-    wrap RPC payloads or paths, so expose just the exception type.
+    Raised by AccountPool.prepare instead of UsageError so the bridge can tell a dead
+    login (skip it, move away from it) from a usage-service outage (tolerate it). The
+    message is a hand-written constant: safe for status.json and the disconnect line.
+    """
+
+
+def sign_in_required(name):
+    return f'sign-in required; run: xswap login {name}'
+
+
+BRIDGE_LOG_NAME = 'bridge.log'
+BRIDGE_LOG_MAX_BYTES = 1024 * 1024
+BRIDGE_LOG_KEEP_LINES = 1000
+# Events whose `reason` describes a failure. The newest one persists as `lastFailure`
+# in status.json until the bridge exits: on 2026-09-10 three manual switches ended as
+# manualState "failed" with reason null, and `stopped` had overwritten the event.
+# `stopped` itself is deliberately absent -- a bridge that dies after a failed switch
+# would otherwise replace that cause with 'app-server exited'. Its own per-event
+# `reason` is still written, and bridge.log keeps the whole order.
+FAILURE_EVENTS = frozenset({'manual-switch-failed', 'candidate-unavailable', 'no-available-account',
+                            'continuation-failed', 'refresh-failed', 'quota-check-failed'})
+
+
+def failure_reason(exc):
+    """Curated, non-secret one-liner for status.json, bridge.log, and the disconnect message.
+
+    LiveError/UsageError carry hand-written constants only. SwapError and OSError
+    are classified without their paths. Anything else may wrap RPC payloads or
+    paths, so expose just the exception type.
     """
     if isinstance(exc, (LiveError, UsageError)):
         return str(exc)
+    # TimeoutError is an OSError subclass, so this branch has to stay above that one.
     if isinstance(exc, asyncio.TimeoutError):
         return 'app-server request timed out'
+    from codex_swap import SwapError
+    if isinstance(exc, SwapError):
+        text = str(exc)
+        if 'No matching account' in text:
+            return 'account is not registered'
+        if 'config.toml' in text:
+            return 'account config.toml is unreadable'
+        if 'credential storage is' in text:
+            return 'account uses non-file credential storage'
+        return 'account store is unusable (xswap doctor)'
+    if isinstance(exc, OSError):
+        return 'local I/O error: ' + (exc.strerror or type(exc).__name__)
     return type(exc).__name__
+
+
+class IdentityMismatch(LiveError):
+    """The app server reports a different login than the one just sent to it."""
+
+    def __init__(self):
+        super().__init__('identity mismatch')
+
+
+def append_log_line(path, line):
+    """Append one line to a private bridge log; never raise (logging must not stop a bridge).
+
+    Only a user-owned regular file is written through (O_NOFOLLOW plus an fstat
+    check), created 0600 and narrowed back to 0600 if widened. O_NONBLOCK is what
+    makes that check reachable: without it a non-regular blocking file at this path
+    (a FIFO) freezes the open itself, and status() runs on the bridge's event loop. When the file would
+    exceed BRIDGE_LOG_MAX_BYTES it is first compacted to its newest
+    BRIDGE_LOG_KEEP_LINES lines. The bridge holding the run dir's .bridge.lock is
+    the only writer, so the compaction needs no lock of its own.
+    """
+    data = (line + '\n').encode()
+    try:
+        compact_log(path, len(data))
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            if stat.S_IMODE(info.st_mode) != 0o600:
+                os.fchmod(fd, 0o600)
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def compact_log(path, incoming):
+    """Rewrite the log with its newest lines when `incoming` more bytes would pass the cap."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_size + incoming <= BRIDGE_LOG_MAX_BYTES):
+            return
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            lines = stream.read().splitlines(keepends=True)
+    finally:
+        os.close(fd)
+    tail_fd, tmp = tempfile.mkstemp(prefix='.bridge-log-', dir=path.parent)
+    try:
+        with os.fdopen(tail_fd, 'wb') as stream:
+            stream.write(b''.join(lines[-BRIDGE_LOG_KEEP_LINES:]))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def jwt_claims(token):
@@ -46,6 +152,18 @@ def jwt_claims(token):
         return value if isinstance(value, dict) else {}
     except (ValueError, IndexError, TypeError):
         return {}
+
+
+def token_emails(token):
+    """Email labels a ChatGPT access token carries, for comparison with account/read.
+
+    Real access tokens keep the address under the profile namespace; id tokens
+    and test fixtures keep it at the top level. Case-folded; may be empty.
+    """
+    claims = jwt_claims(token)
+    profile = claims.get('https://api.openai.com/profile')
+    candidates = [claims.get('email'), profile.get('email') if isinstance(profile, dict) else None]
+    return {value.casefold() for value in candidates if isinstance(value, str) and value}
 
 
 def load_credentials(home):
@@ -145,7 +263,7 @@ class AccountPool:
 
     def prepare(self, name, require_quota=True):
         # Manual selections may be outside the automatic fallback pool.
-        from codex_swap import check_file_store
+        from codex_swap import check_file_store, identity
         if name not in {n for n, _ in self.manager.enabled_accounts()}:
             raise LiveError('selected account is disabled or removed')
         _, home = self.manager.account(name)
@@ -155,20 +273,52 @@ class AccountPool:
             read_auth(home)
         except CredentialError as exc:
             raise LiveError(str(exc)) from None
+        # A login the usage service already rejected (auth-state.json) is not probed
+        # again by the pool; `xswap login NAME` or a successful live `xswap list` clears it.
+        label = identity(home)
+        if self.manager.auth_failure(name, label) is not None:
+            raise SignInRequired(sign_in_required(name))
         # The official CLI refreshes its own source credentials if required.
         try:
             raw = read_limits(self.codex, self.manager.env(home), timeout=8)
-        except UsageError:
+        except UsageError as exc:
+            if is_sign_in_failure(exc):
+                self.manager.remember_auth_failure(name, label)
+                raise SignInRequired(sign_in_required(name)) from None
             # Credentials are already validated; a usage-service outage is not
             # a login problem. Callers that can re-check later may continue.
             if require_quota:
                 raise
             raw = None
+        else:
+            self.manager.clear_auth_failure(name)
         return load_credentials(home), raw
 
     def refresh(self, name):
         credentials, _ = self.prepare(name)
         return credentials
+
+    def credentials(self, name):
+        """Tokens only, for putting a login back after a failed verification: no usage read."""
+        from codex_swap import check_file_store
+        if name not in {n for n, _ in self.manager.enabled_accounts()}:
+            raise LiveError('selected account is disabled or removed')
+        _, home = self.manager.account(name)
+        check_file_store(home)
+        return load_credentials(home)
+
+    def first_available(self):
+        """The first pool member whose current login is not recorded as rejected; the
+        pool's first name when every member is (prepare then reports the reason)."""
+        from codex_swap import SwapError, identity
+        for name in self.names:
+            try:
+                label = identity(self.homes[name])
+            except SwapError:
+                continue
+            if self.manager.auth_failure(name, label) is None:
+                return name
+        return self.names[0]
 
 
 class Bridge:
@@ -203,14 +353,32 @@ class Bridge:
         self.manual_state = None
         self.quota_known = None  # Persisted in every status write, not only 'ready'.
         self.failure = None
+        self.manual_reason = None  # Why the manual request is pending or failed; persists like manual_state.
+        self.last_failure = None  # Newest failure {event, account, reason, at[, candidate]}; persists until exit.
+        # What the app server itself answered to account/read after the last login
+        # it was sent (0.8.0); `current` alone is what this bridge believes it installed.
+        self.verified_account = None
+        self.verified_identity = None
+        self.verified_at = None
+        self.verify_reason = None
 
     @staticmethod
     def stdout_message(message):
         sys.stdout.write(json.dumps(message, separators=(',', ':')) + '\n')
         sys.stdout.flush()
 
-    def status(self, event, **extra):
+    def status(self, event, exc=None, **extra):
         # Whitelist operational metadata only. No prompts, tokens, raw RPC errors.
+        # `exc` is the exception behind a failure event: its classified reason goes
+        # into the record and the log; its type goes into the log only.
+        # conversationId/codexHome/accounts let `xswap list`, `doctor`, and `upgrade`
+        # name the command that reopens this session on newer code: on 2026-09-10 three
+        # 0.7.2 bridges ran next to an installed 0.7.6 and no reader could say how.
+        if exc is not None:
+            extra['reason'] = failure_reason(exc)
+        if event in FAILURE_EVENTS and extra.get('reason'):
+            self.last_failure = {'event': event, 'account': self.current, 'reason': extra['reason'],
+                                 'at': time.time(), **({'candidate': extra['candidate']} if 'candidate' in extra else {})}
         if self.status_path:
             from codex_swap import __version__, atomic_json
             atomic_json(self.status_path, {'bridgePid': os.getpid(),
@@ -221,8 +389,24 @@ class Bridge:
                 'quotaKnown': self.quota_known,
                 'manualSwitchVersion': 1, 'bridgeInstance': self.instance,
                 'manualRequest': self.manual_request, 'manualState': self.manual_state,
+                'manualReason': self.manual_reason, 'lastFailure': self.last_failure,
+                'conversationId': getattr(self, 'resume_thread', None),
+                'codexHome': (self.env or {}).get('CODEX_HOME'),
+                'accounts': list(self.pool.names),
+                'verifiedAccount': self.verified_account, 'verifiedIdentity': self.verified_identity,
+                'verifiedAt': self.verified_at, 'verifyReason': self.verify_reason,
                 'updatedAt': time.time(), **extra})
+            self.log(event, extra, type(exc).__name__ if exc is not None else None)
         self.status_log(event)
+
+    def log(self, event, fields, exc_type=None):
+        """One bridge.log line per event: local time, event, account, the event's extras, exception type."""
+        parts = [datetime.now().astimezone().isoformat(timespec='milliseconds'), event,
+                 'account=' + json.dumps(self.current)]
+        parts.extend(f'{key}={json.dumps(value, default=str)}' for key, value in fields.items())
+        if exc_type:
+            parts.append('exc=' + json.dumps(exc_type))
+        append_log_line(self.status_path.parent / BRIDGE_LOG_NAME, ' '.join(parts))
 
     def status_log(self, event):
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
@@ -249,14 +433,75 @@ class Bridge:
         if self.active:
             raise LiveError('cannot change authentication while turns are active')
         await self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **credentials})
+        try:
+            label, reason = await self.verify_identity(credentials)
+        except IdentityMismatch:
+            # The server holds some other login now; put the account this bridge
+            # already trusted back, then record the outcome for the failed switch.
+            await self.restore_current()
+            self.status('identity-mismatch', candidate=name)
+            raise
         changed = self.current_id is not None and self.current_id != credentials['chatgptAccountId']
         self.current, self.current_id = name, credentials['chatgptAccountId']
+        self.record_verification(name if label else None, label, reason)
         self.switches += int(changed)
         # Unknown quota: leave checked_at at 0 so before_turn re-reads it first.
         self.checked_at = time.monotonic() if raw is not None else 0
         self.last_quota = raw
         self.quota_known = raw is not None
         self.status('switched' if changed else 'ready', quotaKnown=self.quota_known)
+
+    def record_verification(self, account, label, reason):
+        self.verified_account = account
+        self.verified_identity = label
+        self.verified_at = time.time() if account else None
+        self.verify_reason = reason
+
+    async def verify_identity(self, credentials):
+        """Read back which login the app server holds after account/login/start.
+
+        account/read is local (no refresh, no network) and answers with the email
+        of the token the server actually installed. Returns (label, None) when it
+        names the token just sent, (None, reason) when the answer cannot settle it,
+        and raises IdentityMismatch when the server holds no login or another one.
+        2026-09-10: a session's record named the account the bridge had asked for,
+        and codex-cli 0.154.0 leaves the previous login installed when an
+        external-token login is rejected. Plan types (account/updated, rate limits)
+        are shared by every account on a plan and are never treated as identity.
+        """
+        expected = token_emails(credentials['accessToken'])
+        try:
+            result = await self.rpc('account/read', {}, timeout=10)
+        except TimeoutError:
+            return None, 'app-server request timed out'
+        except LiveError:
+            return None, 'account/read rejected'
+        if not isinstance(result, dict) or 'account' not in result:
+            return None, 'unrecognized account/read response'
+        account = result['account']
+        if not isinstance(account, dict) or account.get('type') != 'chatgpt':
+            raise IdentityMismatch()  # no login at all, an API key, or another provider
+        if not expected:
+            return None, 'no email claim'
+        email = account.get('email')
+        if not isinstance(email, str) or email.casefold() not in expected:
+            raise IdentityMismatch()
+        return clean(email), None
+
+    async def restore_current(self):
+        """Best effort after a mismatch: re-send the trusted account's tokens and re-check."""
+        if self.current_id is None:
+            self.record_verification(None, None, 'identity mismatch')  # nothing was installed before
+            return
+        try:
+            credentials = await asyncio.to_thread(self.pool.credentials, self.current)
+            await self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **credentials})
+            label, reason = await self.verify_identity(credentials)
+        except Exception:
+            self.record_verification(None, None, 'identity unknown after rollback')
+            self.status('identity-unknown')
+            return
+        self.record_verification(self.current if label else None, label, reason or 'identity mismatch')
 
     async def apply_manual_switch(self):
         """Called with gate held; only idle servers may change authentication."""
@@ -275,13 +520,16 @@ class Bridge:
             return False
         new_request = request['id'] != self.manual_request
         self.manual_request = request['id']
+        # The requested name is validated by prepare(); until then treat it as text.
+        candidate = clean(request['account'])
         if self.active:
             if new_request or self.manual_state != 'pending':
                 self.manual_state = 'pending'
-                self.status('manual-switch-pending')
+                self.manual_reason = f'waiting for {len(self.active)} active turn(s) to finish'
+                self.status('manual-switch-pending', candidate=candidate, reason=self.manual_reason)
             return False
-        self.manual_state = 'applying'
-        self.status('manual-switch-applying')
+        self.manual_state, self.manual_reason = 'applying', None
+        self.status('manual-switch-applying', candidate=candidate)
         try:
             credentials, raw = await asyncio.to_thread(self.pool.prepare, request['account'])
             await self.install(request['account'], credentials, raw)
@@ -290,9 +538,9 @@ class Bridge:
             # Update the TUI's quota cache for the newly authenticated account.
             self.emit({'method': 'account/rateLimits/updated', 'params': raw})
             return True
-        except Exception:
-            self.manual_state = 'failed'
-            self.status('manual-switch-failed')
+        except Exception as exc:
+            self.manual_state, self.manual_reason = 'failed', failure_reason(exc)
+            self.status('manual-switch-failed', exc=exc, candidate=candidate)
             return False
 
     async def manual_switch_reader(self):
@@ -308,22 +556,30 @@ class Bridge:
         seen_ids = set(excluded_ids or ())
         if excluded:
             seen_ids.add(self.current_id)
+        outcomes = []
         for name in self.pool.names:
             if name in excluded:
                 continue
             try:
                 credentials, raw = await asyncio.to_thread(self.pool.prepare, name)
                 if credentials['chatgptAccountId'] in seen_ids:
+                    outcomes.append((name, 'same identity as an excluded account'))
+                    self.status('candidate-skipped', candidate=name, reason=outcomes[-1][1])
                     continue
                 seen_ids.add(credentials['chatgptAccountId'])
-                if quota_available(raw, model, self.threshold()) is not True:
+                available = quota_available(raw, model, self.threshold())
+                if available is not True:
+                    outcomes.append((name, 'quota unknown' if available is None else 'no quota above the weekly reserve'))
+                    self.status('candidate-skipped', candidate=name, reason=outcomes[-1][1])
                     continue
                 await self.install(name, credentials, raw)
                 self.checked_model = model
                 return True
-            except Exception:
-                self.status('candidate-unavailable', candidate=name)
-        self.status('no-available-account')
+            except Exception as exc:
+                outcomes.append((name, failure_reason(exc)))
+                self.status('candidate-unavailable', exc=exc, candidate=name)
+        self.status('no-available-account', reason='; '.join(f'{name}: {why}' for name, why in outcomes)
+                    or 'every pool account was already tried')
         return False
 
     async def before_turn(self, model=None):
@@ -342,7 +598,13 @@ class Bridge:
                 _, raw = await asyncio.to_thread(self.pool.prepare, self.current)
                 self.last_quota, self.checked_at, self.checked_model = raw, time.monotonic(), model
                 available = quota_available(raw, model, self.threshold())
-            except Exception:
+            except SignInRequired:
+                # The service rejected the current login: move before this turn, not
+                # after it fails with an auth error that no continuation can retry.
+                # Not a 'quota-check-failed': nothing went wrong with the check.
+                available = False
+            except Exception as exc:
+                self.status('quota-check-failed', exc=exc)
                 available = None
         if available is False:
             await self.choose({self.current}, model)
@@ -359,10 +621,10 @@ class Bridge:
             if credentials['chatgptAccountId'] != self.current_id or (previous and previous != self.current_id):
                 raise LiveError('refresh must keep the current account')
             await self.send({'id': message['id'], 'result': credentials})
-        except Exception:
+        except Exception as exc:
             await self.send({'id': message['id'], 'error': {'code': -32000,
                              'message': 'xswap: re-authenticate the active source account'}})
-            self.status('refresh-failed')
+            self.status('refresh-failed', exc=exc)
 
     async def on_server(self, message):
         key = message.get('id')
@@ -430,9 +692,9 @@ class Bridge:
                 try:
                     await self.rpc('turn/start', params)
                     self.status('continued-after-limit')
-                except Exception:
+                except Exception as exc:
                     self.active.discard(thread)
-                    self.status('continuation-failed')
+                    self.status('continuation-failed', exc=exc)
                 # One continuation at a time; other failures wait for its completion.
                 return
 
@@ -448,8 +710,15 @@ class Bridge:
             await self.send({'method': 'initialized', 'params': {}})
             # A usage-service outage at startup must not close the session;
             # quota is re-read before the first turn (2026-09-08 incident).
-            credentials, raw = await asyncio.to_thread(self.pool.prepare, self.current, require_quota=False)
-            await self.install(self.current, credentials, raw)
+            # A login the service rejected is different: start on another pool
+            # member instead of installing tokens the server will refuse.
+            start = await asyncio.to_thread(self.pool.first_available)
+            try:
+                credentials, raw = await asyncio.to_thread(self.pool.prepare, start, require_quota=False)
+                await self.install(start, credentials, raw)
+            except SignInRequired:
+                if not await self.choose({start}):
+                    raise
             self.booting, self.initialized = False, True
             self.emit({'id': message['id'], 'result': result})
             return
@@ -504,11 +773,13 @@ class Bridge:
             env=self.env, start_new_session=True, limit=32 * 1024 * 1024)
         readers = [asyncio.create_task(self.server_reader()), asyncio.create_task(self.client_reader()),
                    asyncio.create_task(self.manual_switch_reader())]
+        failure = None
         try:
             done, _ = await asyncio.wait(readers, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
         except Exception as exc:
+            failure = exc
             self.failure = failure_reason(exc)
             raise
         finally:
@@ -525,7 +796,7 @@ class Bridge:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(self.process.pid, signal.SIGKILL)
                     await self.process.wait()
-            self.status('stopped', **({'reason': self.failure} if self.failure else {}))
+            self.status('stopped', **({'exc': failure} if failure is not None else {}))
 
 
 def proxy_main():
@@ -563,7 +834,7 @@ def proxy_main():
             os.close(lock)
         return 0
     except (TimeoutError, LiveError, SwapError, OSError, ValueError) as exc:
-        reason = failure_reason(exc) if isinstance(exc, (LiveError, asyncio.TimeoutError)) else type(exc).__name__
+        reason = failure_reason(exc)
         print(f'xswap auto: bridge stopped ({reason}); check source account login and CLI compatibility. Original account stores were not replaced.', file=sys.stderr)
         return 1
     except KeyboardInterrupt:
