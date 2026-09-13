@@ -661,7 +661,8 @@ class CliTests(TestCase):
   self.assertEqual([s['reason'] for s in sessions if s['reason']],['app-server exited'])
   # A record with no updatedAt at all is the oldest, not the newest, so it never pushes a
   # dated one out; and running records are kept even past the cap.
-  undated=[{'running':False},*[{'running':False,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT)]]
+  undated=[{'running':False},{'running':False,'updatedAt':'2026-09-13T00:00:00'},
+           *[{'running':False,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT)]]
   self.assertEqual([s.get('updatedAt') for s in reported_sessions(undated)],[float(i) for i in range(SESSION_REPORT_LIMIT)])
   running=[{'running':True,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT+3)]
   self.assertEqual(len(reported_sessions(running)),SESSION_REPORT_LIMIT+3)

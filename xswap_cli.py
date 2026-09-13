@@ -1178,8 +1178,16 @@ def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
     if len(sessions) <= limit:
         return list(sessions)
     room = max(0, limit - sum(1 for session in sessions if session.get('running')))
+
+    def when(index):
+        # Whatever a status.json holds: scan_runs copies `updatedAt` by name without checking
+        # it, so a record written by hand or by a newer bridge can carry a string, and mixing
+        # those with numbers in one sort would raise out of every report that reads this list.
+        value = sessions[index].get('updatedAt')
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
     droppable = [index for index, session in enumerate(sessions) if not session.get('running')]
-    newest = sorted(droppable, key=lambda index: sessions[index].get('updatedAt') or 0)
+    newest = sorted(droppable, key=when)
     keep = set(newest[-room:] if room else [])
     return [session for index, session in enumerate(sessions)
             if session.get('running') or index in keep]
