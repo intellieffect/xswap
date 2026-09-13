@@ -170,17 +170,41 @@ class AutoTickCommandTests(unittest.TestCase):
         broadcast.assert_not_called()
         self.assertEqual(self.snapshot(), before)
 
-    def test_dry_run_reports_would_switch_and_writes_nothing(self):
+    def test_dry_run_changes_no_selection_but_still_fetches_and_caches(self):
+        # What --dry-run actually promises: no selection change and no bridge signal. It is
+        # not a read-only preview -- run_tick fetches quota unconditionally, so the cache is
+        # written and (outside this fixture, which patches Manager.codex) a wrapped `codex`
+        # entry is repaired on the way through, exactly as `xswap list` would. The old name
+        # said "writes nothing" while usage-cache.json was in fact written.
         self.add("second")
         self.enable()
         before = self.snapshot()
-        code, out, _, _, broadcast = self.tick({"main": dual_window_raw(remaining7d=5), "second": dual_window_raw(remaining7d=80)}, argv=["--dry-run"])
+        self.assertFalse(self.manager.usage_cache_path().exists())
+        code, out, _, fetch, broadcast = self.tick({"main": dual_window_raw(remaining7d=5), "second": dual_window_raw(remaining7d=80)}, argv=["--dry-run"])
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "would-switch: main -> second (main weekly 5% left, at or below the 10% reserve; second weekly 80% left)")
         broadcast.assert_not_called()
         self.assertEqual(self.manager.read()["active"], "main")
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(list(self.manager.root.rglob("switch.json")), [])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertTrue(self.manager.usage_cache_path().exists())
+
+    def test_dry_run_reads_quota_through_the_codex_lookup_that_repairs_the_wrapper(self):
+        # Manager.codex() calls reconnect_wrapper, so the repair the README documents happens
+        # on this path too. Pinned here because the test above patches Manager.codex away and
+        # so could never have noticed that a dry run re-points the user's `codex` entry.
+        self.add("second")
+        self.enable()
+        fake = self.fake_read_limits({"main": dual_window_raw(remaining7d=5), "second": dual_window_raw(remaining7d=80)})
+        with patch("codex_swap.Manager", return_value=self.manager), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex") as codex, \
+             patch("xswap_switch.switch_running", return_value=REPORT) as broadcast, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["auto-tick", "--dry-run"]), 0)
+        self.assertEqual(codex.call_count, 2)
+        broadcast.assert_not_called()
 
     def test_blocked_when_auto_switching_is_disabled_without_spawning_codex(self):
         self.add("second")

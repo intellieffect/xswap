@@ -102,7 +102,7 @@ Inside a session the bridge decides at turn start; nothing else moves the defaul
 
 ```sh
 xswap auto-tick --cached 600          # one check; exit 0 switched, 1 error, 2 no action, 3 blocked
-xswap auto-tick --dry-run             # print the decision, change nothing
+xswap auto-tick --dry-run             # print the decision; select nothing, signal no bridge
 xswap alert --install --auto-switch   # run it from the alert job, before the warn step
 ```
 
@@ -275,7 +275,7 @@ Account data is intentionally retained. These commands do not revoke credentials
 
 ## Troubleshooting
 
-If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, every `codex` on PATH against the optional wrapper, credential storage mode, each registered account's login, token expiry, and any rejected login recorded by a quota read, plugin links, the automatic-switching pool, where the real Codex executable lives (`real codex`, `packages link`), running bridged sessions still on an older bridge than the installed xswap, running auto sessions' server-confirmed login, and OpenClaw's plugin SDK. A `codex` entry that currently bypasses the xswap selection is reported as FAIL, so `xswap doctor` exits 1 until the next `xswap` launch, `list`, or `use` reconnects it. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
+If something is broken, run `xswap doctor` first. It is read-only and makes no network calls: it checks the `codex` binary, every `codex` on PATH against the optional wrapper, credential storage mode, each registered account's login, token expiry, and any rejected login recorded by a quota read, plugin links, the automatic-switching pool, where the real Codex executable lives (`real codex`, `packages link`), running bridged sessions still on an older bridge than the installed xswap, running auto sessions' server-confirmed login, and OpenClaw's plugin SDK. A `codex` entry that a Codex update re-pointed is reported as FAIL until the next `xswap` launch, `list`, or `use` reconnects it; an entry xswap cannot wrap (a regular file, or a link owned by another user) stays FAIL until you apply the fix the row names, and `xswap doctor` keeps exiting 1 until then. Use `xswap doctor --json` for machine-readable output; it prints nothing beyond local labels, paths, and short status text, and exits 1 if any check fails.
 
 ```sh
 xswap doctor

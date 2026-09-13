@@ -868,6 +868,28 @@ class PassthroughDocsTests(TestCase):
    for phrase in required:
     self.assertIn(phrase,blocks[0],name)
 
+class DocPromiseTests(TestCase):
+ # Two sentences the docs promised more from than the code delivers. `auto-tick --dry-run`
+ # does not change the selection or signal a bridge, but it does fetch quota through
+ # Manager.codex() and so re-points a wrapped `codex` entry and rewrites auto.json -- the
+ # next paragraph of the same section already says so. And doctor's wrapper FAIL clears
+ # itself only for an entry xswap will re-point: a regular file or a link owned by another
+ # user is deliberately never touched, so that row stays FAIL (and doctor keeps exiting 1)
+ # until the user acts -- an operator who wired doctor into a gate was told to wait instead.
+ overpromises=(('README.md','change nothing'),('README.ko.md','아무것도 바꾸지 않음'))
+ required=(('README.md',('# print the decision; select nothing, signal no bridge',
+                         'stays FAIL until you apply the fix the row names')),
+           ('README.ko.md',('# 판단만 출력하고 선택·전달은 하지 않음',
+                            '항목이 알려주는 조치를 직접 할 때까지 FAIL')))
+ def test_readmes_promise_only_what_the_code_does(self):
+  from pathlib import Path
+  for name,phrase in self.overpromises:
+   self.assertNotIn(phrase,(Path(__file__).parent/name).read_text(),name)
+  for name,phrases in self.required:
+   text=(Path(__file__).parent/name).read_text()
+   for phrase in phrases:
+    self.assertIn(phrase,text,name)
+
 class DisconnectNoticeTests(TestCase):
  """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
  setUp=test_codex_swap.AccountTests.setUp

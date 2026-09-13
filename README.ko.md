@@ -84,7 +84,7 @@ macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정�
 
 ```sh
 xswap auto-tick --cached 600          # 1회 점검. 종료코드 0 전환함 / 1 오류 / 2 조치 없음 / 3 차단됨
-xswap auto-tick --dry-run             # 판단만 출력하고 아무것도 바꾸지 않음
+xswap auto-tick --dry-run             # 판단만 출력하고 선택·전달은 하지 않음
 xswap alert --install --auto-switch   # 알림 잡에서 warn 단계 전에 실행
 ```
 
@@ -227,7 +227,7 @@ OpenClaw 연결은 실행 시점의 인증을 동기화합니다. 이미 OpenCla
 
 ## 오류가 나면
 
-먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, PATH의 모든 `codex`와 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료·사용량 조회에서 거부된 로그인 기록, 플러그인 링크, 자동 전환 풀, 실제 Codex 실행 파일 위치(`real codex`, `packages link`), 설치된 xswap보다 낮은 브리지로 실행 중인 세션, 실행 중인 자동 세션의 서버 확인 로그인, OpenClaw plugin SDK를 점검합니다. 지금 xswap 선택을 우회하는 `codex` 항목은 FAIL로 보고하므로, 다음 `xswap` 실행·`list`·`use`가 다시 연결할 때까지 `xswap doctor`는 종료 코드 1을 반환합니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
+먼저 `xswap doctor`를 실행하십시오. 네트워크 호출 없이 읽기 전용으로 codex 실행 파일, PATH의 모든 `codex`와 래퍼 연결 상태, 인증 저장 방식, 등록 계정별 로그인·토큰 만료·사용량 조회에서 거부된 로그인 기록, 플러그인 링크, 자동 전환 풀, 실제 Codex 실행 파일 위치(`real codex`, `packages link`), 설치된 xswap보다 낮은 브리지로 실행 중인 세션, 실행 중인 자동 세션의 서버 확인 로그인, OpenClaw plugin SDK를 점검합니다. Codex 업데이트가 되돌려 놓은 `codex` 항목은 FAIL로 보고하며, 다음 `xswap` 실행·`list`·`use`가 다시 연결할 때까지 `xswap doctor`는 종료 코드 1을 반환합니다. xswap이 래핑할 수 없는 항목(일반 파일이나 다른 사용자 소유 링크)은 항목이 알려주는 조치를 직접 할 때까지 FAIL과 종료 코드 1이 유지됩니다. `xswap doctor --json`은 자동화용 출력이며, 하나라도 실패(FAIL)하면 종료 코드 1을 반환합니다.
 
 | 상황 | 다음 행동 |
 |---|---|
