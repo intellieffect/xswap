@@ -460,6 +460,32 @@ class RelocateTests(TestCase):
         self.assertFalse(read_settings(self.manager)['enabled'])
         self.assertIn(f'{cli} -> {expected}', out.getvalue())
 
+    def test_a_recorded_relative_entry_is_not_repointed_against_the_working_directory(self):
+        # 0.7.8 stored `shutil.which('codex')` verbatim, so a shell whose PATH held a relative
+        # element recorded `bin/codex`. relocate re-points a record whose link still holds the
+        # old originalTarget: resolved against the working directory that rewrote a `codex`
+        # inside whatever repository relocate ran in. The record's own paths are still rewritten
+        # (they are what a later disable would restore); the link is left to a human, which is
+        # what doctor's relative-record FAIL asks for.
+        runtime, standalone, binary, inside, cli, proxy = self.misplaced_install(enabled=False)
+        settings = read_settings(self.manager)
+        settings['wrapper']['path'] = 'bin/codex'
+        atomic_json(self.manager.root / 'auto.json', settings)
+        foreign = self.base / 'foreign-repo'
+        (foreign / 'bin').mkdir(parents=True)
+        shim = foreign / 'bin' / 'codex'
+        shim.symlink_to(inside)  # the same target the record calls originalTarget
+        cwd = os.getcwd()
+        os.chdir(foreign)
+        self.addCleanup(os.chdir, cwd)
+        with patch('codex_swap.Manager', return_value=self.manager), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(main(['relocate-codex']), 0)
+        self.assertEqual(os.readlink(shim), inside)  # the unrelated repository is untouched
+        self.assertNotIn('bin/codex ->', out.getvalue())
+        expected = str(self.source / 'packages' / 'standalone' / 'current' / 'bin' / 'codex')
+        record = read_settings(self.manager)['wrapper']
+        self.assertEqual((record['realCodex'], record['originalTarget']), (expected, expected))
+
     def test_profile_home_release_is_relocated_too(self):
         self.manager.register('main')
         second = self.manager.prepare('second')

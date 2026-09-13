@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
+from xswap_cli import RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap_relocate import codex_homes_inside_root, inside_root
 
@@ -109,6 +109,13 @@ def check_wrapper(settings, accounts=(), env=None):
         if status == WARN:
             detail += f"; plain codex ignores the xswap selection. Connect it: {reconnect}"
         return check("wrapper", status, detail)
+    # The recorded path itself is not absolute (0.7.8 stored shutil.which's result verbatim), so
+    # it names a different file in every working directory: every repair skips it, nothing will
+    # close the gap, and the entry xswap really wrapped keeps running xswap-codex with no record
+    # left to restore it. Reported before the rows below, which all name wrapper["path"].
+    if drift["reason"] == RELATIVE_RECORD_REASON:
+        cause, fix = describe_drift(drift, reconnect)
+        return check("wrapper", FAIL, f"the wrapper record xswap stored is unusable ({drift['reason']}): {cause}. Fix: {fix}")
     path = Path(wrapper["path"])
     # A relative PATH element resolves from the working directory, so xswap never re-points
     # the `codex` it finds there (codex_path_entries leaves it out of every repair). Plain
@@ -122,6 +129,14 @@ def check_wrapper(settings, accounts=(), env=None):
                      "through a relative PATH entry, which names a different file in every directory, so xswap "
                      f"never re-points it and the wrapped entry {path} stays bypassed wherever it resolves. "
                      "Fix: make that PATH entry absolute.")
+    if ahead is not None and ahead["kind"] == "wrapper" and not os.path.isabs(ahead["path"]):
+        # The same element, resolving to xswap-codex in this directory: plain `codex` here does
+        # go through xswap, so FAIL ("not xswap-codex", "keeps using ...") would have been false.
+        # It is still the one entry xswap never re-points, and the next directory decides again.
+        return check("wrapper", WARN, f"plain codex runs {_shown(ahead)} here, which is xswap-codex, but it is found "
+                     "through a relative PATH entry: it names a different file in every directory, which xswap never "
+                     f"re-points, so whether plain codex reaches the wrapped entry {path} depends on the directory "
+                     "you run it from. Fix: make that PATH entry absolute.")
     if state == "absent":
         if drift["reason"] == "ok":
             return check("wrapper", WARN, f"{path} -> xswap-codex, but {path.parent} is not on this shell's PATH; "

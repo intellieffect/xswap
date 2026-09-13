@@ -27,7 +27,8 @@ import test_codex_swap
 import xswap_doctor as doctor
 from codex_swap import SwapError, __version__, atomic_json
 from codex_swap import main as codex_swap_main
-from xswap_cli import (RELATIVE_ENTRY_REASON, STALE_RUN_SECONDS, codex_main, codex_path_entries, disable, enable,
+from xswap_cli import (RELATIVE_ENTRY_REASON, RELATIVE_RECORD_REASON, STALE_RUN_SECONDS, codex_main,
+                       codex_path_entries, disable, enable,
                        launch_cli, link_target_path, read_settings, reconnect_wrapper, shadowing_entry, show_status,
                        status_data, wrapper_drift, wrapper_state)
 from xswap_live import LiveError
@@ -529,24 +530,28 @@ class PathEntriesTests(WrapperFixture):
         self.assertEqual(codex_path_entries({}, {'PATH': str(stray.parent)}),
                          [{'path': str(stray), 'target': None, 'kind': 'foreign'}])
 
-    def relative_shim(self):
-        """A connected entry plus a project whose PATH starts with `bin`, holding its own shim.
+    def relative_shim(self, element='bin', target=None):
+        """A connected entry plus a project whose PATH starts with `element`, holding its own shim.
 
-        Returns (settings, shim, cli, updated, path). The working directory is the project
-        and is restored on cleanup: a relative PATH element resolves against the cwd, so a
-        test that left the runner's in place would be asserting about whatever that holds.
+        `element` is the relative PATH element ('' is POSIX's spelling of the working
+        directory) and `target` what the project's shim points at (the release a Codex
+        update installs by default). Returns (settings, shim, cli, updated, path). The
+        working directory is the project and is restored on cleanup: a relative PATH element
+        resolves against the cwd, so a test that left the runner's in place would be
+        asserting about whatever that holds.
         """
         real, updated, proxy, cli = self.wrapped_fixture()
         self.connect(proxy, cli)
         settings = read_settings(self.manager)
         project = self.base / 'project'
-        (project / 'bin').mkdir(parents=True)
-        shim = project / 'bin' / 'codex'
-        shim.symlink_to(updated)
+        directory = project / element if element else project
+        directory.mkdir(parents=True)
+        shim = directory / 'codex'
+        shim.symlink_to(target or updated)
         cwd = os.getcwd()
         os.chdir(project)
         self.addCleanup(os.chdir, cwd)
-        return settings, shim, cli, updated, os.pathsep.join(['bin', str(cli.parent)])
+        return settings, shim, cli, updated, os.pathsep.join([element, str(cli.parent)])
 
     def test_a_relative_path_directory_is_not_an_entry_and_is_never_rewritten(self):
         # PATH="bin:/opt/homebrew/bin" with a project-local bin/codex shim (npm's
@@ -640,6 +645,138 @@ class PathEntriesTests(WrapperFixture):
         self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(cli))
         self.assertNotIn('wrappers', read_settings(self.manager))
 
+    def test_xswap_itself_never_runs_a_codex_found_through_a_relative_path_entry(self):
+        # Manager.codex() resolves the binary every launch execs: `xswap login`, `xswap run`, the
+        # bridged session, read_limits, and enable's own pool. shutil.which joins the raw PATH
+        # element, so here it returns 'bin/codex' and that was returned verbatim -- so
+        # `cd repo && xswap login work` execed the repository's own shim with CODEX_HOME set to
+        # the pool account's home, handing a project-controlled file that account's auth.json,
+        # while the recorded realCodex (and this commit's own doctor row, which says xswap never
+        # re-points that entry) was ignored. Same guard as enable: fall back to the record.
+        settings, shim, cli, updated, path = self.relative_shim()
+        recorded = read_settings(self.manager)['wrapper']['realCodex']
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.manager.codex(), recorded)
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(shim), str(updated))  # the repository is untouched
+        # Nothing recorded to fall back to: refuse rather than exec whatever this directory holds.
+        stored = read_settings(self.manager)
+        stored.pop('wrapper')
+        atomic_json(self.manager.root / 'auto.json', stored)
+        with patch.dict(os.environ, {'PATH': path}), self.assertRaises(SwapError) as refused:
+            self.manager.codex()
+        self.assertIn('relative PATH entry (bin/codex)', str(refused.exception))
+        self.assertIn('make that PATH entry absolute', str(refused.exception))
+        self.assertEqual(os.readlink(shim), str(updated))
+
+    def test_the_empty_path_element_is_the_working_directory_and_is_reported(self):
+        # `export PATH="$UNSET_VAR:$PATH"` leaves an empty element, which POSIX reads as the
+        # working directory: bash and zsh both run ./codex for it and shutil.which returns
+        # 'codex'. It was dropped before the relative branch, so doctor said OK, auto-status
+        # said wrapped, and use/switch printed nothing -- the bypass this commit exists to
+        # surface, in its most common spelling.
+        from codex_swap import plain_codex_notice
+        settings, shim, cli, updated, path = self.relative_shim(element='')
+        self.assertEqual(path, os.pathsep.join(['', str(cli.parent)]))
+        self.assertEqual([(e['path'], e['kind']) for e in codex_path_entries(settings, {'PATH': path}, relative=True)],
+                         [('./codex', 'relative'), (str(cli), 'wrapper')])
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs ./codex -> {updated} here, not xswap-codex', row['detail'])
+        self.assertIn('Fix: make that PATH entry absolute.', row['detail'])
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            state = status_data(self.manager, cleanup=False)
+            notice = plain_codex_notice(self.manager, str(self.base / 'elsewhere'))
+            self.assertEqual(self.manager.codex(), read_settings(self.manager)['wrapper']['realCodex'])
+        self.assertEqual(err.getvalue(), '')  # the reports report; they repair nothing
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, RELATIVE_ENTRY_REASON))
+        self.assertIn('xswap cannot wrap ./codex (relative-path-entry)', notice)
+        # Still no repair view: the empty element is as unrewritable as any other relative one.
+        self.assertEqual([e['path'] for e in codex_path_entries(settings, {'PATH': path})], [str(cli)])
+        self.assertEqual(wrapper_state(settings, {'PATH': path})[0], 'connected')
+        self.assertIsNone(shadowing_entry(settings, {'PATH': path}))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(shim), str(updated))  # the working directory is untouched
+        self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(cli))
+
+    def test_a_relative_entry_that_reaches_xswap_codex_is_not_reported_as_a_bypass(self):
+        # The project's bin/codex points at the wrapped entry, so plain `codex` here really does
+        # run xswap-codex and the selection is in effect. Classifying the element ahead of the
+        # wrapper test made all three surfaces say otherwise: doctor FAILed with "not
+        # xswap-codex" (printing the same path as the link's target and as the bypassed entry),
+        # auto-status reported codexWrapped false, and the notice claimed plain codex keeps
+        # using the source home. A gate wired to doctor's exit code fired on a connected machine.
+        from codex_swap import plain_codex_notice
+        settings, shim, cli, updated, path = self.relative_shim()
+        self.repoint(shim, cli)  # cli exists only after the fixture built it
+        self.assertEqual([(e['path'], e['kind']) for e in codex_path_entries(settings, {'PATH': path}, relative=True)],
+                         [('bin/codex', 'wrapper'), (str(cli), 'wrapper')])
+        self.assertEqual(wrapper_state(settings, {'PATH': path}, relative=True)[0], 'connected')
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'WARN')  # not a bypass here; still the entry xswap cannot wrap
+        self.assertIn(f'plain codex runs bin/codex -> {cli} here, which is xswap-codex', row['detail'])
+        self.assertIn(f'whether plain codex reaches the wrapped entry {cli} depends on the directory', row['detail'])
+        self.assertIn('Fix: make that PATH entry absolute.', row['detail'])
+        self.assertNotIn('not xswap-codex', row['detail'])
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            state = status_data(self.manager, cleanup=False)
+            self.assertIsNone(plain_codex_notice(self.manager, str(self.base / 'elsewhere')))
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (True, 'ok'))
+        self.assertEqual(err.getvalue(), '')
+        # Reported as connected, still never re-pointed: the path stays relative, which is what
+        # keeps it out of the repair view and out of the recorded entry's place in the order.
+        self.assertEqual([e['path'] for e in codex_path_entries(settings, {'PATH': path})], [str(cli)])
+        self.assertIsNone(shadowing_entry(settings, {'PATH': path}))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(shim), str(cli))
+        self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(cli))
+
+    def test_a_recorded_relative_entry_is_never_resolved_against_the_working_directory(self):
+        # 0.7.8 stored `path: str(shutil.which('codex'))` with no absolutising, so a shell whose
+        # PATH held a relative element recorded `bin/codex`, and 0.8.0 has no migration. Every
+        # launch, list, usage, and use runs reconnect_wrapper: from an unrelated repository that
+        # ships its own bin/codex it classified the record `replaced`, rewrote *that* repository's
+        # shim to xswap-codex, overwrote originalTarget/realCodex with its target, and doctor
+        # still read `wrapper OK` from the absolute PATH walk. `auto-disable` then restored the
+        # foreign shim and left the entry xswap really wrapped on xswap-codex with no record.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        stored = read_settings(self.manager)
+        stored['wrapper']['path'] = 'bin/codex'
+        atomic_json(self.manager.root / 'auto.json', stored)
+        foreign = self.base / 'foreign-repo'
+        (foreign / 'bin').mkdir(parents=True)
+        shim = foreign / 'bin' / 'codex'
+        shim.symlink_to(updated)
+        cwd = os.getcwd()
+        os.chdir(foreign)
+        self.addCleanup(os.chdir, cwd)
+        settings = read_settings(self.manager)
+        drift = wrapper_drift(settings)
+        self.assertEqual((drift['action'], drift['reason'], drift['path'], drift['target']),
+                         ('skip', RELATIVE_RECORD_REASON, 'bin/codex', None))
+        self.assertEqual(RELATIVE_RECORD_REASON, 'relative-record')
+        with patch.dict(os.environ, {'PATH': str(cli.parent)}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(shim), str(updated))  # the unrelated repository is untouched
+        self.assertEqual(read_settings(self.manager)['wrapper']['realCodex'], str(real))
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': str(cli.parent)})
+        self.assertEqual(row['status'], 'FAIL')  # the PATH walk alone reported `wrapper OK`
+        self.assertIn('the wrapper record xswap stored is unusable (relative-record)', row['detail'])
+        self.assertIn('the recorded codex entry bin/codex is not an absolute path', row['detail'])
+        self.assertIn('point the codex entry that still runs xswap-codex back at the real Codex by hand',
+                      row['detail'])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            disable(self.manager)
+        self.assertIn('codex entry bin/codex is not an absolute path; left it untouched', err.getvalue())
+        self.assertEqual(os.readlink(shim), str(updated))  # not "restored" over the repository's shim
+        self.assertEqual(os.readlink(cli), str(proxy))
+
     def test_enable_refuses_a_codex_found_through_a_relative_path_entry(self):
         # `auto-enable --wrap-codex` runs its own shutil.which, which joins the raw PATH
         # element and does not absolutise it: from a project whose PATH starts with `bin`
@@ -657,7 +794,11 @@ class PathEntriesTests(WrapperFixture):
         self.addCleanup(os.chdir, cwd)
         with patch.dict(os.environ, {'PATH': os.pathsep.join(['bin', str(self.base)])}):
             self.assertEqual(shutil.which('codex'), 'bin/codex')  # what enable looks up
-            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(LiveError) as refused:
+            # With no record to fall back to, enable's pool (Manager.codex(), which is what the
+            # pool would exec) refuses the same relative result one step earlier; enable's own
+            # check still raises LiveError whenever a recorded Codex resolves the pool first
+            # (test_no_repair_path_sees_the_relative_entry_the_reports_now_show).
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SwapError) as refused:
                 enable(self.manager, 'main,second', wrap=True)
         self.assertIn('relative PATH entry (bin/codex)', str(refused.exception))
         self.assertEqual(os.readlink(shim), str(updated))  # the repository is untouched

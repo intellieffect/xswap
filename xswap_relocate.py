@@ -392,7 +392,11 @@ def relocate(manager, dry=False):
                 path = Path(record.get('path') or '')
                 # auto-disable restores originalTarget literally, so a disconnected entry
                 # still points into the moved-out directory until it is re-pointed here.
-                if new_original and record.get('path') and path.is_symlink() and os.readlink(path) == old_original:
+                # A relative recorded path (0.7.8's `shutil.which` result) would resolve against
+                # the working directory and re-point a `codex` inside an unrelated repository;
+                # the record's own fields are still rewritten, the link is left to a human.
+                if (new_original and record.get('path') and os.path.isabs(record['path'])
+                        and path.is_symlink() and os.readlink(path) == old_original):
                     repoints.append((path, new_original))
             settings['wrapper'] = wrapper
             atomic_json(manager.root / 'auto.json', settings)

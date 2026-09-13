@@ -530,8 +530,15 @@ def swap_symlink(path, target):
         temporary.unlink(missing_ok=True)
 
 
+# The one reason wrapper_drift contributes instead of entry_drift: the recorded entry's own path is
+# not absolute. 0.7.8 stored `str(shutil.which('codex'))` verbatim, so a shell whose PATH held a
+# relative element recorded `bin/codex`, and 0.8.0 has no migration for it. Resolving that against
+# the working directory re-points -- and `auto-disable` later "restores" -- a `codex` inside
+# whatever repository xswap happens to run in, while the entry it really wrapped keeps running
+# xswap-codex with no record left. So it is a skip everywhere and only a human can repair it.
+RELATIVE_RECORD_REASON = 'relative-record'
 DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'not-user-owned',
-    'dangling-target', 'not-executable', 'auto-disabled', 'unreadable')
+    'dangling-target', 'not-executable', 'auto-disabled', 'unreadable', RELATIVE_RECORD_REASON)
 # The one reason the PATH walk contributes instead of entry_drift: the `codex` a relative PATH
 # element resolved to. Deliberately outside DRIFT_REASONS -- entry_drift never returns it (the
 # condition belongs to the PATH element, not to the entry's link state) and its fix is the
@@ -550,6 +557,8 @@ DRIFT_CAUSES = {
     'unreadable': '{path} could not be inspected ({error}), so xswap leaves it alone',
     RELATIVE_ENTRY_REASON: '{path} is found through a relative PATH entry, which the shell resolves against the '
         'working directory, so it names a different file in every directory and xswap never re-points it',
+    RELATIVE_RECORD_REASON: 'the recorded codex entry {path} is not an absolute path, so it names a different file '
+        'in every working directory: xswap cannot tell which entry it wrapped and leaves every codex alone',
 }
 DRIFT_FIXES = {
     'replaced': 'reconnect it by hand: {reconnect}',
@@ -562,6 +571,8 @@ DRIFT_FIXES = {
     'unreadable': 'check its permissions, then run: {reconnect}',
     RELATIVE_ENTRY_REASON: 'make that PATH entry absolute; until then what plain codex runs depends on the '
         'directory you run it from',
+    RELATIVE_RECORD_REASON: 'point the codex entry that still runs xswap-codex back at the real Codex by hand, then '
+        'from a shell whose PATH holds no relative entry run: {reconnect}',
 }
 
 
@@ -625,12 +636,17 @@ def entry_drift(path, proxy, enabled=True):
 
 
 def wrapper_drift(settings):
-    """Classify the recorded codex entry; same keys as entry_drift, plus 'not-wrapped'."""
+    """Classify the recorded codex entry; same keys as entry_drift, plus 'not-wrapped' and 'relative-record'."""
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
     if not proxy or not wrapper.get('path'):
         return {'action': 'skip', 'reason': 'not-wrapped', 'path': wrapper.get('path') or None,
                 'target': None, 'real': None, 'proxy': proxy or None, 'error': None}
+    # entry_drift stats and re-points the path it is given, and a relative one names a different
+    # file in every working directory: never its subject (RELATIVE_RECORD_REASON).
+    if not os.path.isabs(wrapper['path']):
+        return {'action': 'skip', 'reason': RELATIVE_RECORD_REASON, 'path': wrapper['path'],
+                'target': None, 'real': None, 'proxy': proxy, 'error': None}
     return entry_drift(wrapper['path'], proxy, bool(settings.get('enabled')))
 
 
@@ -660,10 +676,14 @@ def codex_path_entries(settings, env=None, relative=False):
     instead of os.environ, which keeps doctor pure and lets a test pin a PATH
     without patching the process environment.
 
-    `relative` also reports the `codex` a relative PATH element resolves to in the
-    current working directory, as kind 'relative'. Nothing may re-point such an
-    entry, so every repair path leaves it out (the default); doctor asks for it
-    because plain `codex` in that directory still runs it.
+    `relative` also reports the `codex` a relative PATH element -- an empty element
+    included, which is POSIX's working directory -- resolves to in the current
+    working directory. Such an entry is kind 'relative' only when it is not the
+    wrapper: one that reaches xswap-codex here is what plain `codex` runs here, so
+    it is kind 'wrapper' like any other, and its relative `path` is what keeps it
+    out of every repair. Nothing may re-point a relative entry, so every repair
+    path leaves it out (the default); doctor asks for it because plain `codex` in
+    that directory still runs it.
     """
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
@@ -673,15 +693,17 @@ def codex_path_entries(settings, env=None, relative=False):
         proxy_real = None
     entries, seen = [], set()
     for directory in os.get_exec_path(env):
-        if not directory:
-            continue
         # A relative PATH element (a project's `bin`, a direnv habit) names a different
         # file in every working directory, so it can never be the recorded entry and must
         # never be re-pointed: xswap would rewrite a `codex` shim inside the user's own
         # repository and store a `path` no other directory can find again. Leaving it out
         # of the report as well is what made the bypass read as OK, so it is still listed
         # on request -- classified so no repair can mistake it for something to act on.
-        is_relative = not os.path.isabs(directory)
+        # An empty element is POSIX's spelling of the working directory (bash and zsh both
+        # run ./codex for it, and `export PATH="$UNSET_VAR:$PATH"` writes one), so it is a
+        # relative element too; dropping it first left the one element that can bypass
+        # xswap out of every report while shutil.which still found it.
+        is_relative = not directory or not os.path.isabs(directory)
         if is_relative and not relative:
             continue
         candidate = Path(directory) / 'codex'
@@ -698,9 +720,17 @@ def codex_path_entries(settings, env=None, relative=False):
             real = os.path.realpath(candidate)
         except OSError:
             continue
-        kind = 'relative' if is_relative else \
-            'wrapper' if proxy and (target == proxy or real == proxy_real) else 'foreign'
-        entries.append({'path': str(candidate), 'target': target, 'kind': kind})
+        # The proxy test comes first: a relative element whose `codex` reaches xswap-codex here
+        # is what plain `codex` runs here, so calling it 'relative' made every reader of this
+        # list say plain `codex` bypasses the selection when it does not. It is still not an
+        # entry any repair may touch -- the path stays relative, which is what keeps it out of
+        # the default list and out of every branch that re-points an entry.
+        kind = ('wrapper' if proxy and (target == proxy or real == proxy_real)
+                else 'relative' if is_relative else 'foreign')
+        # Path spells both '' and '.' as a bare 'codex'; name the working directory the way the
+        # shell prints it, so the reported entry is a file a reader can check.
+        shown = str(candidate)
+        entries.append({'path': './codex' if shown == 'codex' else shown, 'target': target, 'kind': kind})
     return entries
 
 
@@ -719,8 +749,11 @@ def wrapper_state(settings, env=None, relative=False):
     `relative` is handed to codex_path_entries, and only a caller that merely
     reports what plain `codex` runs passes it: `state` is then also 'relative',
     meaning the entry a relative PATH element resolves to in this working directory
-    runs instead of the wrapped one. Nothing may re-point such an entry, so every
-    repair path keeps the default and cannot see it -- shadowing_entry included.
+    runs instead of the wrapped one. A relative entry that resolves to xswap-codex
+    here is kind 'wrapper', so the state is 'connected' and no surface claims a
+    bypass that is not happening; doctor still warns, because the next directory
+    decides again. Nothing may re-point a relative entry, so every repair path
+    keeps the default and cannot see it -- shadowing_entry included.
     The 'unconfigured' gate still comes first: with automatic switching off nothing
     claims plain `codex` goes through xswap, so the reason to report is the recorded
     entry's own ('auto-disabled'), not the PATH element.
@@ -924,6 +957,14 @@ def disable(manager):
     with manager.locked():
         settings = read_settings(manager)
         for record in wrapper_records(settings):
+            if not os.path.isabs(record['path']):
+                # A record written by 0.7.8 can hold the relative `shutil.which` result
+                # (RELATIVE_RECORD_REASON). Resolving it here would restore whatever `codex`
+                # this working directory holds -- a shim inside an unrelated repository -- and
+                # still leave the entry xswap wrapped running xswap-codex, so name it instead.
+                print(f'codex entry {record["path"]} is not an absolute path; left it untouched. Point the codex '
+                      'entry that still runs xswap-codex back at the real Codex by hand.', file=sys.stderr)
+                continue
             path = Path(record['path'])
             if path.is_symlink() and os.readlink(path) == record['proxy']:
                 swap_symlink(path, record['originalTarget'])

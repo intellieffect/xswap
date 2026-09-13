@@ -624,6 +624,19 @@ class Manager:
                 raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
                                 f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
             return real
+        # shutil.which joins the raw PATH element, so a relative one (a project's `bin`, the empty
+        # element POSIX reads as the working directory) returns a relative path: the `codex` of
+        # whatever directory xswap happens to run in. Every caller execs this with a pool account's
+        # CODEX_HOME, which would hand a project-controlled file that account's auth.json, and the
+        # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
+        # refuses and doctor reports as bypassed, so run the recorded release instead of it.
+        if not os.path.isabs(executable):
+            real = (wrapper or {}).get("realCodex")
+            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+                return real
+            raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
+                            "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
+                            "then retry.")
         return executable
 
     def usage_cache_path(self):
