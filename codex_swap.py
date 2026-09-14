@@ -664,11 +664,23 @@ class Manager:
         # pool account's home into every nested `codex` and turned the wrapper off inside the one
         # session xswap had just set up -- with this home already on CODEX_HOME, that is a session
         # whose selection nothing can change. One command's own bypass stays that command's.
+        # The endpoint and trust variables below are the ones the Codex CLI itself reads: left in
+        # place, a value exported in the calling shell decided where the account xswap had just
+        # selected sent its refresh token (CODEX_REFRESH_TOKEN_URL_OVERRIDE,
+        # CODEX_REVOKE_TOKEN_URL_OVERRIDE), which backend answered for its usage and plan
+        # (CODEX_APP_SERVER_CHATGPT_BASE_URL, OPENAI_BASE_URL), which CA chain that traffic was
+        # checked against (CODEX_CA_CERTIFICATE), and where its conversation database lived
+        # (CODEX_SQLITE_HOME, the one home-shaped variable CODEX_HOME does not cover). The
+        # federation set is the OPENAI_ spelling of the workload identity already stripped here:
+        # an exchanged token authenticates a session as something other than the login in this
+        # home, which is the selection silently not applying.
         for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH",
-                    "XSWAP_BYPASS"):
+                    "XSWAP_BYPASS", "CODEX_APP_SERVER_CHATGPT_BASE_URL", "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+                    "CODEX_REVOKE_TOKEN_URL_OVERRIDE", "CODEX_CA_CERTIFICATE", "CODEX_SQLITE_HOME",
+                    "OPENAI_BASE_URL", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_FEDERATION_RULE_ID"):
             env.pop(key, None)
         for key in list(env):
-            if key.startswith("CODEX_WORKLOAD_IDENTITY_"):
+            if key.startswith(("CODEX_WORKLOAD_IDENTITY_", "OPENAI_WORKLOAD_IDENTITY_")):
                 env.pop(key)
         env["CODEX_HOME"] = str(home)
         return env

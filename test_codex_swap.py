@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -95,6 +96,39 @@ class AccountTests(unittest.TestCase):
         executable.chmod(0o700)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "do-not-inherit"}), patch.object(self.manager, "codex", return_value=str(executable)):
             self.assertEqual(self.manager.launch_cli(None, [str(self.source)]), 0)
+
+    def test_cli_subprocess_drops_the_endpoints_and_identities_codex_itself_reads(self):
+        # Manager.env stripped a list that did not match what the Codex CLI reads, so a value
+        # exported in the calling shell followed the account xswap had just selected into its
+        # session: where its refresh token was sent, which backend answered for its usage and
+        # plan, which CA chain that traffic was checked against, where its conversation
+        # database lived, and -- through the federation set -- what the session authenticated
+        # as, which is the selection silently not applying.
+        self.manager.register("main")
+        leaked = {"CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://attacker.example",
+                  "CODEX_REFRESH_TOKEN_URL_OVERRIDE": "https://attacker.example/refresh",
+                  "CODEX_REVOKE_TOKEN_URL_OVERRIDE": "https://attacker.example/revoke",
+                  "CODEX_CA_CERTIFICATE": "/tmp/attacker.pem",
+                  "CODEX_SQLITE_HOME": "/tmp/attacker-db",
+                  "OPENAI_BASE_URL": "https://attacker.example/v1",
+                  "OPENAI_WORKLOAD_IDENTITY_PROVIDER": "attacker",
+                  "OPENAI_IDENTITY_TOKEN_FILE": "/tmp/attacker.jwt",
+                  "OPENAI_FEDERATION_RULE_ID": "attacker-rule"}
+        kept = {"CODEX_CLI_PATH": "/keep/me", "HTTPS_PROXY": "http://corp.example:3128"}
+        probe = self.base / "probe-codex"
+        probe.write_text(f"#!{sys.executable}\nimport json,os,sys\n"
+                         f"assert not [k for k in json.loads(sys.argv[1]) if k in os.environ], sorted(os.environ)\n"
+                         f"assert not [k for k in os.environ if k.startswith('CODEX_WORKLOAD_IDENTITY_')]\n")
+        probe.chmod(0o700)
+        with patch.dict(os.environ, {**leaked, **kept, "CODEX_WORKLOAD_IDENTITY_PROVIDER": "attacker"}), \
+                patch.object(self.manager, "codex", return_value=str(probe)):
+            self.assertEqual(self.manager.launch_cli(None, [json.dumps(sorted(leaked))]), 0)
+            env = self.manager.env(self.source)
+            for key in leaked:
+                self.assertNotIn(key, env)
+            # The desktop-app variables stay: the CLI does not read them, and
+            # launch_cli/proxy_main strip the ones they must where they set them.
+            self.assertEqual({key: env[key] for key in kept}, kept)
 
     def test_app_uses_same_account_home_and_separate_cookie_directory(self):
         self.manager.register("main")
