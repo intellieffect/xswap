@@ -537,6 +537,20 @@ class DoctorTests(unittest.TestCase):
             row = find(doctor.run(self.manager), "codex binary")
         self.assertEqual(row["status"], "FAIL")
 
+    def test_codex_found_through_a_relative_path_entry_fails_without_running_it(self):
+        # From a repository whose PATH starts with `bin`, shutil.which returned `bin/codex`
+        # and this row executed it and reported it as this machine's Codex -- the one entry
+        # `auto-enable --wrap-codex` refuses and the wrapper row reports as a bypass. Doctor
+        # is read-only, so the finding is the entry, not a version string from it.
+        self.register_main()
+        with patch("shutil.which", side_effect=lambda n: "bin/codex" if n == "codex" else None), \
+                patch("xswap_doctor.subprocess.run") as run:
+            row = doctor.check_codex_binary()
+        run.assert_not_called()
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("codex was found through a relative PATH entry (bin/codex)", row["detail"])
+        self.assertIn("make that PATH entry absolute", row["detail"])
+
     def test_codex_missing_exits_1_via_main(self):
         self.register_main()
         with patch.dict(os.environ, {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}), \

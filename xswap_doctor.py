@@ -19,6 +19,7 @@ from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
 from xswap_cli import DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, recorded_real_codex, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+from xswap_path import RelativeEntryError, absolute_which
 from xswap_relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
@@ -65,7 +66,14 @@ def _human_delta(seconds):
 
 
 def check_codex_binary():
-    executable = shutil.which("codex")
+    try:
+        executable = absolute_which("codex")
+    except RelativeEntryError as exc:
+        # Running it would execute -- and then report as this machine's Codex -- whatever
+        # `codex` the directory doctor was started in holds, which is the one entry xswap
+        # refuses to wrap and never re-points. Doctor is read-only, so classify instead:
+        # naming the entry is the whole finding, and OK here read as "Codex is fine".
+        return check("codex binary", FAIL, str(exc))
     if not executable:
         return check("codex binary", FAIL, "codex not found on PATH")
     try:
