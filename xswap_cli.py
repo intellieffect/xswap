@@ -756,8 +756,9 @@ def codex_path_entries(settings, env=None, relative=False):
 
     Mirrors shutil.which's per-directory test (an existing file with the execute
     bit; a dangling link or a directory is skipped) over the absolute PATH
-    directories, so entries[0] is what plain `codex` runs from any working
-    directory. A directory listed twice on PATH yields one entry. `kind` is
+    directories -- a `~` element expanded first, because `sh` and `bash` run the
+    `codex` it names and shutil.which does not -- so entries[0] is what plain
+    `codex` runs from any working directory. A directory listed twice on PATH yields one entry. `kind` is
     'wrapper' when the entry's link target is the recorded proxy or the entry
     resolves to the same file as the proxy, 'foreign' otherwise; `target` is the
     raw link target of a symlink and None for a regular file. `env` supplies PATH
@@ -776,7 +777,14 @@ def codex_path_entries(settings, env=None, relative=False):
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
     entries, seen = [], set()
-    for directory in os.get_exec_path(env):
+    for element in os.get_exec_path(env):
+        # `sh` and `bash` tilde-expand a PATH element before the lookup, so PATH="~/bin:..."
+        # (a quoted export, a Makefile, a plist) really does run ~/bin/codex for them -- while
+        # this walk read the literal `~/bin`, found no entry there, and reported the wrapped
+        # one as what plain `codex` runs. An element that expands to an absolute path is an
+        # ordinary entry from here on; one that does not stays relative (zsh leaves it alone,
+        # and nothing may re-point it).
+        directory = os.path.expanduser(element) if element.startswith('~') else element
         # A relative PATH element (a project's `bin`, a direnv habit) names a different
         # file in every working directory, so it can never be the recorded entry and must
         # never be re-pointed: xswap would rewrite a `codex` shim inside the user's own

@@ -734,6 +734,47 @@ class RecordedRealCodexTests(WrapperFixture):
         self.assertTrue(shim.is_file())  # read-only: the project's file is neither run nor touched
 
 
+class TildePathElementTests(WrapperFixture):
+    """A `~` PATH element is expanded: `sh` and `bash` run the `codex` it names."""
+
+    def tilde_fixture(self):
+        """An unwrapped `codex` in ~/bin, ahead of the wrapped entry on a literal `~/bin` PATH."""
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        home = self.base / 'home'
+        (home / 'bin').mkdir(parents=True)
+        standalone = home / 'bin' / 'codex'
+        standalone.symlink_to(updated)
+        self.enterContext(patch.dict(os.environ, {'HOME': str(home)}))
+        return standalone, cli, os.pathsep.join(['~/bin', str(cli.parent)])
+
+    def test_a_tilde_element_is_an_entry_and_a_bypass_is_reported(self):
+        # `/bin/sh` and `/bin/bash` both expand a PATH element before the lookup, so
+        # PATH="~/bin:..." (a quoted export, a Makefile, a launchd plist) runs ~/bin/codex --
+        # the unwrapped standalone, against the caller's own ~/.codex -- while this walk read
+        # the literal '~/bin', found nothing there, and every surface was green: doctor OK,
+        # auto-status codexWrapped true, and no notice from use/switch.
+        standalone, cli, path = self.tilde_fixture()
+        settings = read_settings(self.manager)
+        self.assertEqual([(e['path'], e['kind']) for e in codex_path_entries(settings, {'PATH': path})],
+                         [(str(standalone), 'foreign'), (str(cli), 'wrapper')])
+        self.assertEqual(wrapper_state(settings, {'PATH': path})[0], 'shadowed')
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()):
+            state = status_data(self.manager, cleanup=False)
+        self.assertFalse(state['codexWrapped'])
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs {standalone} -> {self.base}', row['detail'])
+        self.assertIn(f'shadows the wrapped entry {cli}', row['detail'])
+
+    def test_an_element_no_home_expands_stays_a_relative_element(self):
+        # expanduser returns '~nosuchuser/bin' unchanged; nothing may re-point that either.
+        standalone, cli, path = self.tilde_fixture()
+        path = os.pathsep.join(['~nosuchuser/bin', str(cli.parent)])
+        settings = read_settings(self.manager)
+        self.assertEqual([e['path'] for e in codex_path_entries(settings, {'PATH': path})], [str(cli)])
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 
