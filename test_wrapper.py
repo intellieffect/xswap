@@ -542,6 +542,71 @@ class RecordedProxyTests(WrapperFixture):
         self.assertIn('xswap auto-enable --accounts main,second --wrap-codex', row['detail'])
 
 
+class SecondXswapCodexTests(WrapperFixture):
+    """A second xswap-codex is never recorded as the real Codex (the exec loop)."""
+
+    def second_proxy(self, name='venv'):
+        """Another install's xswap-codex: a project venv, or pipx beside uv."""
+        directory = self.base / name
+        directory.mkdir()
+        proxy = directory / 'xswap-codex'
+        proxy.write_text('fixture')
+        proxy.chmod(0o700)
+        return proxy
+
+    def test_enable_keeps_the_record_when_the_entry_already_reaches_another_xswap_codex(self):
+        # "Already wrapped?" compared the entry with the xswap-codex `which` found *now*. Re-run
+        # from a shell where a second install comes first, `auto-enable --wrap-codex` reported
+        # success and rewrote the record to {originalTarget: A/xswap-codex, realCodex:
+        # A/xswap-codex, proxy: B/xswap-codex}: the release path was erased from auto.json, doctor
+        # named an xswap-codex as the real Codex, `auto-disable` would "restore" codex to
+        # xswap-codex, and plain `codex` exec'd xswap-codex, which exec'd itself.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        recorded = read_settings(self.manager)['wrapper']
+        other = self.second_proxy()
+        with patch('shutil.which', side_effect=lambda name: str(other if name == 'xswap-codex' else cli)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            enable(self.manager, 'main,second', wrap=True)
+        settings = read_settings(self.manager)
+        self.assertEqual(settings['wrapper'], recorded)  # the release is still what the record names
+        self.assertEqual(settings['wrapper']['realCodex'], str(real))
+        self.assertNotIn('wrappers', settings)
+        self.assertEqual(os.readlink(cli), str(proxy))
+        with patch.dict(os.environ, {'PATH': str(cli.parent)}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.manager.codex(), str(real))  # what every launch execs
+
+    def test_a_second_xswap_codex_ahead_on_path_is_not_adopted_as_a_codex_release(self):
+        # reconnect_wrapper runs on every launch, list, use and alert tick with no command typed.
+        # It classified an entry reaching another install's xswap-codex as foreign, wrapped it,
+        # and wrote {realCodex: B/xswap-codex} -- the same exec loop, unattended. Such an entry
+        # runs the same entry point against the same auto.json, so it is connected, not foreign.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        recorded = read_settings(self.manager)['wrapper']
+        other = self.second_proxy()
+        ahead = self.base / 'bin-b'
+        ahead.mkdir()
+        (ahead / 'codex').symlink_to(other)
+        path = os.pathsep.join([str(ahead), str(cli.parent)])
+        settings = read_settings(self.manager)
+        self.assertEqual([(e['path'], e['kind']) for e in codex_path_entries(settings, {'PATH': path})],
+                         [(str(ahead / 'codex'), 'wrapper'), (str(cli), 'wrapper')])
+        self.assertIsNone(shadowing_entry(settings, {'PATH': path}))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+            state = status_data(self.manager, cleanup=False)
+            self.assertEqual(self.manager.codex(), str(real))
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(read_settings(self.manager)['wrapper'], recorded)
+        self.assertEqual(os.readlink(ahead / 'codex'), str(other))  # the other install is untouched
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (True, 'ok'))
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'OK')
+        real_row = [r for r in doctor.check_real_codex(self.manager, settings, self.manager.read()['accounts']) if r['name'] == 'real codex'][0]
+        self.assertEqual((real_row['status'], real_row['detail']), ('OK', str(real)))
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 

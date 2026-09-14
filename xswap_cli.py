@@ -530,6 +530,39 @@ def swap_symlink(path, target):
         temporary.unlink(missing_ok=True)
 
 
+# The console script every xswap install provides; `wrapper.proxy` names one of them.
+PROXY_NAME = 'xswap-codex'
+
+
+def recorded_proxies(settings):
+    """The resolved path of every xswap-codex auto.json names, primary record first."""
+    values = []
+    for record in [settings.get('wrapper'), *(settings.get('wrappers') or [])]:
+        proxy = record.get('proxy') if isinstance(record, dict) else None
+        if isinstance(proxy, str) and proxy:
+            with contextlib.suppress(OSError):
+                values.append(os.path.realpath(proxy))
+    return values
+
+
+def wrapped_target(path, settings):
+    """True when `path` reaches an xswap-codex rather than a Codex release.
+
+    A machine can hold more than one xswap-codex (a pipx install beside a uv one, a
+    project venv on PATH), and only the recorded proxy was ever compared against. A
+    second one ahead on PATH was therefore treated as a Codex release: `--wrap-codex`
+    recorded it as `realCodex` and the shadow repair promoted it, after which plain
+    `codex` exec'd xswap-codex, which exec'd itself -- `codex --version` never returned
+    -- while doctor named an xswap-codex as the real Codex. Both a recorded proxy and
+    the install name count: the second install is by definition not in the record yet.
+    """
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return False
+    return real in recorded_proxies(settings) or os.path.basename(real) == PROXY_NAME
+
+
 # The one reason wrapper_drift contributes instead of entry_drift: the recorded entry's own path is
 # not absolute. 0.7.8 stored `str(shutil.which('codex'))` verbatim, so a shell whose PATH held a
 # relative element recorded `bin/codex`, and 0.8.0 has no migration for it. Resolving that against
@@ -698,10 +731,6 @@ def codex_path_entries(settings, env=None, relative=False):
     """
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
-    try:
-        proxy_real = os.path.realpath(proxy) if proxy else None
-    except OSError:
-        proxy_real = None
     entries, seen = [], set()
     for directory in os.get_exec_path(env):
         # A relative PATH element (a project's `bin`, a direnv habit) names a different
@@ -728,7 +757,6 @@ def codex_path_entries(settings, env=None, relative=False):
             if not candidate.is_file() or not os.access(candidate, os.X_OK):
                 continue
             target = os.readlink(candidate) if candidate.is_symlink() else None
-            real = os.path.realpath(candidate)
         except OSError:
             continue
         # The proxy test comes first: a relative element whose `codex` reaches xswap-codex here
@@ -736,7 +764,11 @@ def codex_path_entries(settings, env=None, relative=False):
         # list say plain `codex` bypasses the selection when it does not. It is still not an
         # entry any repair may touch -- the path stays relative, which is what keeps it out of
         # the default list and out of every branch that re-points an entry.
-        kind = ('wrapper' if proxy and (target == proxy or real == proxy_real)
+        # Any xswap-codex, not only the recorded one: a second install ahead on PATH runs the
+        # same entry point against the same auto.json, so plain `codex` there does go through
+        # xswap. Calling it 'foreign' made the shadow repair adopt it and record an xswap-codex
+        # as the real Codex, which is the exec loop (wrapped_target).
+        kind = ('wrapper' if proxy and (target == proxy or wrapped_target(candidate, settings))
                 else 'relative' if is_relative else 'foreign')
         # Path spells both '' and '.' as a bare 'codex'; name the working directory the way the
         # shell prints it, so the reported entry is a file a reader can check.
@@ -940,7 +972,12 @@ def enable(manager, accounts, wrap=False):
                 raise LiveError(f'xswap-codex was found through a relative PATH entry ({proxy}), which names a '
                                 'different file in every directory; make that PATH entry absolute, then retry')
             target = Path(executable)
-            if target.resolve() != Path(proxy).resolve():
+            # "Already wrapped?" compared the entry with the one xswap-codex `which` found now.
+            # With a second install ahead on PATH (a project venv, pipx beside uv) the entry
+            # resolved to the *other* xswap-codex, so this branch wrapped it and stored an
+            # xswap-codex as `realCodex`: the release path was erased from auto.json and plain
+            # `codex` exec'd xswap-codex for ever. Any xswap-codex counts as wrapped.
+            if target.resolve() != Path(proxy).resolve() and not wrapped_target(target, settings):
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
                     raise LiveError('codex wrapper installation requires a user-owned codex symlink; use xswap instead')
                 original = os.readlink(target)

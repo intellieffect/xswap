@@ -614,12 +614,18 @@ class Manager:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap_cli import read_settings, reconnect_wrapper
+        from xswap_cli import read_settings, reconnect_wrapper, wrapped_target
         reconnect_wrapper(self)
-        wrapper = read_settings(self).get("wrapper")
-        if wrapper and Path(executable).resolve() == Path(wrapper["proxy"]).resolve():
+        settings = read_settings(self)
+        wrapper = settings.get("wrapper")
+        # Any xswap-codex, not only the recorded proxy: a second install ahead on PATH (a project
+        # venv, pipx beside uv) was returned as the real Codex, so every launch exec'd xswap-codex,
+        # which exec'd itself. Same widening for the recorded realCodex, which is how a record
+        # written before this fix spells that loop.
+        if wrapper and (Path(executable).resolve() == Path(wrapper["proxy"]).resolve()
+                        or wrapped_target(executable, settings)):
             real = wrapper["realCodex"]
-            if not Path(real).is_file() or Path(real).resolve() == Path(executable).resolve():
+            if not Path(real).is_file() or wrapped_target(real, settings):
                 names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
                 raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
                                 f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
