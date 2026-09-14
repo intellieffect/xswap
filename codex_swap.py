@@ -233,7 +233,7 @@ def plain_codex_notice(manager, selected_home):
         # other skip reason prints in.
         drift = ({"action": "skip", "reason": RELATIVE_ENTRY_REASON, "path": first["path"]} if state == "relative"
                  else wrapper_drift(settings) if state == "drifted"
-                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"]))
+                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"], adopt=True))
         if drift["action"] == "reconnect":
             fix_text = f"Connect it: {connect}"
         else:
@@ -614,7 +614,7 @@ class Manager:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap_cli import read_settings, reconnect_wrapper, wrapped_target
+        from xswap_cli import dependency_entry, read_settings, reconnect_wrapper, wrapped_target
         reconnect_wrapper(self)
         settings = read_settings(self)
         wrapper = settings.get("wrapper")
@@ -643,6 +643,14 @@ class Manager:
             raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
                             "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
                             "then retry.")
+        # The same one step out: npm writes `node_modules/.bin/codex` for a project that depends
+        # on @openai/codex, and that directory reaches PATH absolutely (direnv, a Makefile, an IDE
+        # task). Exec'ing it hands a project-controlled file a pool account's CODEX_HOME. xswap
+        # never adopts such an entry (DEPENDENCY_REASON), so run the recorded release instead.
+        if dependency_entry(executable, os.path.realpath(executable)):
+            real = (wrapper or {}).get("realCodex")
+            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+                return real
         return executable
 
     def usage_cache_path(self):

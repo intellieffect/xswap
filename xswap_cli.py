@@ -563,6 +563,17 @@ def wrapped_target(path, settings):
     return real in recorded_proxies(settings) or os.path.basename(real) == PROXY_NAME
 
 
+# The `codex` a project installed for itself. npm writes `node_modules/.bin/codex` for a
+# dependency on @openai/codex, and such a directory reaches PATH absolutely (direnv, a
+# Makefile, an IDE task). The shadow repair asked only for a user-owned symlink at an
+# existing executable, so one read-only-looking xswap command inside such a repository
+# rewrote that link to xswap-codex and made it the primary record; afterwards every
+# `xswap run`/`login`/`app`, usage read and pool build exec'd the project's own file with a
+# pool account's CODEX_HOME (2026-09-13). xswap adopts no entry from a dependency tree on
+# its own -- the user can still wrap one by hand, which is what `--wrap-codex` is.
+DEPENDENCY_REASON = 'project-dependency'
+
+
 # The one reason wrapper_drift contributes instead of entry_drift: the recorded entry's own path is
 # not absolute. 0.7.8 stored `str(shutil.which('codex'))` verbatim, so a shell whose PATH held a
 # relative element recorded `bin/codex`, and 0.8.0 has no migration for it. Resolving that against
@@ -572,7 +583,7 @@ def wrapped_target(path, settings):
 RELATIVE_RECORD_REASON = 'relative-record'
 DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'not-user-owned',
     'dangling-target', 'not-executable', 'auto-disabled', 'unreadable', 'proxy-missing',
-    RELATIVE_RECORD_REASON)
+    DEPENDENCY_REASON, RELATIVE_RECORD_REASON)
 # The one reason the PATH walk contributes instead of entry_drift: the `codex` a relative PATH
 # element resolved to. Deliberately outside DRIFT_REASONS -- entry_drift never returns it (the
 # condition belongs to the PATH element, not to the entry's link state) and its fix is the
@@ -580,6 +591,12 @@ DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'n
 # two dicts because describe_drift looks a reason up, so auto-status and the use/switch notice
 # can report a relative entry with the same words, in the shape they print every other skip in.
 RELATIVE_ENTRY_REASON = 'relative-path-entry'
+def dependency_entry(path, real=None):
+    """True when the entry, or the executable behind it, sits in a project's dependency tree."""
+    parts = set(Path(path).parts) | set(Path(real).parts if real else ())
+    return 'node_modules' in parts
+
+
 DRIFT_CAUSES = {
     'replaced': 'a Codex update replaced {path} and xswap could not reconnect it',
     'missing': '{path} does not exist',
@@ -591,6 +608,8 @@ DRIFT_CAUSES = {
     'unreadable': '{path} could not be inspected ({error}), so xswap leaves it alone',
     'proxy-missing': 'the xswap-codex xswap recorded ({proxy}) no longer exists, so pointing {path} at it would '
         'leave plain codex on a link to nothing',
+    DEPENDENCY_REASON: '{path} -> {real} belongs to a project (it is inside a node_modules tree), not to this '
+        "machine's Codex install, so xswap does not wrap it on its own",
     RELATIVE_ENTRY_REASON: '{path} is found through a relative PATH entry, which the shell resolves against the '
         'working directory, so it names a different file in every directory and xswap never re-points it',
     RELATIVE_RECORD_REASON: 'the recorded codex entry {path} is not an absolute path, so it names a different file '
@@ -606,6 +625,8 @@ DRIFT_FIXES = {
     'auto-disabled': 'enable automatic switching and connect it: {reconnect}',
     'unreadable': 'check its permissions, then run: {reconnect}',
     'proxy-missing': 'reinstall xswap, which is what installs the xswap-codex command, then run: {reconnect}',
+    DEPENDENCY_REASON: 'take that directory off PATH ahead of the codex xswap wrapped; if it really is the Codex '
+        'you want plain codex to run, wrap it by hand from this shell: {reconnect}',
     RELATIVE_ENTRY_REASON: 'make that PATH entry absolute; until then what plain codex runs depends on the '
         'directory you run it from',
     RELATIVE_RECORD_REASON: 'point the codex entry that still runs xswap-codex back at the real Codex by hand, then '
@@ -613,7 +634,7 @@ DRIFT_FIXES = {
 }
 
 
-def entry_drift(path, proxy, enabled=True):
+def entry_drift(path, proxy, enabled=True, adopt=False):
     """Classify one `codex` entry against the recorded xswap-codex proxy.
 
     Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install
@@ -630,6 +651,10 @@ def entry_drift(path, proxy, enabled=True):
       real    that target as an absolute path, or None
       proxy   the recorded xswap-codex path, or None
       error   short OS error text for 'unreadable', else None
+
+    `adopt` says xswap is judging an entry it has no record of and would wrap on its
+    own (the shadow repair); such an entry also has to come from somewhere xswap can
+    attribute to a Codex install, which a project's dependency tree is not.
 
     Pure: lstat/readlink/access only, never a write. Every condition that used to
     be a silent None is named, so doctor and use/switch can explain a gap nothing
@@ -674,6 +699,8 @@ def entry_drift(path, proxy, enabled=True):
         # the cause sentence already names the entry.
         return {**result, 'reason': 'unreadable',
                 'error': getattr(error, 'strerror', None) or type(error).__name__}
+    if adopt and dependency_entry(result['path'], result['real']):
+        return {**result, 'reason': DEPENDENCY_REASON}
     if not enabled:
         return {**result, 'reason': 'auto-disabled'}
     return {**result, 'action': 'reconnect', 'reason': 'replaced'}
@@ -826,13 +853,14 @@ def shadowing_entry(settings, env=None):
     is what a Codex install put in front of the wrapped one. A PATH without the
     recorded entry (a launchd job, a test fixture) says nothing about the user's
     shell, so nothing is re-pointed from it. wrapper_state already applied the
-    `enabled` gate, so entry_drift keeps its default.
+    `enabled` gate, so entry_drift keeps its default for that; `adopt` is what it does
+    not keep, since this is the one place xswap wraps an entry nobody asked it to.
     """
     wrapper = settings.get('wrapper') or {}
     state, first, entries = wrapper_state(settings, env)
     if state != 'shadowed' or not any(entry['path'] == wrapper['path'] for entry in entries):
         return None
-    drift = entry_drift(first['path'], wrapper['proxy'])
+    drift = entry_drift(first['path'], wrapper['proxy'], adopt=True)
     return (first['path'], drift['target']) if drift['action'] == 'reconnect' else None
 
 

@@ -607,6 +607,75 @@ class SecondXswapCodexTests(WrapperFixture):
         self.assertEqual((real_row['status'], real_row['detail']), ('OK', str(real)))
 
 
+class DependencyEntryTests(WrapperFixture):
+    """A `codex` a project installed for itself is never adopted on xswap's own initiative."""
+
+    def npm_shim(self):
+        """npm's shape for a project that depends on @openai/codex."""
+        modules = self.base / 'repo' / 'node_modules'
+        release = modules / '@openai' / 'codex' / 'bin' / 'codex.js'
+        release.parent.mkdir(parents=True)
+        release.write_text('fixture')
+        release.chmod(0o700)
+        (modules / '.bin').mkdir()
+        shim = modules / '.bin' / 'codex'
+        shim.symlink_to(os.path.relpath(release, modules / '.bin'))
+        return shim, release
+
+    def test_a_node_modules_codex_ahead_on_path_is_not_wrapped_and_is_named(self):
+        # The shadow repair asked only for a user-owned symlink at an existing executable, so
+        # one read-only-looking xswap command in a repository whose node_modules/.bin is on
+        # PATH rewrote that link to xswap-codex and made it the primary record. From then on
+        # every `xswap run`/`login`/`app`, usage read and pool build exec'd the project's own
+        # file with a pool account's CODEX_HOME, and doctor reported OK from any directory.
+        from codex_swap import plain_codex_notice
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        recorded = read_settings(self.manager)['wrapper']
+        shim, release = self.npm_shim()
+        path = os.pathsep.join([str(shim.parent), str(cli.parent)])
+        settings = read_settings(self.manager)
+        self.assertIsNone(shadowing_entry(settings, {'PATH': path}))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+            state = status_data(self.manager, cleanup=False)
+            notice = plain_codex_notice(self.manager, str(self.base / 'elsewhere'))
+            # Nor does xswap exec it itself: the record says where this machine's Codex is.
+            self.assertEqual(self.manager.codex(), str(real))
+        self.assertEqual(err.getvalue(), '')  # reports only; the repository is untouched
+        self.assertEqual(os.readlink(shim), os.path.relpath(release, shim.parent))
+        self.assertEqual(read_settings(self.manager)['wrapper'], recorded)
+        self.assertNotIn('wrappers', read_settings(self.manager))
+        self.assertFalse(state['codexWrapped'])
+        # Same one-line shape as every other skip: cannot wrap <entry> (<reason>): <cause>. Fix: <fix>
+        self.assertIn(f'xswap cannot wrap {shim} (project-dependency)', notice)
+        self.assertIn('belongs to a project (it is inside a node_modules tree)', notice)
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs {shim} -> {os.path.relpath(release, shim.parent)}, not xswap-codex', row['detail'])
+        self.assertIn('cannot wrap it (project-dependency)', row['detail'])
+        self.assertIn('take that directory off PATH ahead of the codex xswap wrapped', row['detail'])
+        self.assertIn('xswap auto-enable --accounts main,second --wrap-codex', row['detail'])
+
+    def test_an_install_outside_a_dependency_tree_is_still_adopted(self):
+        # The rule is provenance, not "never adopt": the 2026-09-10 repair -- a Codex install
+        # writing a new entry ahead of the wrapped one -- has to keep working.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        ahead = self.base / 'user-bin'
+        ahead.mkdir()
+        (ahead / 'codex').symlink_to(updated)
+        path = os.pathsep.join([str(ahead), str(cli.parent)])
+        self.assertEqual(shadowing_entry(read_settings(self.manager), {'PATH': path}),
+                         (str(ahead / 'codex'), str(updated)))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(reconnect_wrapper(self.manager), str(updated))
+        self.assertEqual(os.readlink(ahead / 'codex'), str(proxy))
+        settings = read_settings(self.manager)
+        self.assertEqual(settings['wrapper']['path'], str(ahead / 'codex'))
+        self.assertEqual([w['path'] for w in settings['wrappers']], [str(cli)])
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 

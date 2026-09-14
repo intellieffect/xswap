@@ -163,7 +163,7 @@ def check_wrapper(settings, accounts=(), env=None):
     if shadowing_entry(settings, env) is not None:
         return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; it shadows the wrapped entry {path} "
                      f"on PATH until the next xswap launch, list, or use wraps it. Wrap it now: {reconnect}")
-    shadow = entry_drift(first["path"], wrapper["proxy"])
+    shadow = entry_drift(first["path"], wrapper["proxy"], adopt=True)
     if shadow["action"] == "reconnect":
         return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} is not "
                      f"on this shell's PATH. Wrap it: {reconnect}")
