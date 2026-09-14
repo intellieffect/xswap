@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 
+from xswap_path import RelativeEntryError, absolute_which
+
 LABEL = "com.intellieffect.xswap.alert"
 
 
@@ -144,12 +146,24 @@ def resolve_xswap():
     launchd's PATH does not include /opt/homebrew/bin, so the wrapper must call an
     absolute path rather than relying on `xswap` being found again at run time.
     """
-    found = shutil.which("xswap")
+    relative = None
+    try:
+        found = absolute_which("xswap")
+    except RelativeEntryError as exc:
+        # `Path(found).resolve()` turned a relative hit into <cwd>/bin/xswap and baked that
+        # into run.sh and the plist. The job then ran, every 30 minutes for ever, whatever
+        # the directory of the one shell that installed it happened to hold -- and launchd
+        # starts it from `/`, so an `xswap` that was found relatively is not on the job's
+        # PATH at all. sys.argv[0] below is the file this process is actually running, which
+        # is the executable the user meant to install.
+        found, relative = None, exc
     if found:
         return str(Path(found).resolve())
     argv0 = Path(sys.argv[0])
     if argv0.name == "xswap":
         return str(argv0.resolve())
+    if relative is not None:
+        raise AlertError(str(relative)) from None
     raise AlertError(
         "Could not find an `xswap` executable on PATH to bake into the wrapper script. "
         "Install xswap so it is on PATH (e.g. `uv tool install .` or `pip install .`), then retry."

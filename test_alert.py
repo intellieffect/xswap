@@ -100,6 +100,30 @@ class ResolveXswapTests(unittest.TestCase):
             with self.assertRaisesRegex(AlertError, "Could not find"):
                 resolve_xswap()
 
+    def test_a_relative_which_result_is_skipped_for_the_argv0_fallback(self):
+        # From a repository whose PATH starts with `bin`, which returned `bin/xswap` and
+        # Path.resolve() froze it as <cwd>/bin/xswap -- baked into run.sh and the plist, and
+        # then run every 30 minutes for ever. launchd starts the job from `/` with its own
+        # PATH, so the one directory that made that lookup succeed is never the job's. The
+        # file this process is actually running is what the user meant to install.
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/xswap"]):
+            self.assertEqual(resolve_xswap(), str(Path("/some/dir/xswap").resolve()))
+
+    def test_a_relative_which_result_with_no_argv0_fallback_names_the_entry(self):
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/codex_swap.py"]):
+            with self.assertRaisesRegex(AlertError, r"xswap was found through a relative PATH entry \(bin/xswap\)"):
+                resolve_xswap()
+
+    def test_a_relative_which_result_never_reaches_the_generated_run_script(self):
+        # What the installed job would actually have called.
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/xswap"]):
+            script = render_run_script(resolve_xswap(), 15, 600, "/root/alert/last.log")
+        self.assertIn("$RUNNER /some/dir/xswap list --warn 15", script)
+        self.assertNotIn("bin/xswap", script)
+
 
 class PlistTests(unittest.TestCase):
     def test_build_plist_carries_interval_paths_and_path_env(self):
