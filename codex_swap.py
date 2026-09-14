@@ -29,8 +29,9 @@ from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
+from xswap_path import absolute_which, relative_entry_message
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 
 class SwapError(Exception):
@@ -203,8 +204,8 @@ def plain_codex_notice(manager, selected_home):
     runs is xswap-codex with automatic switching on, or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import (RELATIVE_ENTRY_REASON, describe_drift, entry_drift, read_settings, reconnect_wrapper,
-                           wrapper_drift, wrapper_state)
+    from xswap_cli import (BYPASS_REASON, RELATIVE_ENTRY_REASON, bypass_set, describe_drift, entry_drift,
+                           read_settings, reconnect_wrapper, wrapper_drift, wrapper_state)
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
@@ -215,7 +216,10 @@ def plain_codex_notice(manager, selected_home):
     # PATH element resolves to is exactly what it runs in this directory. reconnect_wrapper above
     # keeps the default, so nothing re-points it.
     state, first, _ = wrapper_state(settings, relative=True)
-    if state == "connected":
+    # XSWAP_BYPASS=1 makes the entry point a pass-through, so a connected wrapper changes nothing
+    # in this shell and the notice stayed silent about the one setting that decides it.
+    bypassed = bypass_set() and state != "unconfigured"
+    if state == "connected" and not bypassed:
         return None
     if Path(selected_home).expanduser().resolve() == manager.source:
         return None
@@ -225,6 +229,10 @@ def plain_codex_notice(manager, selected_home):
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
     connect = f"xswap auto-enable --accounts {names} --wrap-codex"
+    if bypassed:
+        cause, fix = describe_drift({"action": "skip", "reason": BYPASS_REASON}, connect)
+        return (f"Note: plain `codex` does not go through xswap here ({BYPASS_REASON}): {cause}, so it keeps using "
+                f"{manager.source} ({label}); this selection applies only to xswap and xswap app. Fix: {fix}")
     if state in ("drifted", "shadowed", "relative"):
         shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
         # A relative entry is a skip by construction -- nothing may re-point one -- so it carries
@@ -233,7 +241,7 @@ def plain_codex_notice(manager, selected_home):
         # other skip reason prints in.
         drift = ({"action": "skip", "reason": RELATIVE_ENTRY_REASON, "path": first["path"]} if state == "relative"
                  else wrapper_drift(settings) if state == "drifted"
-                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"]))
+                 else entry_drift(first["path"], (settings.get("wrapper") or {})["proxy"], adopt=True))
         if drift["action"] == "reconnect":
             fix_text = f"Connect it: {connect}"
         else:
@@ -341,11 +349,33 @@ def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
     return winner["name"], {"remaining": remaining, "candidates": summary}
 
 
+# The state root every shell reads unless it exports ROOT_VARIABLE: which accounts exist,
+# which one is selected, and the record that connects the `codex` command all live under it,
+# so the variable silently decides what plain `codex` does in that shell (2026-09-13).
+ROOT_VARIABLE = "CODEX_SWAP_HOME"
+
+
+def default_root():
+    """The state root a shell without CODEX_SWAP_HOME uses; a path, never a read of it."""
+    return (Path.home() / ".local/share/codex-swap").expanduser().resolve()
+
+
+# "no expected selection was pinned" for Manager._use. A sentinel rather than None, because
+# None is a real selection state (no account selected) a caller may legitimately pin against.
+_UNSET = object()
+
+
 class Manager:
-    def __init__(self, root=None, source=None):
-        self.root = Path(root or os.environ.get("CODEX_SWAP_HOME", Path.home() / ".local/share/codex-swap")).expanduser().resolve()
+    def __init__(self, root=None, source=None, create=True):
+        self.root = Path(root or os.environ.get(ROOT_VARIABLE, default_root())).expanduser().resolve()
         self.source = Path(source or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
-        private_dir(self.root)
+        # `create=False` for a caller that only reads state and must not invent it: the
+        # xswap-codex entry point ran in whatever shell plain `codex` was typed in, so a shell
+        # without CODEX_SWAP_HOME made it create an empty ~/.local/share/codex-swap on its way
+        # to reporting that the real Codex was unavailable -- a second, stateless root that
+        # `auto-disable` and `auto-enable --wrap-codex` then both refused to work with.
+        if create or self.root.is_dir():
+            private_dir(self.root)
         self.registry = self.root / "accounts.json"
 
     @contextlib.contextmanager
@@ -354,6 +384,29 @@ class Manager:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
+        finally:
+            os.close(fd)
+
+    @contextlib.contextmanager
+    def try_locked(self):
+        """locked(), but yields False instead of waiting when someone else holds the lock.
+
+        This lock is held across whole OpenClaw subprocesses (`sync-openclaw` waits up to
+        90s for the SDK bridge and 45s for the Gateway reload), and it is taken on every
+        launch, list, usage read and selection. A repair that only has to happen eventually
+        must not sit behind that: `reconnect_wrapper` blocked every one of those commands
+        for the length of a sync, and inside the alert job -- which runs each step under
+        `timeout 120` -- the job was SIGTERMed before it ever reported. The work is
+        idempotent and already silent on every skip, so the next launch does it instead.
+        """
+        fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
         finally:
             os.close(fd)
 
@@ -480,7 +533,26 @@ class Manager:
         return home
 
     def use(self, name):
+        return self._use(name)
+
+    def use_if_active(self, expected, name):
+        """use(name), but only while `expected` is still the selected account; else False.
+
+        `auto-tick` reads quota over the network (seconds), then switched if the selection
+        still matched what it had decided about. That check and the write were two separate
+        lock holds, so an `xswap use` -- or a second tick from the alert job, which the job's
+        own overrun makes ordinary -- could land between them and be overwritten by a decision
+        taken about the account it replaced. Compare and set under one lock instead; False is
+        the caller's existing "a manual use landed, it wins" outcome.
+        """
+        return self._use(name, expected=expected)
+
+    def _use(self, name, expected=_UNSET):
         with self.locked():
+            # First thing inside the lock: a caller pinning the selection must not raise on the
+            # new account's state (disabled, signed out) when the answer is "someone else chose".
+            if expected is not _UNSET and self.read()["active"] != expected:
+                return False
             name, home = self.account(name)
             self.require_enabled(name)
             check_file_store(home)
@@ -538,7 +610,16 @@ class Manager:
             atomic_json(self.registry, data)
 
     def _auto_session_running(self, name):
-        """Best effort: report whether a live auto bridge (desktop or CLI) currently uses this account."""
+        """Best effort: report whether a live auto bridge (desktop or CLI) holds this account.
+
+        Both the account the bridge runs on right now (`account`) and the pool it may
+        switch to (`accounts`, recorded since 0.8.0) count. Reading only `account` let
+        `remove --purge` delete the login a running bridge would have moved to when its
+        current account hits the weekly limit: the bridge keeps running, and the switch
+        it was set up to make then fails with "selected account is disabled or removed"
+        against a profile directory that no longer exists. The pool is a claim on the
+        account for as long as the session lives, exactly like the current selection.
+        """
         candidates = [self.root / "auto" / ".bridge.lock"]
         cli_runs = self.root / "auto" / "cli-runs"
         try:
@@ -561,13 +642,35 @@ class Manager:
                         state = json.loads((lock_path.parent / "status.json").read_text())
                     except (OSError, ValueError):
                         state = None
-                    if isinstance(state, dict) and state.get("account") == name:
-                        return True
+                    if isinstance(state, dict):
+                        pool = state.get("accounts")
+                        if state.get("account") == name or (isinstance(pool, list) and name in pool):
+                            return True
                 else:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
         return False
+
+    def purge_target(self, name, entry):
+        """The directory `--purge` deletes for a managed account: the profile its record names.
+
+        `remove --purge` deleted `<root>/profiles/<name>` and never compared it with the
+        recorded `home`. The two agree only for a profile this root created and nothing has
+        moved since; when they differ -- a registry restored or copied under another
+        CODEX_SWAP_HOME, a hand-edited `home` -- the purge reported "Deleted the managed
+        profile at ..." while the login it had just dropped stayed on disk, and it deleted
+        whatever the convention path happened to hold instead. Only a human can say which of
+        the two was meant, so name both and delete neither.
+        """
+        target = self.root / "profiles" / name
+        recorded = Path(entry["home"])
+        if recorded != target / "codex":
+            raise SwapError(f"{name}'s recorded home is {recorded}, but --purge deletes the managed profile at "
+                            f"{target}, which is not where that login lives. Refusing to delete a directory this "
+                            f"registry does not name: run xswap remove {name} without --purge, then delete "
+                            f"{recorded} yourself if you no longer want it.")
+        return target
 
     def remove(self, name, purge=False):
         from xswap_cli import read_settings
@@ -579,6 +682,9 @@ class Manager:
             if self._auto_session_running(name):
                 raise SwapError(f"{name} is used by a running auto session.")
             data = self.read()
+            # Before anything is dropped: a purge that cannot name its directory must leave the
+            # registry entry in place, so the account can still be removed without --purge.
+            target = self.purge_target(name, data["accounts"][name]) if purge and data["accounts"][name].get("managed") else None
             entry = data["accounts"].pop(name)
             if data["active"] == name:
                 data["active"] = None
@@ -587,8 +693,7 @@ class Manager:
             self._forget_auth_failure(name)
             purged = False
             kept = entry["home"]
-            if purge and entry.get("managed"):
-                target = self.root / "profiles" / name
+            if target is not None:
                 resolved = target.resolve()
                 if (resolved != target or resolved.is_symlink() or not resolved.is_dir()
                         or resolved.stat().st_uid != os.getuid()):
@@ -602,10 +707,27 @@ class Manager:
     def env(self, home):
         env = os.environ.copy()
         # A caller's API key or workload identity must not silently select another account.
-        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH"):
+        # XSWAP_BYPASS with them: exported in the shell that started this launch, it followed the
+        # pool account's home into every nested `codex` and turned the wrapper off inside the one
+        # session xswap had just set up -- with this home already on CODEX_HOME, that is a session
+        # whose selection nothing can change. One command's own bypass stays that command's.
+        # The endpoint and trust variables below are the ones the Codex CLI itself reads: left in
+        # place, a value exported in the calling shell decided where the account xswap had just
+        # selected sent its refresh token (CODEX_REFRESH_TOKEN_URL_OVERRIDE,
+        # CODEX_REVOKE_TOKEN_URL_OVERRIDE), which backend answered for its usage and plan
+        # (CODEX_APP_SERVER_CHATGPT_BASE_URL, OPENAI_BASE_URL), which CA chain that traffic was
+        # checked against (CODEX_CA_CERTIFICATE), and where its conversation database lived
+        # (CODEX_SQLITE_HOME, the one home-shaped variable CODEX_HOME does not cover). The
+        # federation set is the OPENAI_ spelling of the workload identity already stripped here:
+        # an exchanged token authenticates a session as something other than the login in this
+        # home, which is the selection silently not applying.
+        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH",
+                    "XSWAP_BYPASS", "CODEX_APP_SERVER_CHATGPT_BASE_URL", "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+                    "CODEX_REVOKE_TOKEN_URL_OVERRIDE", "CODEX_CA_CERTIFICATE", "CODEX_SQLITE_HOME",
+                    "OPENAI_BASE_URL", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_FEDERATION_RULE_ID"):
             env.pop(key, None)
         for key in list(env):
-            if key.startswith("CODEX_WORKLOAD_IDENTITY_"):
+            if key.startswith(("CODEX_WORKLOAD_IDENTITY_", "OPENAI_WORKLOAD_IDENTITY_")):
                 env.pop(key)
         env["CODEX_HOME"] = str(home)
         return env
@@ -614,14 +736,27 @@ class Manager:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap_cli import read_settings, reconnect_wrapper
+        from xswap_cli import dependency_entry, read_settings, reconnect_wrapper, recorded_real_codex, wrapped_target
         reconnect_wrapper(self)
-        wrapper = read_settings(self).get("wrapper")
-        if wrapper and Path(executable).resolve() == Path(wrapper["proxy"]).resolve():
-            real = wrapper["realCodex"]
-            if not Path(real).is_file() or Path(real).resolve() == Path(executable).resolve():
+        settings = read_settings(self)
+        wrapper = settings.get("wrapper")
+        # Any xswap-codex, not only the recorded proxy: a second install ahead on PATH (a project
+        # venv, pipx beside uv) was returned as the real Codex, so every launch exec'd xswap-codex,
+        # which exec'd itself. Same widening for the recorded realCodex, which is how a record
+        # written before this fix spells that loop.
+        if wrapper and (Path(executable).resolve() == Path(wrapper["proxy"]).resolve()
+                        or wrapped_target(executable, settings)):
+            recorded = wrapper["realCodex"]
+            # recorded_real_codex refuses a value that is not absolute: 0.7.8 wrote one whenever
+            # the entry it wrapped was relative, and resolving it here execs whatever `codex` the
+            # working directory holds -- with a pool account's CODEX_HOME.
+            real = recorded_real_codex(settings)
+            if not real or not Path(real).is_file() or wrapped_target(real, settings):
                 names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
-                raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
+                where = (f"{recorded} is not an absolute path" if real is None and recorded
+                         else f"{recorded} is missing or is xswap-codex itself" if recorded
+                         else "auto.json records no realCodex")
+                raise SwapError(f"Original Codex binary is unavailable ({where}). "
                                 f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
             return real
         # shutil.which joins the raw PATH element, so a relative one (a project's `bin`, the empty
@@ -631,12 +766,18 @@ class Manager:
         # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
         # refuses and doctor reports as bypassed, so run the recorded release instead of it.
         if not os.path.isabs(executable):
-            real = (wrapper or {}).get("realCodex")
-            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+            real = recorded_real_codex(settings)
+            if real and Path(real).is_file():
                 return real
-            raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
-                            "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
-                            "then retry.")
+            raise SwapError(relative_entry_message("codex", executable))
+        # The same one step out: npm writes `node_modules/.bin/codex` for a project that depends
+        # on @openai/codex, and that directory reaches PATH absolutely (direnv, a Makefile, an IDE
+        # task). Exec'ing it hands a project-controlled file a pool account's CODEX_HOME. xswap
+        # never adopts such an entry (DEPENDENCY_REASON), so run the recorded release instead.
+        if dependency_entry(executable, os.path.realpath(executable)):
+            real = recorded_real_codex(settings)
+            if real and Path(real).is_file():
+                return real
         return executable
 
     def usage_cache_path(self):
@@ -673,9 +814,26 @@ class Manager:
         if isinstance(data, dict) and data.pop(name, None) is not None:
             atomic_json(self.usage_cache_path(), data)
 
+    def _still_registered(self, name):
+        """Whether NAME is still in the registry. Caller holds the lock.
+
+        A usage fetch takes seconds, and `remove` drops the account's cache and auth-state
+        entries under the same lock; a fetch already in flight then wrote them back after the
+        removal, so `usage-cache.json` and `auth-state.json` kept naming an account that no
+        longer exists -- with its identity label, which is an email -- and a later `xswap add`
+        under the same name inherited the removed login's rejection. An unreadable registry is
+        someone else's error to report: keep the write rather than drop data over it.
+        """
+        try:
+            return name in self.read()["accounts"]
+        except SwapError:
+            return True
+
     def remember_usage(self, name, buckets, fetched_at, label, reset_credits=None):
         """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
         with self.locked():
+            if not self._still_registered(name):
+                return
             try:
                 data = json.loads(self.usage_cache_path().read_text())
                 if not isinstance(data, dict):
@@ -717,6 +875,8 @@ class Manager:
         tokens. Always 0600 through atomic_json.
         """
         with self.locked():
+            if not self._still_registered(name):
+                return
             data = self._read_auth_state()
             current = data.get(name)
             if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
@@ -839,8 +999,13 @@ class Manager:
                 pretty = ", ".join("[" + ", ".join(names_in_group) + "]" for names_in_group in groups.values())
                 raise SwapError(f"Pooled accounts belong to different ChatGPT organizations: {pretty}. OpenClaw shares one agent's conversation context across whatever it selects from the pool, so mixing organizations mixes their context across accounts. Pass --allow-mixed to override.")
         name, home = resolved[0]
-        executable = shutil.which("openclaw")
-        node = shutil.which("node")
+        # absolute_which refuses a relative answer instead of returning it: from a repository
+        # whose PATH starts with `bin`, shutil.which handed back `bin/node`, and the two
+        # subprocesses below ran that project's own file with the account's CODEX_HOME -- and
+        # with every pooled account's codexHome on its stdin -- while `openclaw secrets reload`
+        # went to the same directory's `bin/openclaw`.
+        executable = absolute_which("openclaw", error=SwapError)
+        node = absolute_which("node", error=SwapError)
         if not executable or not node:
             raise SwapError("OpenClaw sync requires openclaw and node in PATH.")
         package_root = resolve_openclaw_package_root(executable)
@@ -931,7 +1096,9 @@ class Manager:
             print("Dry run: no changes made; the Gateway was not stopped.")
             return {"cleared": [], "dryRun": True}
 
-        executable = shutil.which("openclaw")
+        # The same lookup, and the same stop/start of the user's Gateway through whatever the
+        # working directory holds if it is allowed to be relative.
+        executable = absolute_which("openclaw", error=SwapError)
         if not executable:
             raise SwapError("OpenClaw sync requires openclaw in PATH.")
 
@@ -1030,7 +1197,10 @@ class Manager:
             raise SwapError(str(exc)) from None
         if sys.platform != "darwin":
             raise SwapError("Auto desktop mode is macOS only.")
-        bridge = shutil.which("xswap-proxy")
+        # A relative hit was absolutised against the working directory by Path(bridge).resolve()
+        # below and handed to the desktop app as CODEX_CLI_PATH: the app then ran a file the
+        # current project controls as its Codex CLI, for the whole life of that window.
+        bridge = absolute_which("xswap-proxy", error=SwapError)
         if not bridge:
             raise SwapError("Install xswap 0.3.0 to provide xswap-proxy.")
         candidates = [Path(app)] if app else [Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app")]
@@ -1057,7 +1227,14 @@ class Manager:
         for entry in ("config.toml", "AGENTS.md", "skills", "rules"):
             src, dst = source / entry, home / entry
             if src.exists() and not dst.exists() and not dst.is_symlink():
-                dst.symlink_to(src, target_is_directory=src.is_dir())
+                # Two launches share this runtime home and neither holds the registry lock here,
+                # so the other one can create the same link between the test and the call. The
+                # link it created is the link this one was about to create, so the loser has
+                # nothing to do -- but the FileExistsError reached codex_main, which reports
+                # every OSError as "could not start automatic Codex CLI" and advises
+                # `xswap auto-disable`, i.e. tearing the wrapper down over a won race.
+                with contextlib.suppress(FileExistsError):
+                    dst.symlink_to(src, target_is_directory=src.is_dir())
         ensure_plugins(home, source)
         link_packages(self, home)
         result = subprocess.run(command, env=self.env(home), capture_output=True)
@@ -1351,8 +1528,10 @@ def main(argv=None):
         elif args.command == "remove":
             name, _ = manager.account(args.name)
             entry = manager.read()["accounts"][name]
-            target = manager.root / "profiles" / name
             will_purge = args.purge and entry.get("managed")
+            # The same directory remove() will delete, refused here when the record names
+            # another one -- before the prompt offers to delete it.
+            target = manager.purge_target(name, entry) if will_purge else None
             if args.purge and not entry.get("managed"):
                 print(f"--purge is ignored for {name}: it is a registered home, not a managed profile.")
             if not args.yes:

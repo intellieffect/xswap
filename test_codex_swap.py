@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -96,6 +97,39 @@ class AccountTests(unittest.TestCase):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "do-not-inherit"}), patch.object(self.manager, "codex", return_value=str(executable)):
             self.assertEqual(self.manager.launch_cli(None, [str(self.source)]), 0)
 
+    def test_cli_subprocess_drops_the_endpoints_and_identities_codex_itself_reads(self):
+        # Manager.env stripped a list that did not match what the Codex CLI reads, so a value
+        # exported in the calling shell followed the account xswap had just selected into its
+        # session: where its refresh token was sent, which backend answered for its usage and
+        # plan, which CA chain that traffic was checked against, where its conversation
+        # database lived, and -- through the federation set -- what the session authenticated
+        # as, which is the selection silently not applying.
+        self.manager.register("main")
+        leaked = {"CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://attacker.example",
+                  "CODEX_REFRESH_TOKEN_URL_OVERRIDE": "https://attacker.example/refresh",
+                  "CODEX_REVOKE_TOKEN_URL_OVERRIDE": "https://attacker.example/revoke",
+                  "CODEX_CA_CERTIFICATE": "/tmp/attacker.pem",
+                  "CODEX_SQLITE_HOME": "/tmp/attacker-db",
+                  "OPENAI_BASE_URL": "https://attacker.example/v1",
+                  "OPENAI_WORKLOAD_IDENTITY_PROVIDER": "attacker",
+                  "OPENAI_IDENTITY_TOKEN_FILE": "/tmp/attacker.jwt",
+                  "OPENAI_FEDERATION_RULE_ID": "attacker-rule"}
+        kept = {"CODEX_CLI_PATH": "/keep/me", "HTTPS_PROXY": "http://corp.example:3128"}
+        probe = self.base / "probe-codex"
+        probe.write_text(f"#!{sys.executable}\nimport json,os,sys\n"
+                         f"assert not [k for k in json.loads(sys.argv[1]) if k in os.environ], sorted(os.environ)\n"
+                         f"assert not [k for k in os.environ if k.startswith('CODEX_WORKLOAD_IDENTITY_')]\n")
+        probe.chmod(0o700)
+        with patch.dict(os.environ, {**leaked, **kept, "CODEX_WORKLOAD_IDENTITY_PROVIDER": "attacker"}), \
+                patch.object(self.manager, "codex", return_value=str(probe)):
+            self.assertEqual(self.manager.launch_cli(None, [json.dumps(sorted(leaked))]), 0)
+            env = self.manager.env(self.source)
+            for key in leaked:
+                self.assertNotIn(key, env)
+            # The desktop-app variables stay: the CLI does not read them, and
+            # launch_cli/proxy_main strip the ones they must where they set them.
+            self.assertEqual({key: env[key] for key in kept}, kept)
+
     def test_app_uses_same_account_home_and_separate_cookie_directory(self):
         self.manager.register("main")
         app = self.base / "ChatGPT.app"
@@ -174,6 +208,26 @@ class AccountTests(unittest.TestCase):
         with patch("codex_swap.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("codex_swap.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw("second", select=True)
         self.assertEqual(self.manager.account()[0], "second")
+
+    def test_openclaw_sync_refuses_node_and_openclaw_found_through_a_relative_path_entry(self):
+        # Started from a repository whose PATH begins with `bin`, shutil.which handed back
+        # `bin/node`: the bridge subprocess then ran that project's own file with the
+        # account's CODEX_HOME, and with every pooled account's codexHome on its stdin.
+        # `openclaw secrets reload` reached the same directory's `bin/openclaw`. Which file
+        # either name meant changed with the directory the command happened to start in.
+        self.manager.register("main")
+        installed = self.bridge_installation()
+        for name, found in (("node", "bin/node"), ("openclaw", "bin/openclaw")):
+            with self.subTest(name=name):
+                def which(asked, found=found, name=name):
+                    return found if asked == name else (installed if asked == "openclaw" else "/usr/bin/node")
+                with patch("codex_swap.shutil.which", side_effect=which), \
+                        patch("codex_swap.subprocess.run") as run:
+                    with self.assertRaises(SwapError) as refused:
+                        self.manager.sync_openclaw("main")
+                run.assert_not_called()  # nothing from that directory was executed
+                self.assertIn(f"{name} was found through a relative PATH entry ({found})", str(refused.exception))
+                self.assertIn("make that PATH entry absolute", str(refused.exception))
 
     def test_login_unknown_account_raises(self):
         with self.assertRaises(SwapError):
@@ -426,6 +480,11 @@ class AccountTests(unittest.TestCase):
         link = self.base / "codex-link"
         gone = self.base / "gone"
         link.symlink_to(gone)
+        # The xswap-codex the record names exists, as it does on a machine whose entry was
+        # wrapped: a missing one is its own reason ('proxy-missing') and would win here.
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
         def connect():
             atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
                         "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
@@ -447,6 +506,9 @@ class AccountTests(unittest.TestCase):
         release.chmod(0o700)
         link = self.base / "codex-link"
         link.symlink_to(release)
+        proxy = self.base / "xswap-codex"  # installed, as on a machine whose entry was wrapped
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
         def disabled():
             atomic_json(self.manager.root / "auto.json", {"enabled": False, "accounts": ["main", "work"],
                         "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
@@ -754,6 +816,107 @@ class AccountTests(unittest.TestCase):
         finally:
             os.close(fd)
         self.assertNotIn("second", self.manager.read()["accounts"])
+
+    def test_use_if_active_writes_nothing_once_another_selection_landed(self):
+        # auto-tick reads quota over the network, then switched if the selection still matched
+        # what it had decided about -- as two separate lock holds, so a selection committed
+        # between them was overwritten by a decision taken about the account it had replaced.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        third = self.manager.prepare("third")
+        atomic_json(third / "auth.json", self.auth)
+        self.assertEqual(self.manager.read()["active"], "main")
+        self.assertEqual(self.manager.use_if_active("main", "second"), second)
+        self.assertEqual(self.manager.read()["active"], "second")
+        # "main" is no longer the selection, so the pinned write does nothing and says so.
+        self.assertIs(self.manager.use_if_active("main", "third"), False)
+        self.assertEqual(self.manager.read()["active"], "second")
+
+    def test_a_fetch_that_finishes_after_a_removal_does_not_resurrect_the_account(self):
+        # A usage fetch takes seconds and `remove` drops the account's cache and auth-state
+        # entries under the same lock, so a fetch already in flight wrote them back afterwards:
+        # both files kept naming an account that no longer exists -- with its identity label,
+        # which is an email -- and a later `xswap add` under the same name inherited the
+        # removed login's rejection.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_usage("second", [], 1000.0, "second@example.test")
+        self.manager.remember_auth_failure("second", "second@example.test")
+        self.manager.remove("second")
+        self.assertNotIn("second", json.loads(self.manager.usage_cache_path().read_text()))
+        self.assertNotIn("second", json.loads(self.manager.auth_state_path().read_text()))
+        # The in-flight fetch lands now, with the label it read before the removal.
+        self.manager.remember_usage("second", [], 2000.0, "second@example.test")
+        self.manager.remember_auth_failure("second", "second@example.test")
+        self.assertNotIn("second", json.loads(self.manager.usage_cache_path().read_text()))
+        self.assertNotIn("second", json.loads(self.manager.auth_state_path().read_text()))
+        # A registered account is still written, so nothing else lost its cache.
+        self.manager.remember_usage("main", [], 3000.0, "main@example.test")
+        self.assertIn("main", json.loads(self.manager.usage_cache_path().read_text()))
+
+    def test_remove_refuses_an_account_a_running_auto_session_can_still_switch_to(self):
+        # Only `account` was read, so the pool a running bridge records in the same status.json
+        # counted for nothing: `remove --purge` deleted the login that session would move to
+        # when its current account hits the weekly limit, and the switch it was set up to make
+        # then failed against a profile directory that no longer existed.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "main", "accounts": ["main", "second"]}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with self.assertRaisesRegex(SwapError, "second is used by a running auto session"):
+                self.manager.remove("second", purge=True)
+        finally:
+            os.close(fd)
+        self.assertIn("second", self.manager.read()["accounts"])
+        self.assertTrue(profile_dir.is_dir())
+        self.assertEqual(json.loads((second / "auth.json").read_text()), self.auth)
+
+    def test_remove_purge_refuses_when_the_record_names_another_home(self):
+        # The purge deleted <root>/profiles/<name> without ever comparing it with the recorded
+        # home, so it reported "Deleted the managed profile at ..." while the login it had just
+        # dropped stayed on disk -- and it deleted whatever the convention path held instead.
+        self.manager.register("main")
+        self.manager.prepare("second")
+        elsewhere = self.base / "elsewhere" / "codex"
+        elsewhere.mkdir(parents=True)
+        atomic_json(elsewhere / "auth.json", self.auth)
+        convention = self.manager.root / "profiles" / "second"
+        (convention / "codex" / "marker").write_text("not the recorded login")
+        data = self.manager.read()
+        data["accounts"]["second"]["home"] = str(elsewhere)
+        atomic_json(self.manager.registry, data)
+        with self.assertRaisesRegex(SwapError, "recorded home is .*elsewhere"):
+            self.manager.remove("second", purge=True)
+        # Neither directory was touched, and the account can still be removed without --purge.
+        self.assertTrue((elsewhere / "auth.json").exists())
+        self.assertTrue((convention / "codex" / "marker").exists())
+        self.assertIn("second", self.manager.read()["accounts"])
+        result = self.manager.remove("second")
+        self.assertEqual(result, {"removed": "second", "purged": False, "kept": str(elsewhere)})
+        self.assertTrue((elsewhere / "auth.json").exists())
+
+    def test_remove_purge_refusal_reaches_the_command_before_it_offers_to_delete(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        elsewhere = self.base / "elsewhere" / "codex"
+        elsewhere.mkdir(parents=True)
+        data = self.manager.read()
+        data["accounts"]["second"]["home"] = str(elsewhere)
+        atomic_json(self.manager.registry, data)
+        with patch("codex_swap.Manager", return_value=self.manager), patch("builtins.input") as prompt, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(["remove", "second", "--purge"]), 1)
+        self.assertIn("Refusing to delete a directory this registry does not name", err.getvalue())
+        prompt.assert_not_called()
+        self.assertIn("second", self.manager.read()["accounts"])
 
     def test_remove_purge_safety_failure_reports_registry_already_removed(self):
         self.manager.register("main")
@@ -1359,6 +1522,23 @@ class ClearCooldownManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(SwapError, "openclaw gateway start"):
                 self.manager.clear_openclaw_cooldown("main", yes=True)
 
+    def test_clear_cooldown_refuses_an_openclaw_found_through_a_relative_path_entry(self):
+        # The same lookup stops and restarts the user's Gateway. A relative hit meant
+        # `bin/openclaw gateway stop --force` -- a project file, with the source home's
+        # environment -- ran between reading the cooldown state and rewriting it.
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        db = self.write_db({pid: {"blockedUntil": time.time() * 1000 + 60000,
+                                    "blockedReason": "rate_limit", "errorCount": 1}})
+        before = db.read_bytes()
+        with patch("codex_swap.shutil.which", return_value="bin/openclaw"), \
+                patch("codex_swap.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SwapError) as refused:
+                self.manager.clear_openclaw_cooldown("main", yes=True)
+        run.assert_not_called()
+        self.assertEqual(db.read_bytes(), before)
+        self.assertIn("openclaw was found through a relative PATH entry (bin/openclaw)", str(refused.exception))
+
     def test_omitted_name_checks_every_registered_account(self):
         pid_second = self.profile_id("acct-2", "sub-2")
         self.register("main", "acct-1", "sub-1")
@@ -1456,6 +1636,62 @@ class AutoLauncherTests(unittest.TestCase):
         self.assertFalse((self.manager.root/'auto/codex/auth.json').exists())
         self.assertEqual(before,self.manager.registry.read_bytes())
         self.assertEqual(self.auth,json.loads((self.source/'auth.json').read_text()))
+
+    def test_auto_launcher_refuses_an_xswap_proxy_found_through_a_relative_path_entry(self):
+        # `Path(bridge).resolve()` absolutised a relative hit against the working directory
+        # and handed it to the desktop app as CODEX_CLI_PATH: from a repository whose PATH
+        # starts with `bin`, the ChatGPT window ran that project's `bin/xswap-proxy` as its
+        # Codex CLI -- with the auto home and XSWAP_REAL_CODEX -- for the life of the window.
+        self.manager.register('main')
+        self.manager.prepare('second')
+        app = self.base / 'ChatGPT.app'
+        app.mkdir()
+        executable = self.base / 'codex'
+        executable.touch()
+        with patch('codex_swap.sys.platform', 'darwin'), \
+             patch('codex_swap.shutil.which',
+                   side_effect=lambda name: 'bin/xswap-proxy' if name == 'xswap-proxy' else str(executable)), \
+             patch('codex_swap.subprocess.run') as run:
+            with self.assertRaises(SwapError) as refused:
+                self.manager.launch_auto_app('main,second', str(app))
+        run.assert_not_called()  # no window was opened on it
+        self.assertIn('xswap-proxy was found through a relative PATH entry (bin/xswap-proxy)', str(refused.exception))
+        self.assertFalse((self.manager.root / 'auto').exists())
+
+    def test_a_second_launch_creating_the_same_tooling_link_is_not_a_failure(self):
+        # Two auto launches share this runtime home and neither holds the registry lock while
+        # it links the tooling, so the other one can create the same link between the "does it
+        # exist" test and the symlink call (70 of 150 probe launches). The link it created is
+        # the link this launch wanted -- but the FileExistsError came out of the launcher, and
+        # through codex_main that reads as "could not start automatic Codex CLI; ... run
+        # xswap auto-disable": tearing the wrapper down over a race that was won.
+        self.manager.register('main')
+        self.manager.prepare('second')
+        app = self.base / 'ChatGPT.app'
+        app.mkdir()
+        executable = self.base / 'codex'
+        executable.touch()
+        proxy = self.base / 'xswap-proxy'
+        proxy.touch()
+        real_symlink_to = Path.symlink_to
+        raced = []
+
+        def racing_symlink_to(self_path, target, target_is_directory=False):
+            if not raced:
+                raced.append(self_path)
+                # The competing launch wins the gap between the test and this call.
+                real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+            return real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+
+        with patch('codex_swap.sys.platform', 'darwin'), \
+             patch('codex_swap.shutil.which', side_effect=lambda name: str(proxy if name == 'xswap-proxy' else executable)), \
+             patch.object(Path, 'symlink_to', racing_symlink_to), \
+             patch('codex_swap.subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.manager.launch_auto_app('main,second', str(app))
+        linked = self.manager.root / 'auto' / 'codex' / 'config.toml'
+        self.assertEqual(raced[0], linked)  # the race really happened on the first link
+        self.assertEqual(os.readlink(linked), str(self.source / 'config.toml'))
 
     def test_auto_dry_run_does_not_create_runtime(self):
         self.manager.register('main')

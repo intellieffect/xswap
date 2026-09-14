@@ -9,16 +9,16 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import shutil
 import stat
 import subprocess
 import time
 
-from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
+from codex_swap import ROOT_VARIABLE, SwapError, __version__, check_file_store, default_root, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
+from xswap_cli import BYPASS_REASON, BYPASS_VARIABLE, DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, bypass_set, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, path_state, read_settings, recorded_real_codex, status_data, wrapper_drift
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+from xswap_path import RelativeEntryError, absolute_which
 from xswap_relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
@@ -65,7 +65,14 @@ def _human_delta(seconds):
 
 
 def check_codex_binary():
-    executable = shutil.which("codex")
+    try:
+        executable = absolute_which("codex")
+    except RelativeEntryError as exc:
+        # Running it would execute -- and then report as this machine's Codex -- whatever
+        # `codex` the directory doctor was started in holds, which is the one entry xswap
+        # refuses to wrap and never re-points. Doctor is read-only, so classify instead:
+        # naming the entry is the whole finding, and OK here read as "Codex is fine".
+        return check("codex binary", FAIL, str(exc))
     if not executable:
         return check("codex binary", FAIL, "codex not found on PATH")
     try:
@@ -90,12 +97,73 @@ def check_wrapper(settings, accounts=(), env=None):
     An entry that bypasses the selection right now is FAIL, which 0.7.8 reported as
     WARN -- the exit code is the only signal a cron or CI check reads. Read-only:
     the xswap_cli helpers only stat and readlink. `env` pins PATH for tests.
+
+    One PATH walk and one drift classification decide both the verdict and the text.
+    The row used to take five independent snapshots, so a concurrent reconnect_wrapper
+    (every launch, list and usage read runs one) could pair a verdict from the first
+    with a sentence from the last: on a fully connected machine it printed "plain codex
+    runs X, not xswap-codex; the wrapped entry Y is not on this shell's PATH" with both
+    clauses false, and exited 1 (2026-09-13).
     """
     wrapper = settings.get("wrapper") or {}
     names = [name for name, value in dict(accounts).items() if not (value or {}).get("disabled")]
     reconnect = f"xswap auto-enable --accounts {','.join(names) or 'NAME,NAME'} --wrap-codex"
-    state, first, entries = wrapper_state(settings, env)
+    # relative=True walks every element, the relative ones included, and the absolute-only
+    # list every repair sees is that same walk filtered: one stat of each candidate.
+    entries = codex_path_entries(settings, env, relative=True)
+    absolute = [entry for entry in entries if os.path.isabs(entry["path"])]
+    state, first = path_state(settings, absolute)
     drift = wrapper_drift(settings)
+    row = _wrapper_row(wrapper, names, reconnect, state, first, absolute, drift)
+    # A relative PATH element resolves from the working directory, so xswap never re-points
+    # the `codex` it finds there (codex_path_entries leaves it out of every repair), and in
+    # this one directory it is what plain `codex` runs. It is a caveat on the rows above,
+    # not a verdict of its own: returning it before them reported WARN and exit 0 on a
+    # machine permanently bypassed by a foreign regular file, whenever the working directory
+    # happened to hold an xswap-codex (2026-09-13). Not said at all while the record is
+    # unconfigured or unusable: nothing there claims plain `codex` goes through xswap, and
+    # a relative record has no entry to be bypassed.
+    ahead = entries[0] if entries and not os.path.isabs(entries[0]["path"]) else None
+    if ahead is None or state == "unconfigured" or drift["reason"] == RELATIVE_RECORD_REASON:
+        return row
+    status, sentence = _relative_caveat(ahead, Path(wrapper["path"]), alone=row["status"] == OK)
+    if row["status"] == OK:
+        return check("wrapper", status, sentence)
+    return check("wrapper", FAIL if FAIL in (row["status"], status) else row["status"],
+                 f"{row['detail']} {sentence}")
+
+
+def _relative_caveat(ahead, path, alone):
+    """(status, sentence) for the relative PATH element plain `codex` reaches first.
+
+    `alone` when the absolute-PATH rows were OK: the element is then the whole finding and
+    the sentence says what plain `codex` runs. Otherwise it is appended to a row that
+    already named a condition of its own, and adds only what this directory changes.
+    """
+    fix = "Fix: make that PATH entry absolute."
+    if ahead["kind"] == "wrapper":
+        # The same element, resolving to xswap-codex in this directory: plain `codex` here does
+        # go through xswap, so FAIL ("not xswap-codex", "keeps using ...") would have been false.
+        # It is still the one entry xswap never re-points, and the next directory decides again.
+        if alone:
+            return WARN, (f"plain codex runs {_shown(ahead)} here, which is xswap-codex, but it is found "
+                          "through a relative PATH entry: it names a different file in every directory, which xswap "
+                          f"never re-points, so whether plain codex reaches the wrapped entry {path} depends on the "
+                          f"directory you run it from. {fix}")
+        return WARN, (f"In this directory plain codex runs {_shown(ahead)} first, which is xswap-codex, but it is "
+                      "found through a relative PATH entry: it names a different file in every directory, which "
+                      f"xswap never re-points, so it hides the condition above here and nowhere else. {fix}")
+    if alone:
+        return FAIL, (f"plain codex runs {_shown(ahead)} here, not xswap-codex: it is found "
+                      "through a relative PATH entry, which names a different file in every directory, so xswap "
+                      f"never re-points it and the wrapped entry {path} stays bypassed wherever it resolves. {fix}")
+    return FAIL, (f"In this directory plain codex runs {_shown(ahead)} first, not xswap-codex: it is found through "
+                  "a relative PATH entry, which names a different file in every directory, so xswap never re-points "
+                  f"it and it bypasses the wrapped entry {path} here as well. {fix}")
+
+
+def _wrapper_row(wrapper, names, reconnect, state, first, entries, drift):
+    """The wrapper row the absolute PATH entries produce; every branch reads one snapshot."""
     if state == "unconfigured":
         status = WARN if len(names) >= 2 else OK
         # xswap deliberately left the entry alone: say which condition and the manual fix, since no
@@ -117,26 +185,6 @@ def check_wrapper(settings, accounts=(), env=None):
         cause, fix = describe_drift(drift, reconnect)
         return check("wrapper", FAIL, f"the wrapper record xswap stored is unusable ({drift['reason']}): {cause}. Fix: {fix}")
     path = Path(wrapper["path"])
-    # A relative PATH element resolves from the working directory, so xswap never re-points
-    # the `codex` it finds there (codex_path_entries leaves it out of every repair). Plain
-    # `codex` in that directory still runs it, and every other check here reads the absolute
-    # entries only: reporting OK in the one state item 1 exists to surface is what a gate
-    # wired to this exit code would read as "connected". The condition lives in wrapper_state,
-    # so this row, auto-status's codexWrapped, and the use/switch notice cannot disagree on it.
-    relative_state, ahead, _ = wrapper_state(settings, env, relative=True)
-    if relative_state == "relative":
-        return check("wrapper", FAIL, f"plain codex runs {_shown(ahead)} here, not xswap-codex: it is found "
-                     "through a relative PATH entry, which names a different file in every directory, so xswap "
-                     f"never re-points it and the wrapped entry {path} stays bypassed wherever it resolves. "
-                     "Fix: make that PATH entry absolute.")
-    if ahead is not None and ahead["kind"] == "wrapper" and not os.path.isabs(ahead["path"]):
-        # The same element, resolving to xswap-codex in this directory: plain `codex` here does
-        # go through xswap, so FAIL ("not xswap-codex", "keeps using ...") would have been false.
-        # It is still the one entry xswap never re-points, and the next directory decides again.
-        return check("wrapper", WARN, f"plain codex runs {_shown(ahead)} here, which is xswap-codex, but it is found "
-                     "through a relative PATH entry: it names a different file in every directory, which xswap never "
-                     f"re-points, so whether plain codex reaches the wrapped entry {path} depends on the directory "
-                     "you run it from. Fix: make that PATH entry absolute.")
     if state == "absent":
         if drift["reason"] == "ok":
             return check("wrapper", WARN, f"{path} -> xswap-codex, but {path.parent} is not on this shell's PATH; "
@@ -160,21 +208,68 @@ def check_wrapper(settings, accounts=(), env=None):
                          f"reconnects it. Reconnect it now: {reconnect}")
         cause, fix = describe_drift(drift, reconnect)
         return check("wrapper", FAIL, f"codex entry changed outside xswap ({drift['reason']}): {cause}. Fix: {fix}")
-    if shadowing_entry(settings, env) is not None:
-        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; it shadows the wrapped entry {path} "
-                     f"on PATH until the next xswap launch, list, or use wraps it. Wrap it now: {reconnect}")
-    shadow = entry_drift(first["path"], wrapper["proxy"])
+    # state == 'shadowed'. Both of the next two rows used to ask the filesystem again --
+    # shadowing_entry re-walked PATH and re-classified the entry -- so which sentence was
+    # printed and what it claimed came from different moments.
+    shadow = entry_drift(first["path"], wrapper["proxy"], adopt=True)
+    recorded_on_path = any(entry["path"] == wrapper["path"] for entry in entries)
     if shadow["action"] == "reconnect":
+        if recorded_on_path:
+            return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; it shadows the wrapped entry {path} "
+                         f"on PATH until the next xswap launch, list, or use wraps it. Wrap it now: {reconnect}")
         return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} is not "
                      f"on this shell's PATH. Wrap it: {reconnect}")
     cause, fix = describe_drift(shadow, reconnect)
     if not cause:
-        # `ok` and `not-wrapped` have no cause sentence; reachable here only when the
-        # proxy's realpath could not be read, so the entry was classified foreign.
-        return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex; the wrapped entry {path} "
-                     f"is not on this shell's PATH. Wrap it: {reconnect}")
+        # 'ok' has no cause sentence: the entry the walk found foreign reaches xswap-codex by the
+        # time it is stat'd. A concurrent reconnect_wrapper did that, or the proxy's realpath could
+        # not be read during the walk. Either way the two snapshots disagree, and the old row
+        # resolved that by asserting both halves of a sentence it had no evidence for.
+        return check("wrapper", WARN, f"plain codex ran {shown} when doctor walked PATH and reaches xswap-codex now "
+                     f"({shadow['reason']}): the entry changed while doctor was reading it (any xswap launch, list "
+                     "or use reconnects one). Nothing was repaired. Re-run: xswap doctor")
     return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex, and xswap cannot wrap it "
                  f"({shadow['reason']}): {cause}. The wrapped entry {path} is shadowed. Fix: {fix}")
+def check_bypass(settings, env=None):
+    """XSWAP_BYPASS=1 in this environment: `codex` passes through, whatever the wrapper says.
+
+    A separate row because it is true of the shell doctor runs in, not of any entry: the
+    variable is documented as a one-command prefix (`XSWAP_BYPASS=1 codex exec resume ...`),
+    and once exported it turns the wrapper off for every `codex` in that shell while the
+    wrapper row above still reads `-> xswap-codex`. None when it is not set. `env` is the
+    environment to judge, os.environ by default; read-only like every other row.
+    """
+    if not bypass_set(env):
+        return None
+    wrapper = settings.get("wrapper") or {}
+    cause, fix = describe_drift({"action": "skip", "reason": BYPASS_REASON}, "")
+    if not (wrapper.get("path") and wrapper.get("proxy") and settings.get("enabled")):
+        # Nothing claims plain `codex` goes through xswap, so the variable changes nothing
+        # today; it still decides what happens the moment the command is connected.
+        return check("codex bypass", WARN, f"{BYPASS_VARIABLE}=1 is set here ({BYPASS_REASON}): {cause}. It takes "
+                     f"effect as soon as the codex command is connected. Fix: {fix}")
+    return check("codex bypass", FAIL, f"{BYPASS_VARIABLE}=1 is set here ({BYPASS_REASON}): {cause}, so the "
+                 f"wrapped entry {wrapper['path']} applies no selection in this shell. Fix: {fix}")
+
+
+def check_state_root(manager, env=None):
+    """Which auto.json this shell reads, when a variable rather than the default chose it.
+
+    None when CODEX_SWAP_HOME is not set: every shell then reads the same root and the
+    storage row already names it. When it is set, the same wrapped `codex` entry answers to
+    a different auto.json in any shell, launchd job or desktop app that does not export it
+    -- another account and another real Codex, or no record at all, in which case plain
+    `codex` reports the real Codex as unavailable and neither repair it prints can run
+    there (2026-09-13). Read-only, and the other root is named, never opened.
+    """
+    if not (os.environ if env is None else env).get(ROOT_VARIABLE):
+        return None
+    default = default_root()
+    if manager.root == default:
+        return check("state root", OK, f"{manager.root} ({ROOT_VARIABLE} names the default root)")
+    return check("state root", WARN, f"{manager.root}, selected by {ROOT_VARIABLE}; a shell, launchd job or app "
+                 f"without that variable reads {default} instead, so plain codex there follows whatever selection "
+                 f"that root holds, or none. Fix: export {ROOT_VARIABLE}={manager.root} wherever codex runs")
 
 
 def check_credential_store(manager):
@@ -396,8 +491,16 @@ for (const name of process.env.XSWAP_DOCTOR_ENTRIES.split(',')) {
 
 
 def check_openclaw():
-    executable = shutil.which("openclaw")
-    node = shutil.which("node")
+    try:
+        executable = absolute_which("openclaw")
+        node = absolute_which("node")
+    except RelativeEntryError as exc:
+        # This row runs both of them, with the package root it then reports. A relative PATH
+        # element resolves against the directory doctor was started in, so a repository's own
+        # `bin/node` would be the thing probed -- and reported as this machine's OpenClaw
+        # install. Same lookup the codex binary row stopped executing; doctor is read-only,
+        # so the entry is the finding.
+        return [check("openclaw", WARN, str(exc))]
     if not executable or not node:
         return [check("openclaw", WARN, "OpenClaw sync unavailable: openclaw and node required on PATH")]
     package_root = resolve_openclaw_package_root(executable)
@@ -524,6 +627,14 @@ def _real_codex_row(manager, label, record, reconnect, primary):
     real = record["realCodex"]
     consequence = ("plain codex cannot start" if primary else
                    f"xswap auto-disable would restore {record['path']} to a Codex that cannot start")
+    # A record 0.7.8 wrote can name the release relative to the working directory (it did so
+    # whenever the entry it wrapped was relative). This row read it from wherever doctor ran, so
+    # it was OK inside a repository that happened to hold that path and FAIL "is missing" -- with
+    # a recovery that cannot work -- everywhere else, for the same machine.
+    if recorded_real_codex({"wrapper": record}) is None:
+        fix = DRIFT_FIXES[RELATIVE_RECORD_REASON].format(reconnect=reconnect)
+        return check(label, FAIL, f"{real} is not an absolute path, so it names a different file in every "
+                     f"directory; {consequence}. Fix: {fix}")
     if not Path(real).is_file():
         return check(label, FAIL, f"{real} is missing; {consequence}. Recover: xswap auto-disable, "
                      f"reinstall Codex, then {reconnect}")
@@ -600,6 +711,12 @@ def run(manager):
         settings = read_settings(manager)
         settings_ok = True
         results.append(check_wrapper(settings, accounts))
+        bypass = check_bypass(settings)
+        if bypass:
+            results.append(bypass)
+        state_root = check_state_root(manager)
+        if state_root:
+            results.append(state_root)
     except LiveError as exc:
         settings, settings_ok = {}, False
         # One FAIL for the corrupted file; wrapper/auto-pool would only repeat the same cause.

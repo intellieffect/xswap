@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, atomic_json, identity, main
+import xswap_cli
 import xswap_doctor as doctor
 
 
@@ -537,6 +538,20 @@ class DoctorTests(unittest.TestCase):
             row = find(doctor.run(self.manager), "codex binary")
         self.assertEqual(row["status"], "FAIL")
 
+    def test_codex_found_through_a_relative_path_entry_fails_without_running_it(self):
+        # From a repository whose PATH starts with `bin`, shutil.which returned `bin/codex`
+        # and this row executed it and reported it as this machine's Codex -- the one entry
+        # `auto-enable --wrap-codex` refuses and the wrapper row reports as a bypass. Doctor
+        # is read-only, so the finding is the entry, not a version string from it.
+        self.register_main()
+        with patch("shutil.which", side_effect=lambda n: "bin/codex" if n == "codex" else None), \
+                patch("xswap_doctor.subprocess.run") as run:
+            row = doctor.check_codex_binary()
+        run.assert_not_called()
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("codex was found through a relative PATH entry (bin/codex)", row["detail"])
+        self.assertIn("make that PATH entry absolute", row["detail"])
+
     def test_codex_missing_exits_1_via_main(self):
         self.register_main()
         with patch.dict(os.environ, {"CODEX_SWAP_HOME": str(self.manager.root), "CODEX_HOME": str(self.source)}), \
@@ -740,6 +755,19 @@ class DoctorTests(unittest.TestCase):
             doctor.check_codex_binary()
         self.assertNotIn("OPENAI_API_KEY", captured)
         self.assertNotIn("CODEX_WORKLOAD_IDENTITY_X", captured)
+
+    def test_openclaw_found_through_a_relative_path_entry_is_reported_not_run(self):
+        # This row spawns both executables and then reports the package root it resolved from
+        # them. shutil.which joins the raw PATH element, so from a repository whose PATH starts
+        # with `bin` it returned that project's own node -- probed, and reported as this
+        # machine's OpenClaw install. The `codex binary` row stopped doing exactly this.
+        with patch("shutil.which", side_effect=lambda n: "bin/openclaw" if n == "openclaw" else "/usr/bin/node"), \
+                patch("subprocess.run") as run:
+            rows = doctor.check_openclaw()
+        run.assert_not_called()
+        self.assertEqual([r["status"] for r in rows], ["WARN"])
+        self.assertIn("openclaw was found through a relative PATH entry (bin/openclaw)", rows[0]["detail"])
+        self.assertIn("make that PATH entry absolute", rows[0]["detail"])
 
     def test_openclaw_probe_strips_secret_env(self):
         package_root = self.base / "openclaw-pkg"
@@ -956,6 +984,35 @@ class WrapperPathTests(unittest.TestCase):
         self.assertIn(f"the wrapped entry {self.bin_b / 'codex'} is not on this shell's PATH", row["detail"])
         self.assertIn(self.reconnect, row["detail"])
         self.assertNotIn("next xswap launch", row["detail"])
+
+    def test_a_concurrent_reconnect_cannot_produce_a_row_whose_clauses_are_both_false(self):
+        # The row asked the filesystem five separate times: the PATH walk, the recorded entry's
+        # drift, the relative walk, shadowing_entry's own walk, and one more entry_drift. A
+        # reconnect_wrapper -- which every xswap launch, list, usage read and alert tick runs --
+        # landing between them made doctor answer the verdict from one snapshot and the sentence
+        # from another: "plain codex runs bin-a/codex -> standalone, not xswap-codex; the wrapped
+        # entry bin-b/codex is not on this shell's PATH", with both clauses false, FAIL and exit 1
+        # on a machine that was connected by then (2026-09-13).
+        link = self.bin_a / "codex"
+        link.symlink_to(self.standalone)
+        original = xswap_cli.entry_drift
+
+        def racing_drift(path, proxy, enabled=True, adopt=False):
+            # The competitor's commit lands the moment doctor stats what it walked.
+            if link.is_symlink() and os.readlink(link) == str(self.standalone):
+                link.unlink()
+                link.symlink_to(self.proxy)
+            return original(path, proxy, enabled, adopt)
+
+        with patch("xswap_doctor.entry_drift", racing_drift), patch("xswap_cli.entry_drift", racing_drift):
+            row = self.wrapper_row(self.bin_a, self.bin_b)
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn(f"plain codex ran {link} -> {self.standalone} when doctor walked PATH", row["detail"])
+        self.assertIn("changed while doctor was reading it", row["detail"])
+        self.assertIn("Re-run: xswap doctor", row["detail"])
+        self.assertNotIn("is not on this shell's PATH", row["detail"])
+        self.assertNotIn("cannot wrap it", row["detail"])
+        self.assertEqual(os.readlink(link), str(self.proxy))  # doctor itself repaired nothing
 
     def test_wrapped_first_with_foreign_entry_later_warns_shadowed(self):
         (self.bin_a / "codex").symlink_to(self.standalone)

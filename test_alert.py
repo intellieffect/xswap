@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import xswap_alert
-from codex_swap import SwapError, parse_cache_seconds
+from codex_swap import ROOT_VARIABLE, SwapError, parse_cache_seconds
 from xswap_alert import (
     AUTO_SWITCH_MARKER,
     AlertError,
@@ -100,11 +100,36 @@ class ResolveXswapTests(unittest.TestCase):
             with self.assertRaisesRegex(AlertError, "Could not find"):
                 resolve_xswap()
 
+    def test_a_relative_which_result_is_skipped_for_the_argv0_fallback(self):
+        # From a repository whose PATH starts with `bin`, which returned `bin/xswap` and
+        # Path.resolve() froze it as <cwd>/bin/xswap -- baked into run.sh and the plist, and
+        # then run every 30 minutes for ever. launchd starts the job from `/` with its own
+        # PATH, so the one directory that made that lookup succeed is never the job's. The
+        # file this process is actually running is what the user meant to install.
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/xswap"]):
+            self.assertEqual(resolve_xswap(), str(Path("/some/dir/xswap").resolve()))
+
+    def test_a_relative_which_result_with_no_argv0_fallback_names_the_entry(self):
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/codex_swap.py"]):
+            with self.assertRaisesRegex(AlertError, r"xswap was found through a relative PATH entry \(bin/xswap\)"):
+                resolve_xswap()
+
+    def test_a_relative_which_result_never_reaches_the_generated_run_script(self):
+        # What the installed job would actually have called.
+        with patch("xswap_alert.shutil.which", return_value="bin/xswap"), \
+             patch.object(sys, "argv", ["/some/dir/xswap"]):
+            script = render_run_script(resolve_xswap(), 15, 600, "/root/alert/last.log")
+        self.assertIn("$RUNNER /some/dir/xswap list --warn 15", script)
+        self.assertNotIn("bin/xswap", script)
+
 
 class PlistTests(unittest.TestCase):
     def test_build_plist_carries_interval_paths_and_path_env(self):
         data = build_plist("/opt/homebrew/bin/xswap", every=30, script_path="/root/alert/run.sh",
-                            out_path="/root/alert/launchd.out.log", err_path="/root/alert/launchd.err.log")
+                            out_path="/root/alert/launchd.out.log", err_path="/root/alert/launchd.err.log",
+                            root="/root")
         # Round-trip through plistlib exactly like launchd would read the file.
         reloaded = plistlib.loads(plistlib.dumps(data))
         self.assertEqual(reloaded["Label"], LABEL)
@@ -117,11 +142,14 @@ class PlistTests(unittest.TestCase):
         self.assertEqual(path_entries[0], "/opt/homebrew/bin")
         for entry in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"):
             self.assertIn(entry, path_entries)
+        # The root this install was made for, not the one launchd's environment would pick.
+        self.assertEqual(reloaded["EnvironmentVariables"][ROOT_VARIABLE], "/root")
 
     def test_start_interval_rejects_would_be_sub_minute_by_construction(self):
         # `every` is validated to be >=1 minute before build_plist ever sees it (see
         # ValidationTests); build_plist itself just converts minutes to seconds.
-        data = build_plist("/x/xswap", every=1, script_path="/r/run.sh", out_path="/r/o", err_path="/r/e")
+        data = build_plist("/x/xswap", every=1, script_path="/r/run.sh", out_path="/r/o", err_path="/r/e",
+                            root="/r")
         self.assertEqual(data["StartInterval"], 60)
 
 
@@ -468,6 +496,51 @@ class InstallUninstallStatusTests(unittest.TestCase):
         self.assertIn("--warn 20", script.read_text())
         self.assertIn("--cached 300", script.read_text())
 
+    def test_install_bakes_the_state_root_the_job_must_read(self):
+        # The plist carried only PATH, so at run time the job resolved the state root the way
+        # any shell without CODEX_SWAP_HOME does: the default one. Installed from a shell that
+        # exports the variable, it read another root's pool, reserve and selection -- and with
+        # --auto-switch it moved that other root's selection every StartInterval, while the
+        # root it was installed for was never checked at all.
+        responses = [completed(returncode=1), completed(returncode=0)]
+        with patch("xswap_alert.subprocess.run", side_effect=responses), \
+             contextlib.redirect_stdout(io.StringIO()):
+            install(self.root, warn=15, every=30, cached=600, auto_switch=True)
+        with plist_path().open("rb") as fh:
+            data = plistlib.load(fh)
+        self.assertEqual(data["EnvironmentVariables"][ROOT_VARIABLE], str(self.root))
+
+    def test_install_replaces_a_running_run_sh_instead_of_rewriting_it(self):
+        # run.sh was written in place, so a tick launchd had already started read a
+        # half-written script -- /bin/sh reads a script as it runs it, and `set -u` on a
+        # truncated file is a syntax error -- and that interval silently did nothing.
+        responses = [completed(returncode=1), completed(returncode=0)]
+        with patch("xswap_alert.subprocess.run", side_effect=responses), \
+             contextlib.redirect_stdout(io.StringIO()):
+            install(self.root, warn=15, every=30, cached=600)
+        script = run_script_path(self.root)
+        running = script.open()  # what a tick already in flight is reading
+        self.addCleanup(running.close)
+        before = script.stat().st_ino
+        with patch("xswap_alert.subprocess.run", side_effect=[completed(returncode=1), completed(returncode=0)]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            install(self.root, warn=40, every=30, cached=600)
+        self.assertNotEqual(script.stat().st_ino, before)  # a new file, swapped in by rename
+        self.assertIn("--warn 40", script.read_text())
+        self.assertIn("--warn 15", running.read())  # the running copy is intact to its last line
+        self.assertEqual(oct(stat.S_IMODE(script.stat().st_mode)), oct(0o700))
+        self.assertEqual([p.name for p in alert_dir(self.root).iterdir() if p.name.startswith(".")], [])
+
+    def test_install_creates_the_plist_and_its_directory_private(self):
+        # Both were created with the ambient umask, so on a machine whose umask is 022 the job
+        # definition -- which names the state root and the wrapper path -- was world-readable.
+        responses = [completed(returncode=1), completed(returncode=0)]
+        with patch("xswap_alert.subprocess.run", side_effect=responses), \
+             contextlib.redirect_stdout(io.StringIO()):
+            install(self.root)
+        self.assertEqual(oct(stat.S_IMODE(plist_path().stat().st_mode)), oct(0o600))
+        self.assertEqual(oct(stat.S_IMODE(plist_path().parent.stat().st_mode)), oct(0o700))
+
     def test_install_when_already_loaded_boots_out_first(self):
         responses = [completed(returncode=0), completed(returncode=0), completed(returncode=0)]
         with patch("xswap_alert.subprocess.run", side_effect=responses) as run, \
@@ -648,7 +721,11 @@ class NonDarwinTests(unittest.TestCase):
         self.assertEqual(code, 2)
         run.assert_not_called()
         line = [l for l in out.getvalue().splitlines() if l.startswith("*/45 * * * * ")][0]
-        self.assertEqual(line, "*/45 * * * * /usr/local/bin/xswap auto-tick --cached 300; /usr/local/bin/xswap list --warn 15 --cached 300")
+        # The export leads, for the same reason the plist carries the variable: cron hands the
+        # job a minimal environment, and without it both steps read the default state root.
+        self.assertEqual(line, f"*/45 * * * * export {ROOT_VARIABLE}={shlex.quote(str(self.root))}; "
+                               "/usr/local/bin/xswap auto-tick --cached 300; "
+                               "/usr/local/bin/xswap list --warn 15 --cached 300")
         self.assertFalse(alert_dir(self.root).exists())
 
 

@@ -1,6 +1,7 @@
 """Install, remove, or inspect a launchd job that polls `list --warn` and posts macOS notifications."""
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -10,6 +11,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+from xswap_path import RelativeEntryError, absolute_which
 
 LABEL = "com.intellieffect.xswap.alert"
 
@@ -144,12 +147,24 @@ def resolve_xswap():
     launchd's PATH does not include /opt/homebrew/bin, so the wrapper must call an
     absolute path rather than relying on `xswap` being found again at run time.
     """
-    found = shutil.which("xswap")
+    relative = None
+    try:
+        found = absolute_which("xswap")
+    except RelativeEntryError as exc:
+        # `Path(found).resolve()` turned a relative hit into <cwd>/bin/xswap and baked that
+        # into run.sh and the plist. The job then ran, every 30 minutes for ever, whatever
+        # the directory of the one shell that installed it happened to hold -- and launchd
+        # starts it from `/`, so an `xswap` that was found relatively is not on the job's
+        # PATH at all. sys.argv[0] below is the file this process is actually running, which
+        # is the executable the user meant to install.
+        found, relative = None, exc
     if found:
         return str(Path(found).resolve())
     argv0 = Path(sys.argv[0])
     if argv0.name == "xswap":
         return str(argv0.resolve())
+    if relative is not None:
+        raise AlertError(str(relative)) from None
     raise AlertError(
         "Could not find an `xswap` executable on PATH to bake into the wrapper script. "
         "Install xswap so it is on PATH (e.g. `uv tool install .` or `pip install .`), then retry."
@@ -213,7 +228,14 @@ def render_run_script(xswap_path, warn, cached, log, auto_switch=False):
     return script
 
 
-def build_plist(xswap_path, every, script_path, out_path, err_path):
+def build_plist(xswap_path, every, script_path, out_path, err_path, root):
+    # The job carried only PATH, so at run time it resolved the state root the way any shell
+    # without CODEX_SWAP_HOME does: the default one. Installed from a shell that exports the
+    # variable, it therefore read another root's pool, reserve and selection, and with
+    # --auto-switch it moved that other root's selection every StartInterval -- while the root
+    # it was installed for was never checked at all. The root is decided at install time, so
+    # it is baked in rather than left to the environment launchd happens to hand the job.
+    from codex_swap import ROOT_VARIABLE
     xswap_dir = str(Path(xswap_path).parent)
     path_entries = [xswap_dir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
     return {
@@ -223,8 +245,28 @@ def build_plist(xswap_path, every, script_path, out_path, err_path):
         "RunAtLoad": False,
         "StandardOutPath": str(out_path),
         "StandardErrorPath": str(err_path),
-        "EnvironmentVariables": {"PATH": ":".join(path_entries)},
+        "EnvironmentVariables": {"PATH": ":".join(path_entries), ROOT_VARIABLE: str(root)},
     }
+
+
+def _write_private(path, data, mode):
+    """Render `data` into `path` at `mode`, replacing any running copy atomically.
+
+    `alert --install` wrote run.sh in place, so a tick that launchd had already started read
+    a half-written script (`set -u` on a truncated file is a syntax error, and /bin/sh reads
+    a script as it runs it): the job silently did nothing that interval. A new file swapped
+    in by rename leaves the running copy intact until it exits. The mode is set on the
+    temporary file before the rename, so the installed file is never briefly world-readable
+    at whatever the ambient umask allows -- which is how the plist was created.
+    """
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_bytes(data if isinstance(data, bytes) else data.encode())
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
 
 
 def _private_dir(path):
@@ -238,12 +280,16 @@ def _bootstrap_target():
     return f"gui/{os.getuid()}/{LABEL}"
 
 
-def _print_cron_equivalent(warn, every, cached, auto_switch=False):
+def _print_cron_equivalent(root, warn, every, cached, auto_switch=False):
     # `every` is already a validated whole number of minutes (validate_every), so this
     # matches the plist's StartInterval = every * 60 exactly, with no silent truncation.
     # One entry: `;` (not `&&`) because auto-tick exits 2/3 on no action/blocked.
+    # The root is exported first for the same reason the plist carries it: cron gives the job
+    # its own minimal environment, so without it these steps read the default state root --
+    # another root's pool, reserve and selection than the one this install was made for.
+    from codex_swap import ROOT_VARIABLE
     xswap = resolve_xswap()
-    steps = []
+    steps = [f"export {ROOT_VARIABLE}={shlex.quote(str(root))}"]
     if auto_switch:
         steps.append(f"{xswap} auto-tick --cached {format_number(cached)}")
     steps.append(f"{xswap} list --warn {format_number(warn)} --cached {format_number(cached)}")
@@ -258,14 +304,14 @@ def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=F
     cached = validate_cached(cached)
 
     if sys.platform != "darwin":
-        return _print_cron_equivalent(warn, every, cached, auto_switch)
+        return _print_cron_equivalent(root, warn, every, cached, auto_switch)
 
     xswap_path = resolve_xswap()
     a_dir = alert_dir(root)
     script_path = run_script_path(root)
     log = log_path(root)
     plist = plist_path()
-    plist_data = build_plist(xswap_path, every, script_path, a_dir / "launchd.out.log", a_dir / "launchd.err.log")
+    plist_data = build_plist(xswap_path, every, script_path, a_dir / "launchd.out.log", a_dir / "launchd.err.log", root)
 
     if auto_switch and not _auto_enabled(root):
         print("Note: automatic switching is not enabled, so auto-tick reports blocked until: "
@@ -280,11 +326,10 @@ def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=F
         return 0
 
     _private_dir(a_dir)
-    script_path.write_text(render_run_script(xswap_path, warn, cached, log, auto_switch=auto_switch))
-    script_path.chmod(0o700)
+    _write_private(script_path, render_run_script(xswap_path, warn, cached, log, auto_switch=auto_switch), 0o700)
 
-    plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_bytes(plistlib.dumps(plist_data))
+    plist.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _write_private(plist, plistlib.dumps(plist_data), 0o600)
 
     target = _bootstrap_target()
     already_loaded = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
