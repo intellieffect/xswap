@@ -614,7 +614,7 @@ class Manager:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap_cli import dependency_entry, read_settings, reconnect_wrapper, wrapped_target
+        from xswap_cli import dependency_entry, read_settings, reconnect_wrapper, recorded_real_codex, wrapped_target
         reconnect_wrapper(self)
         settings = read_settings(self)
         wrapper = settings.get("wrapper")
@@ -624,10 +624,17 @@ class Manager:
         # written before this fix spells that loop.
         if wrapper and (Path(executable).resolve() == Path(wrapper["proxy"]).resolve()
                         or wrapped_target(executable, settings)):
-            real = wrapper["realCodex"]
-            if not Path(real).is_file() or wrapped_target(real, settings):
+            recorded = wrapper["realCodex"]
+            # recorded_real_codex refuses a value that is not absolute: 0.7.8 wrote one whenever
+            # the entry it wrapped was relative, and resolving it here execs whatever `codex` the
+            # working directory holds -- with a pool account's CODEX_HOME.
+            real = recorded_real_codex(settings)
+            if not real or not Path(real).is_file() or wrapped_target(real, settings):
                 names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
-                raise SwapError(f"Original Codex binary is unavailable ({real} is missing or is xswap-codex itself). "
+                where = (f"{recorded} is not an absolute path" if real is None and recorded
+                         else f"{recorded} is missing or is xswap-codex itself" if recorded
+                         else "auto.json records no realCodex")
+                raise SwapError(f"Original Codex binary is unavailable ({where}). "
                                 f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
             return real
         # shutil.which joins the raw PATH element, so a relative one (a project's `bin`, the empty
@@ -637,8 +644,8 @@ class Manager:
         # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
         # refuses and doctor reports as bypassed, so run the recorded release instead of it.
         if not os.path.isabs(executable):
-            real = (wrapper or {}).get("realCodex")
-            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+            real = recorded_real_codex(settings)
+            if real and Path(real).is_file():
                 return real
             raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
                             "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
@@ -648,8 +655,8 @@ class Manager:
         # task). Exec'ing it hands a project-controlled file a pool account's CODEX_HOME. xswap
         # never adopts such an entry (DEPENDENCY_REASON), so run the recorded release instead.
         if dependency_entry(executable, os.path.realpath(executable)):
-            real = (wrapper or {}).get("realCodex")
-            if isinstance(real, str) and os.path.isabs(real) and Path(real).is_file():
+            real = recorded_real_codex(settings)
+            if real and Path(real).is_file():
                 return real
         return executable
 

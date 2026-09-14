@@ -563,6 +563,23 @@ def wrapped_target(path, settings):
     return real in recorded_proxies(settings) or os.path.basename(real) == PROXY_NAME
 
 
+def recorded_real_codex(settings):
+    """The real Codex a wrapper record names, or None when that value cannot be used.
+
+    None when nothing is recorded and when the value is not absolute. 0.7.8 stored
+    `link_target_path(...)`, which is relative exactly when the entry it wrapped was
+    (RELATIVE_RECORD_REASON), and nothing migrates either. Such a value names a different
+    file in every working directory: inside a repository that happens to hold it, the
+    xswap-codex entry point exec'd that file with a pool account's CODEX_HOME and doctor
+    reported it as the real Codex, while from every other directory the same record read
+    as "missing" and the recovery it printed (reinstall Codex) could not help. Whether the
+    file exists is the caller's test -- each has its own words for a recorded value that
+    is gone. `settings` is auto.json, or {'wrapper': record} for a `wrappers` entry.
+    """
+    real = (settings.get('wrapper') or {}).get('realCodex')
+    return real if isinstance(real, str) and os.path.isabs(real) else None
+
+
 # The `codex` a project installed for itself. npm writes `node_modules/.bin/codex` for a
 # dependency on @openai/codex, and such a directory reaches PATH absolutely (direnv, a
 # Makefile, an IDE task). The shadow repair asked only for a user-owned symlink at an
@@ -1140,9 +1157,16 @@ def missing_codex_message(real, settings):
     """One explicit stderr line for a wrapped codex entry with no real Codex behind it
     (a purged runtime home that held the release, or a lost auto.json record)."""
     names = ','.join(settings.get('accounts') or []) or 'NAME,NAME'
+    reconnect = f'xswap auto-enable --accounts {names} --wrap-codex'
+    if real and not os.path.isabs(real):
+        # Reinstalling Codex cannot fix this one: the record, not the installation, is what
+        # cannot be resolved, and `auto-disable` leaves the entry it names untouched.
+        return (f'xswap: the codex command is connected to xswap, but the real Codex auto.json records ({real}) is '
+                'not an absolute path, so it names a different file in every directory. Run: xswap doctor. '
+                f'Recover: {DRIFT_FIXES[RELATIVE_RECORD_REASON].format(reconnect=reconnect)}')
     where = f'{real} is missing' if real else 'auto.json records no realCodex'
     return (f'xswap: the codex command is connected to xswap, but the real Codex executable is unavailable ({where}). '
-            f'Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex')
+            f'Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then {reconnect}')
 
 
 def codex_main():
@@ -1150,9 +1174,10 @@ def codex_main():
     try:
         manager = Manager()
         settings = read_settings(manager)
-        real = (settings.get('wrapper') or {}).get('realCodex')
+        recorded = (settings.get('wrapper') or {}).get('realCodex')
+        real = recorded_real_codex(settings)
         if not real or not Path(real).is_file():
-            print(missing_codex_message(real, settings), file=sys.stderr)
+            print(missing_codex_message(recorded, settings), file=sys.stderr)
             return 1
         args = sys.argv[1:]
         bypass = os.environ.get('XSWAP_BYPASS') == '1'

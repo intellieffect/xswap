@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, shadowing_entry, status_data, wrapper_drift, wrapper_state
+from xswap_cli import DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, describe_bridge_hint, describe_drift, entry_drift, link_target_path, read_settings, recorded_real_codex, shadowing_entry, status_data, wrapper_drift, wrapper_state
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap_relocate import codex_homes_inside_root, inside_root
 
@@ -524,6 +524,14 @@ def _real_codex_row(manager, label, record, reconnect, primary):
     real = record["realCodex"]
     consequence = ("plain codex cannot start" if primary else
                    f"xswap auto-disable would restore {record['path']} to a Codex that cannot start")
+    # A record 0.7.8 wrote can name the release relative to the working directory (it did so
+    # whenever the entry it wrapped was relative). This row read it from wherever doctor ran, so
+    # it was OK inside a repository that happened to hold that path and FAIL "is missing" -- with
+    # a recovery that cannot work -- everywhere else, for the same machine.
+    if recorded_real_codex({"wrapper": record}) is None:
+        fix = DRIFT_FIXES[RELATIVE_RECORD_REASON].format(reconnect=reconnect)
+        return check(label, FAIL, f"{real} is not an absolute path, so it names a different file in every "
+                     f"directory; {consequence}. Fix: {fix}")
     if not Path(real).is_file():
         return check(label, FAIL, f"{real} is missing; {consequence}. Recover: xswap auto-disable, "
                      f"reinstall Codex, then {reconnect}")

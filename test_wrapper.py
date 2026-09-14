@@ -676,6 +676,64 @@ class DependencyEntryTests(WrapperFixture):
         self.assertEqual([w['path'] for w in settings['wrappers']], [str(cli)])
 
 
+class RecordedRealCodexTests(WrapperFixture):
+    """A `realCodex` that is not absolute is never resolved against the working directory."""
+
+    def legacy_record(self):
+        """The 0.7.8 shape: `str(shutil.which('codex'))` verbatim, so both values are relative.
+
+        The project holds that path, which is the state in which every surface reported OK
+        and the entry point exec'd the project's file. Returns (project shim, proxy, cli).
+        """
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        stored = read_settings(self.manager)
+        stored['wrapper'].update(path='bin/codex', originalTarget='bin/codex', realCodex='bin/codex')
+        atomic_json(self.manager.root / 'auto.json', stored)
+        project = self.base / 'project'
+        (project / 'bin').mkdir(parents=True)
+        shim = project / 'bin' / 'codex'
+        shim.write_text('fixture')
+        shim.chmod(0o700)
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        return shim, proxy, cli
+
+    def test_codex_main_refuses_a_relative_real_codex_instead_of_execing_it(self):
+        # `codex exec hello` inside that repository exec'd the project's own file -- with the
+        # pool account's CODEX_HOME -- because the recorded value happened to resolve there,
+        # and printed "bin/codex is missing" from every other directory, offering a reinstall
+        # that cannot help. The record, not the Codex installation, is what needs repair.
+        shim, proxy, cli = self.legacy_record()
+        with patch.dict(os.environ, {'CODEX_SWAP_HOME': str(self.manager.root), 'CODEX_HOME': str(self.source)}), \
+                patch('sys.argv', ['xswap-codex', 'exec', 'hello']), patch('os.execve') as execve, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(codex_main(), 1)
+        execve.assert_not_called()
+        self.assertTrue(shim.is_file())  # it was there; that is exactly why it used to run
+        self.assertIn('the real Codex auto.json records (bin/codex) is not an absolute path', err.getvalue())
+        self.assertIn('point the codex entry that still runs xswap-codex back at the real Codex by hand',
+                      err.getvalue())
+        self.assertNotIn('reinstall Codex', err.getvalue())
+
+    def test_manager_codex_refuses_it_too_and_doctor_says_so_from_the_directory_that_holds_it(self):
+        shim, proxy, cli = self.legacy_record()
+        settings = read_settings(self.manager)
+        with patch.dict(os.environ, {'PATH': str(cli.parent)}), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SwapError) as refused:
+            self.manager.codex()
+        self.assertIn('bin/codex is not an absolute path', str(refused.exception))
+        row = [r for r in doctor.check_real_codex(self.manager, settings, self.manager.read()['accounts'])
+               if r['name'] == 'real codex'][0]
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn('bin/codex is not an absolute path, so it names a different file in every directory',
+                      row['detail'])
+        self.assertIn('plain codex cannot start', row['detail'])
+        self.assertIn('xswap auto-enable --accounts main,second --wrap-codex', row['detail'])
+        self.assertTrue(shim.is_file())  # read-only: the project's file is neither run nor touched
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 
