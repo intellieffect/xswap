@@ -632,10 +632,25 @@ def bypass_set(env=None):
     return (os.environ if env is None else env).get(BYPASS_VARIABLE) == '1'
 
 
+# A global install writes its own `node_modules`: npm and pnpm put it under `<prefix>/lib`,
+# volta and the version managers under their own store. Those are this machine's Codex, and
+# adopting one is the 2026-09-10 repair working -- only a tree a project installed for itself
+# must be left alone.
+GLOBAL_MODULE_PARENTS = ('lib', 'pnpm', '.volta', '.nvm', '.fnm', '.asdf', '.bun')
+
+
+def _project_tree(path):
+    """True when `path` runs out of a dependency tree a project installed for itself."""
+    parts = Path(path).parts
+    for index, part in enumerate(parts):
+        if part == 'node_modules' and not set(parts[:index]) & set(GLOBAL_MODULE_PARENTS):
+            return True
+    return False
+
+
 def dependency_entry(path, real=None):
     """True when the entry, or the executable behind it, sits in a project's dependency tree."""
-    parts = set(Path(path).parts) | set(Path(real).parts if real else ())
-    return 'node_modules' in parts
+    return _project_tree(path) or bool(real and _project_tree(real))
 
 
 DRIFT_CAUSES = {
@@ -1114,7 +1129,12 @@ def enable(manager, accounts, wrap=False):
     # every other shell, launchd job and desktop app reads its own. Said here because this is
     # where the choice is made; doctor's state root row repeats it afterwards.
     from codex_swap import ROOT_VARIABLE, default_root
-    if os.environ.get(ROOT_VARIABLE) and settings.get('wrapper') and manager.root != default_root():
+    chosen = os.environ.get(ROOT_VARIABLE)
+    # Only when the variable is what put the record here: a caller that passed its own root
+    # (a test, an embedding) never read the variable, so naming it would be a false alarm --
+    # and it made `python -m unittest` fail in any shell that exports CODEX_SWAP_HOME.
+    selected = chosen and Path(chosen).expanduser().resolve() == manager.root
+    if selected and settings.get('wrapper') and manager.root != default_root():
         print(f'xswap: this shell\'s {ROOT_VARIABLE} put that record in {manager.root}; a shell, launchd job or '
               f'app without {ROOT_VARIABLE} reads {default_root()} instead and runs whatever selection it holds. '
               f'Export {ROOT_VARIABLE}={manager.root} wherever codex runs.', file=sys.stderr)

@@ -32,7 +32,7 @@ import xswap_doctor as doctor
 from codex_swap import Manager, SwapError, __version__, atomic_json
 from codex_swap import main as codex_swap_main
 from xswap_cli import (RELATIVE_ENTRY_REASON, RELATIVE_RECORD_REASON, STALE_RUN_SECONDS, codex_main,
-                       codex_path_entries, disable, enable,
+                       codex_path_entries, dependency_entry, disable, enable,
                        launch_cli, link_target_path, read_settings, reconnect_wrapper, shadowing_entry, show_status,
                        status_data, wrapper_drift, wrapper_state)
 from xswap_live import LiveError
@@ -768,6 +768,51 @@ class DependencyEntryTests(WrapperFixture):
         settings = read_settings(self.manager)
         self.assertEqual(settings['wrapper']['path'], str(ahead / 'codex'))
         self.assertEqual([w['path'] for w in settings['wrappers']], [str(cli)])
+
+    def global_npm_shim(self):
+        """npm's shape for `npm install -g @openai/codex`: the prefix's own lib/node_modules."""
+        prefix = self.base / 'homebrew'
+        release = prefix / 'lib' / 'node_modules' / '@openai' / 'codex' / 'bin' / 'codex.js'
+        release.parent.mkdir(parents=True)
+        release.write_text('fixture')
+        release.chmod(0o700)
+        (prefix / 'bin').mkdir()
+        entry = prefix / 'bin' / 'codex'
+        entry.symlink_to(os.path.relpath(release, prefix / 'bin'))
+        return entry, release
+
+    def test_a_globally_installed_codex_is_this_machines_install_not_a_project_tree(self):
+        # `npm install -g @openai/codex` writes <prefix>/lib/node_modules/@openai/codex, so a
+        # rule that reads any node_modules component as "a project installed this" refuses the
+        # documented global install: the entry it writes ahead of the wrapped one would never
+        # be adopted, doctor would FAIL forever on a healthy machine, and the fix that row
+        # states -- take that directory off PATH -- would take the user's Codex with it.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        entry, release = self.global_npm_shim()
+        path = os.pathsep.join([str(entry.parent), str(cli.parent)])
+        self.assertFalse(dependency_entry(str(entry), str(release)))
+        self.assertEqual(shadowing_entry(read_settings(self.manager), {'PATH': path}),
+                         (str(entry), os.path.relpath(release, entry.parent)))
+        joined = link_target_path(entry, os.path.relpath(release, entry.parent))
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()):
+            # recorded as the link spells it, the way every other adopted entry is
+            self.assertEqual(reconnect_wrapper(self.manager), joined)
+        self.assertEqual(os.readlink(entry), str(proxy))
+        self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(entry))
+        self.assertEqual(Path(read_settings(self.manager)['wrapper']['realCodex']).resolve(), release.resolve())
+        row = doctor.check_wrapper(read_settings(self.manager), self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'OK')
+
+    def test_a_per_tool_global_store_is_not_a_project_tree_either(self):
+        # pnpm and volta keep their own node_modules under a store directory rather than under
+        # `lib`; those are installs of Codex itself, not a project's dependency.
+        for parts in (('.volta', 'tools', 'image', 'packages', 'codex', 'node_modules', '@openai', 'codex', 'bin'),
+                      ('Library', 'pnpm', 'global', '5', 'node_modules', '@openai', 'codex', 'bin')):
+            with self.subTest(store=parts[0]):
+                self.assertFalse(dependency_entry(str(Path(self.base, *parts, 'codex.js'))))
+        # and the project shape is still refused, from any working directory
+        self.assertTrue(dependency_entry(str(self.base / 'repo' / 'node_modules' / '.bin' / 'codex')))
 
 
 class DisableRecordTests(WrapperFixture):
