@@ -13,14 +13,17 @@ a test pins a PATH without patching the process environment.
 """
 import contextlib
 import errno
+import fcntl
 import io
 import json
 import os
 import shutil
 import stat
 import sys
+import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import ANY, patch
 
 import test_cli
@@ -308,6 +311,49 @@ class ReconnectWrapperTests(WrapperFixture):
         self.assertIn('xswap auto-enable --accounts main,second --wrap-codex', str(raised.exception))
 
 
+class ReconnectLockTests(WrapperFixture):
+    """reconnect_wrapper never waits for the registry lock."""
+
+    def test_a_held_registry_lock_is_one_more_silent_skip(self):
+        # The lock is held across whole OpenClaw subprocesses (`sync-openclaw` waits up to 90s
+        # for the SDK bridge and 45s for the Gateway reload), and reconnect_wrapper runs on
+        # every launch, list, usage read and selection: it blocked all of them for the length
+        # of a sync, and inside the alert job -- whose steps run under `timeout 120` -- the job
+        # was SIGTERMed before it ever reported. The repair is idempotent, so it waits for the
+        # next call instead.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        self.repoint(cli, updated)  # a Codex update this call would normally undo
+        fd = os.open(self.manager.root / '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        result, failure = [], []
+
+        def call():
+            try:
+                result.append(reconnect_wrapper(self.manager))
+            except BaseException as error:  # pragma: no cover - reported by the assertions
+                failure.append(error)
+
+        worker = threading.Thread(target=call, daemon=True)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            worker.start()
+            worker.join(timeout=10)
+            waited = worker.is_alive()
+            fcntl.flock(fd, fcntl.LOCK_UN)  # release before asserting, so no thread is left stuck
+            worker.join(timeout=10)
+        self.assertEqual(failure, [])
+        self.assertFalse(waited, 'reconnect_wrapper waited for the lock instead of skipping')
+        self.assertEqual(result, [None])
+        self.assertEqual(err.getvalue(), '')  # every skip is silent here
+        self.assertEqual(os.readlink(cli), str(updated))  # nothing was repaired while it was held
+        # The next call, with the lock free, does the repair the skipped one left.
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(reconnect_wrapper(self.manager), str(updated))
+        self.assertEqual(os.readlink(cli), str(proxy))
+        self.assertIn('reconnected it to xswap-codex', err.getvalue())
+
+
 class LaunchExitReconnectTests(WrapperFixture):
     """launch_cli's finally block: the in-session updater (ctrl+u) is undone before the next plain codex."""
 
@@ -361,6 +407,36 @@ class LaunchExitReconnectTests(WrapperFixture):
         self.assertEqual(code, 7)
         self.assertEqual(os.readlink(cli), str(proxy))
         self.assertIn('reconnected', err)
+
+    def test_a_second_launch_creating_the_same_tooling_link_is_not_a_failure(self):
+        # Concurrent launches share auto/cli-codex and neither holds the registry lock while it
+        # links the tooling, so the other one can create the same link between the "does it
+        # exist" test and the symlink call (70 of 150 probe launches). The link it created is
+        # the link this launch wanted -- but the FileExistsError came out of launch_cli, and
+        # codex_main's OSError branch tells the user to run `xswap auto-disable`: tearing the
+        # wrapper down over a race that was won.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        real_symlink_to = Path.symlink_to
+        raced = []
+
+        def racing_symlink_to(self_path, target, target_is_directory=False):
+            if not raced:
+                raced.append(self_path)
+                # The competing launch wins the gap between the test and this call.
+                real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+            return real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+
+        async def serve(pool, real_path, args, env, status_path, socket_path):
+            return 0
+
+        with patch.object(Path, 'symlink_to', racing_symlink_to):
+            code, err = self.launch(proxy, cli, serve)
+        self.assertEqual(code, 0)
+        self.assertNotIn('Traceback', err)
+        linked = self.manager.root / 'auto' / 'cli-codex' / 'config.toml'
+        self.assertEqual(raced[0], linked)  # the race really happened on the first link
+        self.assertEqual(os.readlink(linked), str(self.source / 'config.toml'))
 
     def test_launch_sweeps_stale_records_before_its_own_run_record(self):
         real, updated, proxy, cli = self.wrapped_fixture()

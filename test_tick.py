@@ -335,6 +335,53 @@ class AutoTickCommandTests(unittest.TestCase):
         self.assertEqual(self.manager.read()["active"], "third")
         broadcast.assert_not_called()
 
+    def test_a_selection_that_lands_after_the_guard_is_not_overwritten(self):
+        # The "a manual use landed, it wins" guard read the selection and `use` took the lock
+        # afterwards, so a selection committed in between -- a manual `xswap use`, or a second
+        # tick, which this job's own overrun makes ordinary -- was overwritten by a decision
+        # taken about the account it had already replaced. Compare and set under one lock.
+        import xswap_tick
+        self.add("second")
+        self.add("third")
+        self.enable("main,second,third")
+        fake = self.fake_read_limits({"main": dual_window_raw(remaining7d=5),
+                                      "second": dual_window_raw(remaining7d=80),
+                                      "third": dual_window_raw(remaining7d=70)})
+        original_locked, armed, landed = Manager.locked, [], []
+        real_decide = xswap_tick.decide
+
+        def arming_decide(*args, **kwargs):
+            armed.append(True)  # the quota fetch is over; the switch step is next
+            return real_decide(*args, **kwargs)
+
+        @contextlib.contextmanager
+        def racing_locked(manager):
+            # The competitor's write is already committed when this call gets the lock: the
+            # first acquisition after the decision must find a selection nobody re-read.
+            with original_locked(manager):
+                if armed and not landed:
+                    landed.append(True)
+                    data = manager.read()
+                    data["active"] = "third"
+                    atomic_json(manager.registry, data)
+                yield
+
+        out = io.StringIO()
+        with patch("codex_swap.Manager", return_value=self.manager), \
+             patch("codex_swap.read_limits", side_effect=fake), \
+             patch.object(Manager, "codex", return_value="codex"), \
+             patch("xswap_tick.decide", arming_decide), \
+             patch.object(Manager, "locked", racing_locked), \
+             patch("xswap_switch.switch_running", return_value=REPORT) as broadcast, \
+             contextlib.redirect_stdout(out):
+            code = main(["auto-tick"])
+        self.assertEqual(landed, [True])  # the injection really happened
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue().strip(),
+                         "no-action: the selection changed from main while quota was being read; nothing changed")
+        self.assertEqual(self.manager.read()["active"], "third")
+        broadcast.assert_not_called()
+
     def test_use_best_is_unchanged_by_the_refactor(self):
         self.add("second")
         fake = self.fake_read_limits({"main": dual_window_raw(remaining5h=40, remaining7d=40), "second": dual_window_raw(remaining5h=90, remaining7d=90)})

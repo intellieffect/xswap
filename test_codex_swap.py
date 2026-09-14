@@ -817,6 +817,45 @@ class AccountTests(unittest.TestCase):
             os.close(fd)
         self.assertNotIn("second", self.manager.read()["accounts"])
 
+    def test_use_if_active_writes_nothing_once_another_selection_landed(self):
+        # auto-tick reads quota over the network, then switched if the selection still matched
+        # what it had decided about -- as two separate lock holds, so a selection committed
+        # between them was overwritten by a decision taken about the account it had replaced.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        third = self.manager.prepare("third")
+        atomic_json(third / "auth.json", self.auth)
+        self.assertEqual(self.manager.read()["active"], "main")
+        self.assertEqual(self.manager.use_if_active("main", "second"), second)
+        self.assertEqual(self.manager.read()["active"], "second")
+        # "main" is no longer the selection, so the pinned write does nothing and says so.
+        self.assertIs(self.manager.use_if_active("main", "third"), False)
+        self.assertEqual(self.manager.read()["active"], "second")
+
+    def test_a_fetch_that_finishes_after_a_removal_does_not_resurrect_the_account(self):
+        # A usage fetch takes seconds and `remove` drops the account's cache and auth-state
+        # entries under the same lock, so a fetch already in flight wrote them back afterwards:
+        # both files kept naming an account that no longer exists -- with its identity label,
+        # which is an email -- and a later `xswap add` under the same name inherited the
+        # removed login's rejection.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        self.manager.remember_usage("second", [], 1000.0, "second@example.test")
+        self.manager.remember_auth_failure("second", "second@example.test")
+        self.manager.remove("second")
+        self.assertNotIn("second", json.loads(self.manager.usage_cache_path().read_text()))
+        self.assertNotIn("second", json.loads(self.manager.auth_state_path().read_text()))
+        # The in-flight fetch lands now, with the label it read before the removal.
+        self.manager.remember_usage("second", [], 2000.0, "second@example.test")
+        self.manager.remember_auth_failure("second", "second@example.test")
+        self.assertNotIn("second", json.loads(self.manager.usage_cache_path().read_text()))
+        self.assertNotIn("second", json.loads(self.manager.auth_state_path().read_text()))
+        # A registered account is still written, so nothing else lost its cache.
+        self.manager.remember_usage("main", [], 3000.0, "main@example.test")
+        self.assertIn("main", json.loads(self.manager.usage_cache_path().read_text()))
+
     def test_remove_refuses_an_account_a_running_auto_session_can_still_switch_to(self):
         # Only `account` was read, so the pool a running bridge records in the same status.json
         # counted for nothing: `remove --purge` deleted the login that session would move to
@@ -1618,6 +1657,41 @@ class AutoLauncherTests(unittest.TestCase):
         run.assert_not_called()  # no window was opened on it
         self.assertIn('xswap-proxy was found through a relative PATH entry (bin/xswap-proxy)', str(refused.exception))
         self.assertFalse((self.manager.root / 'auto').exists())
+
+    def test_a_second_launch_creating_the_same_tooling_link_is_not_a_failure(self):
+        # Two auto launches share this runtime home and neither holds the registry lock while
+        # it links the tooling, so the other one can create the same link between the "does it
+        # exist" test and the symlink call (70 of 150 probe launches). The link it created is
+        # the link this launch wanted -- but the FileExistsError came out of the launcher, and
+        # through codex_main that reads as "could not start automatic Codex CLI; ... run
+        # xswap auto-disable": tearing the wrapper down over a race that was won.
+        self.manager.register('main')
+        self.manager.prepare('second')
+        app = self.base / 'ChatGPT.app'
+        app.mkdir()
+        executable = self.base / 'codex'
+        executable.touch()
+        proxy = self.base / 'xswap-proxy'
+        proxy.touch()
+        real_symlink_to = Path.symlink_to
+        raced = []
+
+        def racing_symlink_to(self_path, target, target_is_directory=False):
+            if not raced:
+                raced.append(self_path)
+                # The competing launch wins the gap between the test and this call.
+                real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+            return real_symlink_to(self_path, target, target_is_directory=target_is_directory)
+
+        with patch('codex_swap.sys.platform', 'darwin'), \
+             patch('codex_swap.shutil.which', side_effect=lambda name: str(proxy if name == 'xswap-proxy' else executable)), \
+             patch.object(Path, 'symlink_to', racing_symlink_to), \
+             patch('codex_swap.subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.manager.launch_auto_app('main,second', str(app))
+        linked = self.manager.root / 'auto' / 'codex' / 'config.toml'
+        self.assertEqual(raced[0], linked)  # the race really happened on the first link
+        self.assertEqual(os.readlink(linked), str(self.source / 'config.toml'))
 
     def test_auto_dry_run_does_not_create_runtime(self):
         self.manager.register('main')

@@ -360,6 +360,11 @@ def default_root():
     return (Path.home() / ".local/share/codex-swap").expanduser().resolve()
 
 
+# "no expected selection was pinned" for Manager._use. A sentinel rather than None, because
+# None is a real selection state (no account selected) a caller may legitimately pin against.
+_UNSET = object()
+
+
 class Manager:
     def __init__(self, root=None, source=None, create=True):
         self.root = Path(root or os.environ.get(ROOT_VARIABLE, default_root())).expanduser().resolve()
@@ -379,6 +384,29 @@ class Manager:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
+        finally:
+            os.close(fd)
+
+    @contextlib.contextmanager
+    def try_locked(self):
+        """locked(), but yields False instead of waiting when someone else holds the lock.
+
+        This lock is held across whole OpenClaw subprocesses (`sync-openclaw` waits up to
+        90s for the SDK bridge and 45s for the Gateway reload), and it is taken on every
+        launch, list, usage read and selection. A repair that only has to happen eventually
+        must not sit behind that: `reconnect_wrapper` blocked every one of those commands
+        for the length of a sync, and inside the alert job -- which runs each step under
+        `timeout 120` -- the job was SIGTERMed before it ever reported. The work is
+        idempotent and already silent on every skip, so the next launch does it instead.
+        """
+        fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
         finally:
             os.close(fd)
 
@@ -505,7 +533,26 @@ class Manager:
         return home
 
     def use(self, name):
+        return self._use(name)
+
+    def use_if_active(self, expected, name):
+        """use(name), but only while `expected` is still the selected account; else False.
+
+        `auto-tick` reads quota over the network (seconds), then switched if the selection
+        still matched what it had decided about. That check and the write were two separate
+        lock holds, so an `xswap use` -- or a second tick from the alert job, which the job's
+        own overrun makes ordinary -- could land between them and be overwritten by a decision
+        taken about the account it replaced. Compare and set under one lock instead; False is
+        the caller's existing "a manual use landed, it wins" outcome.
+        """
+        return self._use(name, expected=expected)
+
+    def _use(self, name, expected=_UNSET):
         with self.locked():
+            # First thing inside the lock: a caller pinning the selection must not raise on the
+            # new account's state (disabled, signed out) when the answer is "someone else chose".
+            if expected is not _UNSET and self.read()["active"] != expected:
+                return False
             name, home = self.account(name)
             self.require_enabled(name)
             check_file_store(home)
@@ -767,9 +814,26 @@ class Manager:
         if isinstance(data, dict) and data.pop(name, None) is not None:
             atomic_json(self.usage_cache_path(), data)
 
+    def _still_registered(self, name):
+        """Whether NAME is still in the registry. Caller holds the lock.
+
+        A usage fetch takes seconds, and `remove` drops the account's cache and auth-state
+        entries under the same lock; a fetch already in flight then wrote them back after the
+        removal, so `usage-cache.json` and `auth-state.json` kept naming an account that no
+        longer exists -- with its identity label, which is an email -- and a later `xswap add`
+        under the same name inherited the removed login's rejection. An unreadable registry is
+        someone else's error to report: keep the write rather than drop data over it.
+        """
+        try:
+            return name in self.read()["accounts"]
+        except SwapError:
+            return True
+
     def remember_usage(self, name, buckets, fetched_at, label, reset_credits=None):
         """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
         with self.locked():
+            if not self._still_registered(name):
+                return
             try:
                 data = json.loads(self.usage_cache_path().read_text())
                 if not isinstance(data, dict):
@@ -811,6 +875,8 @@ class Manager:
         tokens. Always 0600 through atomic_json.
         """
         with self.locked():
+            if not self._still_registered(name):
+                return
             data = self._read_auth_state()
             current = data.get(name)
             if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
@@ -1161,7 +1227,14 @@ class Manager:
         for entry in ("config.toml", "AGENTS.md", "skills", "rules"):
             src, dst = source / entry, home / entry
             if src.exists() and not dst.exists() and not dst.is_symlink():
-                dst.symlink_to(src, target_is_directory=src.is_dir())
+                # Two launches share this runtime home and neither holds the registry lock here,
+                # so the other one can create the same link between the test and the call. The
+                # link it created is the link this one was about to create, so the loser has
+                # nothing to do -- but the FileExistsError reached codex_main, which reports
+                # every OSError as "could not start automatic Codex CLI" and advises
+                # `xswap auto-disable`, i.e. tearing the wrapper down over a won race.
+                with contextlib.suppress(FileExistsError):
+                    dst.symlink_to(src, target_is_directory=src.is_dir())
         ensure_plugins(home, source)
         link_packages(self, home)
         result = subprocess.run(command, env=self.env(home), capture_output=True)

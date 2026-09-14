@@ -120,14 +120,16 @@ def run_tick(manager, dry_run=False, max_age=None, json_output=False):
         if dry_run:
             outcome["reason"] = "would-switch"
             lines.append("would-switch: " + outcome["message"])
-        elif manager.read()["active"] != current:
-            # A manual `xswap use` landed while quota was being read; it wins.
+        # A manual `xswap use` landed while quota was being read; it wins. Read and write are
+        # one compare-and-set under the registry lock: as two separate lock holds, a selection
+        # that arrived between them was overwritten by a decision taken about the account it
+        # had already replaced -- and quota reads take seconds, so the window is the whole fetch.
+        elif manager.use_if_active(current, target) is False:
             outcome.update(decision="no-action", reason="selection-changed", target=None,
                            message=f"no-action: the selection changed from {current} while quota was being read; nothing changed")
             lines.append(outcome["message"])
         else:
             from xswap_switch import switch_running
-            manager.use(target)
             report = switch_running(manager, target)
             lines.append("switched: " + outcome["message"])
             lines.append(describe_switch_report(report, target))

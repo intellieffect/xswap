@@ -475,7 +475,14 @@ def launch_cli(manager, accounts, args, dry=False):
         for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
             src, dst = source / entry, home / entry
             if src.exists() and not dst.exists() and not dst.is_symlink():
-                dst.symlink_to(src, target_is_directory=src.is_dir())
+                # Concurrent auto launches share this runtime home and neither holds the
+                # registry lock here, so the other one can create the same link between the
+                # test and the call (70 of 150 probe launches). The link it created is the one
+                # this launch wanted, so the loser has nothing to do -- but the FileExistsError
+                # reached codex_main, whose OSError branch tells the user to run
+                # `xswap auto-disable`: tearing the wrapper down over a race that was won.
+                with contextlib.suppress(FileExistsError):
+                    dst.symlink_to(src, target_is_directory=src.is_dir())
         from xswap_plugins import ensure_plugins
         ensure_plugins(home, source)
         # An in-session Codex update installs under $CODEX_HOME/packages; point that at
@@ -993,11 +1000,16 @@ def reconnect_wrapper(manager):
     one kept in `wrappers` for auto-disable (0.8.0, after the 2026-09-10 bypass).
     Returns the real Codex path after a change, or None when nothing was changed.
     Every skip stays silent here (this runs inside list/usage and so on every
-    alert-job tick); wrapper_drift names the reason for doctor and use/switch.
+    alert-job tick), a busy registry lock included; wrapper_drift names the
+    reason for doctor and use/switch.
     `xswap auto-disable` restores every record.
     """
     from xswap_relocate import canonical_codex_path, inside_root
-    with manager.locked():
+    # Non-blocking: this runs inside list/usage/launch/selection, and the same lock is held
+    # across whole OpenClaw subprocesses. Contention is one more silent skip (Manager.try_locked).
+    with manager.try_locked() as acquired:
+        if not acquired:
+            return None
         settings = read_settings(manager)
         result = None
         drift = wrapper_drift(settings)
