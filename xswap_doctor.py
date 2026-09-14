@@ -9,7 +9,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import shutil
 import stat
 import subprocess
 import time
@@ -492,8 +491,16 @@ for (const name of process.env.XSWAP_DOCTOR_ENTRIES.split(',')) {
 
 
 def check_openclaw():
-    executable = shutil.which("openclaw")
-    node = shutil.which("node")
+    try:
+        executable = absolute_which("openclaw")
+        node = absolute_which("node")
+    except RelativeEntryError as exc:
+        # This row runs both of them, with the package root it then reports. A relative PATH
+        # element resolves against the directory doctor was started in, so a repository's own
+        # `bin/node` would be the thing probed -- and reported as this machine's OpenClaw
+        # install. Same lookup the codex binary row stopped executing; doctor is read-only,
+        # so the entry is the finding.
+        return [check("openclaw", WARN, str(exc))]
     if not executable or not node:
         return [check("openclaw", WARN, "OpenClaw sync unavailable: openclaw and node required on PATH")]
     package_root = resolve_openclaw_package_root(executable)

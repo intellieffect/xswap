@@ -756,6 +756,19 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", captured)
         self.assertNotIn("CODEX_WORKLOAD_IDENTITY_X", captured)
 
+    def test_openclaw_found_through_a_relative_path_entry_is_reported_not_run(self):
+        # This row spawns both executables and then reports the package root it resolved from
+        # them. shutil.which joins the raw PATH element, so from a repository whose PATH starts
+        # with `bin` it returned that project's own node -- probed, and reported as this
+        # machine's OpenClaw install. The `codex binary` row stopped doing exactly this.
+        with patch("shutil.which", side_effect=lambda n: "bin/openclaw" if n == "openclaw" else "/usr/bin/node"), \
+                patch("subprocess.run") as run:
+            rows = doctor.check_openclaw()
+        run.assert_not_called()
+        self.assertEqual([r["status"] for r in rows], ["WARN"])
+        self.assertIn("openclaw was found through a relative PATH entry (bin/openclaw)", rows[0]["detail"])
+        self.assertIn("make that PATH entry absolute", rows[0]["detail"])
+
     def test_openclaw_probe_strips_secret_env(self):
         package_root = self.base / "openclaw-pkg"
         package_root.mkdir()
