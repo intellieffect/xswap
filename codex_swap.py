@@ -29,6 +29,7 @@ from xswap_credentials import CredentialError, read_auth
 from xswap_upgrade import UpgradeError, upgrade
 from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
+from xswap_path import absolute_which, relative_entry_message
 
 __version__ = "0.8.0"
 
@@ -647,9 +648,7 @@ class Manager:
             real = recorded_real_codex(settings)
             if real and Path(real).is_file():
                 return real
-            raise SwapError(f"codex was found through a relative PATH entry ({executable}), which names a different "
-                            "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
-                            "then retry.")
+            raise SwapError(relative_entry_message("codex", executable))
         # The same one step out: npm writes `node_modules/.bin/codex` for a project that depends
         # on @openai/codex, and that directory reaches PATH absolutely (direnv, a Makefile, an IDE
         # task). Exec'ing it hands a project-controlled file a pool account's CODEX_HOME. xswap
@@ -860,8 +859,13 @@ class Manager:
                 pretty = ", ".join("[" + ", ".join(names_in_group) + "]" for names_in_group in groups.values())
                 raise SwapError(f"Pooled accounts belong to different ChatGPT organizations: {pretty}. OpenClaw shares one agent's conversation context across whatever it selects from the pool, so mixing organizations mixes their context across accounts. Pass --allow-mixed to override.")
         name, home = resolved[0]
-        executable = shutil.which("openclaw")
-        node = shutil.which("node")
+        # absolute_which refuses a relative answer instead of returning it: from a repository
+        # whose PATH starts with `bin`, shutil.which handed back `bin/node`, and the two
+        # subprocesses below ran that project's own file with the account's CODEX_HOME -- and
+        # with every pooled account's codexHome on its stdin -- while `openclaw secrets reload`
+        # went to the same directory's `bin/openclaw`.
+        executable = absolute_which("openclaw", error=SwapError)
+        node = absolute_which("node", error=SwapError)
         if not executable or not node:
             raise SwapError("OpenClaw sync requires openclaw and node in PATH.")
         package_root = resolve_openclaw_package_root(executable)
@@ -952,7 +956,9 @@ class Manager:
             print("Dry run: no changes made; the Gateway was not stopped.")
             return {"cleared": [], "dryRun": True}
 
-        executable = shutil.which("openclaw")
+        # The same lookup, and the same stop/start of the user's Gateway through whatever the
+        # working directory holds if it is allowed to be relative.
+        executable = absolute_which("openclaw", error=SwapError)
         if not executable:
             raise SwapError("OpenClaw sync requires openclaw in PATH.")
 
@@ -1051,7 +1057,10 @@ class Manager:
             raise SwapError(str(exc)) from None
         if sys.platform != "darwin":
             raise SwapError("Auto desktop mode is macOS only.")
-        bridge = shutil.which("xswap-proxy")
+        # A relative hit was absolutised against the working directory by Path(bridge).resolve()
+        # below and handed to the desktop app as CODEX_CLI_PATH: the app then ran a file the
+        # current project controls as its Codex CLI, for the whole life of that window.
+        bridge = absolute_which("xswap-proxy", error=SwapError)
         if not bridge:
             raise SwapError("Install xswap 0.3.0 to provide xswap-proxy.")
         candidates = [Path(app)] if app else [Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app")]

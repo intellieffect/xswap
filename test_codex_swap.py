@@ -175,6 +175,26 @@ class AccountTests(unittest.TestCase):
             self.manager.sync_openclaw("second", select=True)
         self.assertEqual(self.manager.account()[0], "second")
 
+    def test_openclaw_sync_refuses_node_and_openclaw_found_through_a_relative_path_entry(self):
+        # Started from a repository whose PATH begins with `bin`, shutil.which handed back
+        # `bin/node`: the bridge subprocess then ran that project's own file with the
+        # account's CODEX_HOME, and with every pooled account's codexHome on its stdin.
+        # `openclaw secrets reload` reached the same directory's `bin/openclaw`. Which file
+        # either name meant changed with the directory the command happened to start in.
+        self.manager.register("main")
+        installed = self.bridge_installation()
+        for name, found in (("node", "bin/node"), ("openclaw", "bin/openclaw")):
+            with self.subTest(name=name):
+                def which(asked, found=found, name=name):
+                    return found if asked == name else (installed if asked == "openclaw" else "/usr/bin/node")
+                with patch("codex_swap.shutil.which", side_effect=which), \
+                        patch("codex_swap.subprocess.run") as run:
+                    with self.assertRaises(SwapError) as refused:
+                        self.manager.sync_openclaw("main")
+                run.assert_not_called()  # nothing from that directory was executed
+                self.assertIn(f"{name} was found through a relative PATH entry ({found})", str(refused.exception))
+                self.assertIn("make that PATH entry absolute", str(refused.exception))
+
     def test_login_unknown_account_raises(self):
         with self.assertRaises(SwapError):
             self.manager.login("ghost")
@@ -1367,6 +1387,23 @@ class ClearCooldownManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(SwapError, "openclaw gateway start"):
                 self.manager.clear_openclaw_cooldown("main", yes=True)
 
+    def test_clear_cooldown_refuses_an_openclaw_found_through_a_relative_path_entry(self):
+        # The same lookup stops and restarts the user's Gateway. A relative hit meant
+        # `bin/openclaw gateway stop --force` -- a project file, with the source home's
+        # environment -- ran between reading the cooldown state and rewriting it.
+        pid = self.profile_id("acct-1", "sub-1")
+        self.register("main", "acct-1", "sub-1")
+        db = self.write_db({pid: {"blockedUntil": time.time() * 1000 + 60000,
+                                    "blockedReason": "rate_limit", "errorCount": 1}})
+        before = db.read_bytes()
+        with patch("codex_swap.shutil.which", return_value="bin/openclaw"), \
+                patch("codex_swap.subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SwapError) as refused:
+                self.manager.clear_openclaw_cooldown("main", yes=True)
+        run.assert_not_called()
+        self.assertEqual(db.read_bytes(), before)
+        self.assertIn("openclaw was found through a relative PATH entry (bin/openclaw)", str(refused.exception))
+
     def test_omitted_name_checks_every_registered_account(self):
         pid_second = self.profile_id("acct-2", "sub-2")
         self.register("main", "acct-1", "sub-1")
@@ -1464,6 +1501,27 @@ class AutoLauncherTests(unittest.TestCase):
         self.assertFalse((self.manager.root/'auto/codex/auth.json').exists())
         self.assertEqual(before,self.manager.registry.read_bytes())
         self.assertEqual(self.auth,json.loads((self.source/'auth.json').read_text()))
+
+    def test_auto_launcher_refuses_an_xswap_proxy_found_through_a_relative_path_entry(self):
+        # `Path(bridge).resolve()` absolutised a relative hit against the working directory
+        # and handed it to the desktop app as CODEX_CLI_PATH: from a repository whose PATH
+        # starts with `bin`, the ChatGPT window ran that project's `bin/xswap-proxy` as its
+        # Codex CLI -- with the auto home and XSWAP_REAL_CODEX -- for the life of the window.
+        self.manager.register('main')
+        self.manager.prepare('second')
+        app = self.base / 'ChatGPT.app'
+        app.mkdir()
+        executable = self.base / 'codex'
+        executable.touch()
+        with patch('codex_swap.sys.platform', 'darwin'), \
+             patch('codex_swap.shutil.which',
+                   side_effect=lambda name: 'bin/xswap-proxy' if name == 'xswap-proxy' else str(executable)), \
+             patch('codex_swap.subprocess.run') as run:
+            with self.assertRaises(SwapError) as refused:
+                self.manager.launch_auto_app('main,second', str(app))
+        run.assert_not_called()  # no window was opened on it
+        self.assertIn('xswap-proxy was found through a relative PATH entry (bin/xswap-proxy)', str(refused.exception))
+        self.assertFalse((self.manager.root / 'auto').exists())
 
     def test_auto_dry_run_does_not_create_runtime(self):
         self.manager.register('main')
