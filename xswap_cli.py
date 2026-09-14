@@ -851,24 +851,49 @@ def wrapper_state(settings, env=None, relative=False):
     keeps the default and cannot see it -- shadowing_entry included.
     The 'unconfigured' gate still comes first: with automatic switching off nothing
     claims plain `codex` goes through xswap, so the reason to report is the recorded
-    entry's own ('auto-disabled'), not the PATH element.
+    entry's own ('auto-disabled'), not the PATH element. A relative entry that reaches
+    xswap-codex is a caveat and never a verdict: it can only keep a 'connected' answer,
+    and when the absolute entries say anything else that is what is returned -- state,
+    first and entries -- because they are what every other working directory runs.
+    """
+    entries = codex_path_entries(settings, env, relative=relative)
+    state, first = path_state(settings, entries)
+    if relative and state == 'connected' and first is not None and not os.path.isabs(first['path']):
+        # This directory's `codex` is xswap-codex, but only this directory's: the element is
+        # never re-pointed, so what plain `codex` runs everywhere else is decided by the
+        # absolute entries alone. Returning 'connected' from the relative walk let a machine
+        # that is permanently bypassed -- a foreign regular file ahead of the wrapped entry,
+        # which xswap never overwrites -- report codexWrapped true and print no use/switch
+        # notice, as long as the working directory happened to hold an xswap-codex. The
+        # caveat can only keep a connected answer; when the absolute entries say anything
+        # else, they are the answer (2026-09-13).
+        absolute = [entry for entry in entries if os.path.isabs(entry['path'])]
+        absolute_state, absolute_first = path_state(settings, absolute)
+        if absolute_state != 'connected':
+            return absolute_state, absolute_first, absolute
+    return state, first, entries
+
+
+def path_state(settings, entries):
+    """(state, first) for one codex_path_entries list; the PATH walk is the caller's.
+
+    Split out of wrapper_state so a caller that needs both views -- doctor reports what
+    plain `codex` runs in this directory *and* what it runs in every other one -- judges
+    them from a single walk instead of racing two (CONC-4).
     """
     wrapper = settings.get('wrapper') or {}
-    entries = codex_path_entries(settings, env, relative=relative)
     first = entries[0] if entries else None
     if not wrapper.get('path') or not wrapper.get('proxy') or not settings.get('enabled'):
-        state = 'unconfigured'
-    elif first is None:
-        state = 'absent'
-    elif first['kind'] == 'relative':
-        state = 'relative'
-    elif first['kind'] == 'wrapper':
-        state = 'connected'
-    elif first['path'] == wrapper['path']:
-        state = 'drifted'
-    else:
-        state = 'shadowed'
-    return state, first, entries
+        return 'unconfigured', first
+    if first is None:
+        return 'absent', first
+    if first['kind'] == 'relative':
+        return 'relative', first
+    if first['kind'] == 'wrapper':
+        return 'connected', first
+    if first['path'] == wrapper['path']:
+        return 'drifted', first
+    return 'shadowed', first
 
 
 def shadowing_entry(settings, env=None):

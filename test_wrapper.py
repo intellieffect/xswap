@@ -1024,6 +1024,75 @@ class PathEntriesTests(WrapperFixture):
         self.assertEqual(os.readlink(shim), str(updated))  # the working directory is untouched
         self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(cli))
 
+    def test_a_relative_xswap_codex_never_hides_a_foreign_entry_that_bypasses_every_directory(self):
+        # A foreign *regular file* `codex` ahead of the wrapped entry is the permanent bypass:
+        # xswap never overwrites one, so plain `codex` runs it in every directory, for good. The
+        # relative caveat was returned before every row that reads the absolute entries, so as
+        # long as the working directory happened to hold an xswap-codex, `xswap doctor` said WARN
+        # and exited 0, auto-status said codexWrapped, and `xswap use` printed nothing -- the
+        # 2026-09-10 bypass with a green gate (2026-09-13).
+        from codex_swap import plain_codex_notice
+        settings, shim, cli, updated, path = self.relative_shim()
+        self.repoint(shim, cli)  # the relative element reaches xswap-codex from this directory
+        foreign = self.executable(self.bin_dir('foreign-bin'))
+        path = os.pathsep.join(['bin', str(foreign.parent), str(cli.parent)])
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs {foreign}, not xswap-codex, and xswap cannot wrap it (not-a-symlink)',
+                      row['detail'])
+        self.assertIn(f'The wrapped entry {cli} is shadowed.', row['detail'])
+        # The caveat survives as a caveat: it says what this one directory changes, and nothing more.
+        self.assertIn(f'In this directory plain codex runs bin/codex -> {cli} first, which is xswap-codex',
+                      row['detail'])
+        self.assertIn('Fix: make that PATH entry absolute.', row['detail'])
+        self.assertEqual(wrapper_state(settings, {'PATH': path}, relative=True)[0], 'shadowed')
+        with patch.dict(os.environ, {'PATH': path}), contextlib.redirect_stderr(io.StringIO()) as err:
+            state = status_data(self.manager, cleanup=False)
+            notice = plain_codex_notice(self.manager, str(self.base / 'elsewhere'))
+        self.assertEqual(err.getvalue(), '')  # the reports report; they repair nothing
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, 'ok'))
+        self.assertIn(f'plain `codex` runs {foreign}, not xswap-codex', notice)
+        self.assertIn('(not-a-symlink)', notice)
+        # Unchanged: no repair path may see, or re-point, the relative element.
+        self.assertEqual([e['path'] for e in codex_path_entries(settings, {'PATH': path})],
+                         [str(foreign), str(cli)])
+        self.assertEqual(os.readlink(shim), str(cli))
+        self.assertEqual(read_settings(self.manager)['wrapper']['path'], str(cli))
+
+    def test_a_relative_xswap_codex_never_hides_a_drifted_recorded_entry(self):
+        # Same collapse, the other absolute verdict: a Codex update had re-pointed the wrapped
+        # entry, and the row that names the drift and the reconnect command never appeared.
+        settings, shim, cli, updated, path = self.relative_shim()
+        proxy = read_settings(self.manager)['wrapper']['proxy']
+        self.repoint(shim, proxy)   # the element reaches xswap-codex directly
+        self.repoint(cli, updated)  # what Codex's standalone updater does to the wrapped entry
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn('codex entry changed outside xswap (a Codex update replaces the link)', row['detail'])
+        self.assertIn('Reconnect it now: xswap auto-enable --accounts main,second --wrap-codex', row['detail'])
+        self.assertIn(f'In this directory plain codex runs bin/codex -> {proxy} first, which is xswap-codex',
+                      row['detail'])
+        with patch.dict(os.environ, {'PATH': path}):
+            state = status_data(self.manager, cleanup=False)
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, 'replaced'))
+
+    def test_the_empty_path_element_cannot_bless_a_permanently_bypassed_machine(self):
+        # The empty element (`export PATH="$UNSET_VAR:$PATH"`) is POSIX's working directory, so
+        # it is the shape this reaches most machines in: ./codex is xswap-codex in the one
+        # directory the user happens to be in, and a foreign regular file runs everywhere else.
+        settings, shim, cli, updated, path = self.relative_shim(element='')
+        self.repoint(shim, cli)
+        foreign = self.executable(self.bin_dir('foreign-bin'))
+        path = os.pathsep.join(['', str(foreign.parent), str(cli.parent)])
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': path})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn(f'plain codex runs {foreign}, not xswap-codex', row['detail'])
+        self.assertIn(f'In this directory plain codex runs ./codex -> {cli} first, which is xswap-codex',
+                      row['detail'])
+        with patch.dict(os.environ, {'PATH': path}):
+            state = status_data(self.manager, cleanup=False)
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, 'ok'))
+
     def test_a_relative_entry_that_reaches_xswap_codex_is_not_reported_as_a_bypass(self):
         # The project's bin/codex points at the wrapped entry, so plain `codex` here really does
         # run xswap-codex and the selection is in effect. Classifying the element ahead of the

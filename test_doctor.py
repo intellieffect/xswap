@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_swap import Manager, atomic_json, identity, main
+import xswap_cli
 import xswap_doctor as doctor
 
 
@@ -970,6 +971,35 @@ class WrapperPathTests(unittest.TestCase):
         self.assertIn(f"the wrapped entry {self.bin_b / 'codex'} is not on this shell's PATH", row["detail"])
         self.assertIn(self.reconnect, row["detail"])
         self.assertNotIn("next xswap launch", row["detail"])
+
+    def test_a_concurrent_reconnect_cannot_produce_a_row_whose_clauses_are_both_false(self):
+        # The row asked the filesystem five separate times: the PATH walk, the recorded entry's
+        # drift, the relative walk, shadowing_entry's own walk, and one more entry_drift. A
+        # reconnect_wrapper -- which every xswap launch, list, usage read and alert tick runs --
+        # landing between them made doctor answer the verdict from one snapshot and the sentence
+        # from another: "plain codex runs bin-a/codex -> standalone, not xswap-codex; the wrapped
+        # entry bin-b/codex is not on this shell's PATH", with both clauses false, FAIL and exit 1
+        # on a machine that was connected by then (2026-09-13).
+        link = self.bin_a / "codex"
+        link.symlink_to(self.standalone)
+        original = xswap_cli.entry_drift
+
+        def racing_drift(path, proxy, enabled=True, adopt=False):
+            # The competitor's commit lands the moment doctor stats what it walked.
+            if link.is_symlink() and os.readlink(link) == str(self.standalone):
+                link.unlink()
+                link.symlink_to(self.proxy)
+            return original(path, proxy, enabled, adopt)
+
+        with patch("xswap_doctor.entry_drift", racing_drift), patch("xswap_cli.entry_drift", racing_drift):
+            row = self.wrapper_row(self.bin_a, self.bin_b)
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn(f"plain codex ran {link} -> {self.standalone} when doctor walked PATH", row["detail"])
+        self.assertIn("changed while doctor was reading it", row["detail"])
+        self.assertIn("Re-run: xswap doctor", row["detail"])
+        self.assertNotIn("is not on this shell's PATH", row["detail"])
+        self.assertNotIn("cannot wrap it", row["detail"])
+        self.assertEqual(os.readlink(link), str(self.proxy))  # doctor itself repaired nothing
 
     def test_wrapped_first_with_foreign_entry_later_warns_shadowed(self):
         (self.bin_a / "codex").symlink_to(self.standalone)
