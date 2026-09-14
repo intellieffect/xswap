@@ -39,6 +39,28 @@ class ListTagsTests(unittest.TestCase):
             list_tags(run=run)
 
 
+    def test_ls_remote_runs_an_absolute_git(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess([], 0, LS_REMOTE_OUTPUT, "")
+
+        with patch("shutil.which", return_value="/usr/bin/git"):
+            list_tags(run=run)
+        self.assertEqual(calls[0][0], "/usr/bin/git")
+
+    def test_a_relative_git_is_refused_before_it_is_run(self):
+        # `xswap upgrade` is the command that replaces the installed tool. Run from a
+        # repository whose PATH starts with `bin`, shutil.which returned `bin/git` and that
+        # project file chose which repository the release was listed -- and installed -- from.
+        calls = []
+        with patch("shutil.which", return_value="bin/git"):
+            with self.assertRaisesRegex(UpgradeError, r"git was found through a relative PATH entry \(bin/git\)"):
+                list_tags(run=lambda *a, **k: calls.append(a))
+        self.assertEqual(calls, [])
+
+
 class ChooseTests(unittest.TestCase):
     def setUp(self):
         self.tags = [((0, 4, 2), "v0.4.2"), ((0, 5, 0), "v0.5.0")]
@@ -69,7 +91,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_dry_run_prints_command_without_installing(self):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", return_value="/usr/bin/uv"), \
+             patch("shutil.which", return_value="/usr/bin/uv"), \
              patch("xswap_upgrade.subprocess.run") as run, \
              contextlib.redirect_stdout(io.StringIO()) as out:
             result = upgrade("0.4.2", dry=True)
@@ -79,7 +101,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_missing_uv_prints_command_and_fails(self):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", return_value=None), \
+             patch("shutil.which", return_value=None), \
              patch("xswap_upgrade.subprocess.run") as run, \
              contextlib.redirect_stdout(io.StringIO()) as out:
             result = upgrade("0.4.2")
@@ -89,7 +111,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_dry_run_without_uv_returns_zero(self):
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", return_value=None), \
+             patch("shutil.which", return_value=None), \
              patch("xswap_upgrade.subprocess.run") as run, \
              contextlib.redirect_stdout(io.StringIO()) as out:
             result = upgrade("0.4.2", dry=True)
@@ -105,7 +127,7 @@ class UpgradeTests(unittest.TestCase):
     def test_install_runs_and_reports_new_version(self):
         responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")]
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=responses) as run, \
              patch("xswap_upgrade.running_session_hints", return_value=[]), \
              contextlib.redirect_stdout(io.StringIO()) as out:
@@ -115,13 +137,53 @@ class UpgradeTests(unittest.TestCase):
         self.assertIn("xswap 0.5.0", out.getvalue())
         self.assertNotIn("previous bridge", out.getvalue())
 
+    def test_install_and_version_check_run_the_absolute_uv_and_xswap(self):
+        # Both argv[0]s were bare names, so shutil.which's relative answer -- and, for the
+        # version line, whatever `xswap` the working directory held -- decided which uv did
+        # `tool install --force` and which binary's version confirmed the upgrade.
+        responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")]
+        which = {"uv": "/opt/homebrew/bin/uv", "xswap": "/opt/homebrew/bin/xswap"}
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("shutil.which", side_effect=which.get), \
+             patch("xswap_upgrade.subprocess.run", side_effect=responses) as run, \
+             patch("xswap_upgrade.running_session_hints", return_value=[]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(upgrade("0.4.2"), 0)
+        self.assertEqual(run.call_args_list[0].args[0],
+                          ["/opt/homebrew/bin/uv", "tool", "install", "--force",
+                           "git+https://github.com/intellieffect/xswap.git@v0.5.0"])
+        self.assertEqual(run.call_args_list[1].args[0], ["/opt/homebrew/bin/xswap", "--version"])
+
+    def test_a_relative_uv_is_refused_before_anything_is_installed(self):
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("shutil.which", return_value="bin/uv"), \
+             patch("xswap_upgrade.subprocess.run") as run, \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(UpgradeError, r"uv was found through a relative PATH entry \(bin/uv\)"):
+                upgrade("0.4.2")
+        run.assert_not_called()
+
+    def test_a_relative_xswap_does_not_get_to_report_the_installed_version(self):
+        # The reinstall succeeded; running `bin/xswap --version` afterwards would have
+        # printed a project file's version as confirmation of it.
+        responses = [subprocess.CompletedProcess([], 0)]
+        which = {"uv": "/opt/homebrew/bin/uv", "xswap": "bin/xswap"}
+        with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
+             patch("shutil.which", side_effect=which.get), \
+             patch("xswap_upgrade.subprocess.run", side_effect=responses) as run, \
+             patch("xswap_upgrade.running_session_hints", return_value=[]), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(upgrade("0.4.2"), 0)
+        self.assertEqual(run.call_count, 1)  # the install only
+        self.assertIn("xswap was found through a relative PATH entry (bin/xswap)", out.getvalue())
+
     def test_install_lists_running_sessions_with_their_reopen_hints(self):
         responses = [subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")]
         hints = ["CLI · ai · bridge 0.4.2 · reopen with codex resume 00000000-0000-4000-8000-000000000001 to load 0.5.0",
                  "CLI · ai · bridge 0.4.2 · exit and reopen it to load 0.5.0",
                  "Desktop · work · bridge 0.4.2 · quit and reopen it with xswap app to load 0.5.0"]
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=responses), \
              patch("xswap_upgrade.running_session_hints", return_value=hints) as gather, \
              contextlib.redirect_stdout(io.StringIO()) as out:
@@ -135,7 +197,9 @@ class UpgradeTests(unittest.TestCase):
         order = []
 
         def run(command, **kwargs):
-            order.append("install" if command[:3] == ["uv", "tool", "install"] else "version")
+            # command[0] is the absolute `uv` absolute_which resolved, not the bare name
+            # this comparison was written against.
+            order.append("install" if command[1:3] == ["tool", "install"] else "version")
             return subprocess.CompletedProcess([], 0, "xswap 0.5.0\n", "")
 
         def gather(target):
@@ -143,7 +207,7 @@ class UpgradeTests(unittest.TestCase):
             return []
 
         with patch("xswap_upgrade.list_tags", return_value=[((0, 5, 0), "v0.5.0")]), \
-             patch("xswap_upgrade.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
+             patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"), \
              patch("xswap_upgrade.subprocess.run", side_effect=run), \
              patch("xswap_upgrade.running_session_hints", side_effect=gather), \
              contextlib.redirect_stdout(io.StringIO()):

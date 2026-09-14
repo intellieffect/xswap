@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
+
+from xswap_path import absolute_which
 
 REPO = "https://github.com/intellieffect/xswap.git"
 TAG_RE = re.compile(r"^refs/tags/v(\d+)\.(\d+)\.(\d+)$")
@@ -15,8 +16,12 @@ class UpgradeError(Exception):
 
 def list_tags(run=None):
     run = run or subprocess.run
+    # A relative `git` raises rather than being run: `xswap upgrade` is the command that
+    # replaces the installed tool, and a project's own `bin/git` would choose which repository
+    # it is replaced from. `or "git"` keeps the not-installed path spelled by the OSError below.
+    git = absolute_which("git", error=UpgradeError) or "git"
     try:
-        result = run(["git", "ls-remote", "--tags", "--refs", REPO], capture_output=True, text=True, timeout=30)
+        result = run([git, "ls-remote", "--tags", "--refs", REPO], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as exc:
         raise UpgradeError(f"cannot list release tags: {exc}") from None
     if result.returncode:
@@ -43,8 +48,8 @@ def choose(tags, requested=None):
     return max(tags)
 
 
-def install_command(tag):
-    return ["uv", "tool", "install", "--force", f"git+{REPO}@{tag}"]
+def install_command(tag, uv=None):
+    return [uv or "uv", "tool", "install", "--force", f"git+{REPO}@{tag}"]
 
 
 def running_session_hints(target_version):
@@ -71,18 +76,28 @@ def upgrade(current_version, tag=None, dry=False):
     if dry:
         print(" ".join(command))
         return 0
-    if shutil.which("uv") is None:
+    # The installer itself: a relative `uv` is a project file that would be given
+    # `tool install --force`, i.e. the contents of the user's whole tool environment.
+    uv = absolute_which("uv", error=UpgradeError)
+    if uv is None:
         print(" ".join(command))
         return 1
     # Read the session records before the reinstall: afterwards this process still runs
     # the previous code and uv may already have replaced the tool environment under it.
     hints = running_session_hints(chosen[1:])
-    result = subprocess.run(command)
+    result = subprocess.run(install_command(chosen, uv))
     if result.returncode == 0 and hints:
         print(f"{len(hints)} running xswap session(s) still use the previous bridge; reopen them to load {chosen}:")
         for line in hints:
             print("  " + line)
-    executable = shutil.which("xswap")
+    try:
+        executable = absolute_which("xswap", error=UpgradeError)
+    except UpgradeError as exc:
+        # Printing the version of whatever `xswap` this directory holds would confirm an
+        # install that did not happen; the reinstall above is already done, so report why
+        # the confirmation is missing instead of failing the command.
+        print(str(exc))
+        executable = None
     if executable:
         check = subprocess.run([executable, "--version"], capture_output=True, text=True)
         print((check.stdout or check.stderr).strip())
