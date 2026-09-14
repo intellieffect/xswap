@@ -204,8 +204,8 @@ def plain_codex_notice(manager, selected_home):
     runs is xswap-codex with automatic switching on, or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap_cli import (RELATIVE_ENTRY_REASON, describe_drift, entry_drift, read_settings, reconnect_wrapper,
-                           wrapper_drift, wrapper_state)
+    from xswap_cli import (BYPASS_REASON, RELATIVE_ENTRY_REASON, bypass_set, describe_drift, entry_drift,
+                           read_settings, reconnect_wrapper, wrapper_drift, wrapper_state)
     from xswap_live import LiveError
     try:
         reconnect_wrapper(manager)
@@ -216,7 +216,10 @@ def plain_codex_notice(manager, selected_home):
     # PATH element resolves to is exactly what it runs in this directory. reconnect_wrapper above
     # keeps the default, so nothing re-points it.
     state, first, _ = wrapper_state(settings, relative=True)
-    if state == "connected":
+    # XSWAP_BYPASS=1 makes the entry point a pass-through, so a connected wrapper changes nothing
+    # in this shell and the notice stayed silent about the one setting that decides it.
+    bypassed = bypass_set() and state != "unconfigured"
+    if state == "connected" and not bypassed:
         return None
     if Path(selected_home).expanduser().resolve() == manager.source:
         return None
@@ -226,6 +229,10 @@ def plain_codex_notice(manager, selected_home):
         label = "unreadable auth cache"
     names = ",".join(name for name, _ in manager.enabled_accounts()) or "NAME,NAME"
     connect = f"xswap auto-enable --accounts {names} --wrap-codex"
+    if bypassed:
+        cause, fix = describe_drift({"action": "skip", "reason": BYPASS_REASON}, connect)
+        return (f"Note: plain `codex` does not go through xswap here ({BYPASS_REASON}): {cause}, so it keeps using "
+                f"{manager.source} ({label}); this selection applies only to xswap and xswap app. Fix: {fix}")
     if state in ("drifted", "shadowed", "relative"):
         shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
         # A relative entry is a skip by construction -- nothing may re-point one -- so it carries
@@ -603,7 +610,12 @@ class Manager:
     def env(self, home):
         env = os.environ.copy()
         # A caller's API key or workload identity must not silently select another account.
-        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH"):
+        # XSWAP_BYPASS with them: exported in the shell that started this launch, it followed the
+        # pool account's home into every nested `codex` and turned the wrapper off inside the one
+        # session xswap had just set up -- with this home already on CODEX_HOME, that is a session
+        # whose selection nothing can change. One command's own bypass stays that command's.
+        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH",
+                    "XSWAP_BYPASS"):
             env.pop(key, None)
         for key in list(env):
             if key.startswith("CODEX_WORKLOAD_IDENTITY_"):

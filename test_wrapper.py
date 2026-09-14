@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import time
 import unittest
 from unittest.mock import ANY, patch
@@ -1210,6 +1211,67 @@ class PathEntriesTests(WrapperFixture):
         ok = doctor.check_wrapper(settings, accounts, env={'PATH': str(cli.parent)})
         self.assertEqual((ok['status'], ok['detail']), ('OK', f'{cli} -> xswap-codex'))
         self.assertEqual(os.readlink(cli), str(proxy))  # doctor is read-only
+
+
+class BypassVariableTests(WrapperFixture):
+    """XSWAP_BYPASS=1: every surface says the selection is off, and it stops at the session edge."""
+
+    def test_every_surface_reports_a_shell_whose_codex_passes_through(self):
+        # The variable is documented as a one-command prefix, which is what leads to exporting
+        # it; exported, every `codex` in that shell runs with the caller's own CODEX_HOME,
+        # account and API key. doctor's wrapper row still read `-> xswap-codex` and exited 0,
+        # auto-status reported codexWrapped, and `xswap use` printed nothing (2026-09-13).
+        from codex_swap import plain_codex_notice
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        settings = read_settings(self.manager)
+        path, accounts = str(cli.parent), self.manager.read()['accounts']
+        # Without the variable the same fixture is a connected machine with nothing to report.
+        self.assertEqual(doctor.check_wrapper(settings, accounts, {'PATH': path})['status'], 'OK')
+        self.assertIsNone(doctor.check_bypass(settings, {'PATH': path}))
+        with patch.dict(os.environ, {'PATH': path, 'XSWAP_BYPASS': '1'}), contextlib.redirect_stderr(io.StringIO()) as err:
+            row = doctor.check_bypass(settings)
+            reported = [r for r in doctor.run(self.manager) if r['name'] == 'codex bypass']
+            state = status_data(self.manager, cleanup=False)
+            notice = plain_codex_notice(self.manager, str(self.base / 'elsewhere'))
+        self.assertEqual(err.getvalue(), '')  # the reports report; they repair nothing
+        self.assertEqual((row['name'], row['status']), ('codex bypass', 'FAIL'))
+        self.assertIn('XSWAP_BYPASS=1 is set here (bypass-variable)', row['detail'])
+        self.assertIn("hands every command straight to the real Codex with the caller's own CODEX_HOME, account "
+                      'and API keys', row['detail'])
+        self.assertIn(f'the wrapped entry {cli} applies no selection in this shell', row['detail'])
+        self.assertIn('Fix: unset XSWAP_BYPASS in this shell', row['detail'])
+        self.assertEqual([r['status'] for r in reported], ['FAIL'])  # and `xswap doctor` exits 1
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, 'bypass-variable'))
+        self.assertIn('plain `codex` does not go through xswap here (bypass-variable)', notice)
+        self.assertIn(f'it keeps using {self.manager.source}', notice)
+        self.assertIn('Fix: unset XSWAP_BYPASS in this shell', notice)
+        self.assertEqual(len(notice.splitlines()), 1)
+        # The record itself is untouched: this is the environment's doing, not the entry's.
+        self.assertEqual(wrapper_drift(read_settings(self.manager))['reason'], 'ok')
+
+    def test_a_dormant_record_reports_the_variable_as_pending_instead_of_failing(self):
+        # With automatic switching off nothing claims plain `codex` goes through xswap, so the
+        # variable breaks no promise yet -- it still decides what happens once it is connected.
+        row = doctor.check_bypass({}, {'XSWAP_BYPASS': '1'})
+        self.assertEqual(row['status'], 'WARN')
+        self.assertIn('takes effect as soon as the codex command is connected', row['detail'])
+        self.assertIsNone(doctor.check_bypass({}, {}))
+        self.assertIsNone(doctor.check_bypass({}, {'XSWAP_BYPASS': '0'}))
+
+    def test_the_variable_does_not_follow_a_launch_into_the_session_it_starts(self):
+        # Manager.env copied the caller's environment and kept XSWAP_BYPASS, so a session xswap
+        # had just started -- with a pool account's CODEX_HOME already exported -- handed every
+        # nested `codex` straight through: a session whose selection nothing could change.
+        self.manager.register('main')
+        probe = self.base / 'probe-codex'
+        # This fixture pins PATH to its own directory, so name the interpreter outright.
+        probe.write_text(f'#!{sys.executable}\nimport os\nassert "XSWAP_BYPASS" not in os.environ\n')
+        probe.chmod(0o700)
+        with patch.dict(os.environ, {'XSWAP_BYPASS': '1'}), \
+                patch.object(self.manager, 'codex', return_value=str(probe)):
+            self.assertEqual(self.manager.launch_cli(None, [str(self.source)]), 0)
+        self.assertNotIn('XSWAP_BYPASS', self.manager.env(self.source))
 
 
 class RunDirTests(WrapperFixture):

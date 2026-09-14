@@ -17,7 +17,7 @@ import time
 from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
-from xswap_cli import DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, path_state, read_settings, recorded_real_codex, status_data, wrapper_drift
+from xswap_cli import BYPASS_REASON, BYPASS_VARIABLE, DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, bypass_set, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, path_state, read_settings, recorded_real_codex, status_data, wrapper_drift
 from xswap_openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap_path import RelativeEntryError, absolute_which
 from xswap_relocate import codex_homes_inside_root, inside_root
@@ -231,6 +231,28 @@ def _wrapper_row(wrapper, names, reconnect, state, first, entries, drift):
                      "or use reconnects one). Nothing was repaired. Re-run: xswap doctor")
     return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex, and xswap cannot wrap it "
                  f"({shadow['reason']}): {cause}. The wrapped entry {path} is shadowed. Fix: {fix}")
+def check_bypass(settings, env=None):
+    """XSWAP_BYPASS=1 in this environment: `codex` passes through, whatever the wrapper says.
+
+    A separate row because it is true of the shell doctor runs in, not of any entry: the
+    variable is documented as a one-command prefix (`XSWAP_BYPASS=1 codex exec resume ...`),
+    and once exported it turns the wrapper off for every `codex` in that shell while the
+    wrapper row above still reads `-> xswap-codex`. None when it is not set. `env` is the
+    environment to judge, os.environ by default; read-only like every other row.
+    """
+    if not bypass_set(env):
+        return None
+    wrapper = settings.get("wrapper") or {}
+    cause, fix = describe_drift({"action": "skip", "reason": BYPASS_REASON}, "")
+    if not (wrapper.get("path") and wrapper.get("proxy") and settings.get("enabled")):
+        # Nothing claims plain `codex` goes through xswap, so the variable changes nothing
+        # today; it still decides what happens the moment the command is connected.
+        return check("codex bypass", WARN, f"{BYPASS_VARIABLE}=1 is set here ({BYPASS_REASON}): {cause}. It takes "
+                     f"effect as soon as the codex command is connected. Fix: {fix}")
+    return check("codex bypass", FAIL, f"{BYPASS_VARIABLE}=1 is set here ({BYPASS_REASON}): {cause}, so the "
+                 f"wrapped entry {wrapper['path']} applies no selection in this shell. Fix: {fix}")
+
+
 def check_credential_store(manager):
     try:
         check_file_store(manager.source)
@@ -662,6 +684,9 @@ def run(manager):
         settings = read_settings(manager)
         settings_ok = True
         results.append(check_wrapper(settings, accounts))
+        bypass = check_bypass(settings)
+        if bypass:
+            results.append(bypass)
     except LiveError as exc:
         settings, settings_ok = {}, False
         # One FAIL for the corrupted file; wrapper/auto-pool would only repeat the same cause.

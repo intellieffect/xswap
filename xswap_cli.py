@@ -608,6 +608,23 @@ DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'n
 # two dicts because describe_drift looks a reason up, so auto-status and the use/switch notice
 # can report a relative entry with the same words, in the shape they print every other skip in.
 RELATIVE_ENTRY_REASON = 'relative-path-entry'
+# XSWAP_BYPASS=1 is the documented way to hand one command to the real Codex with the caller's
+# own home (`XSWAP_BYPASS=1 codex exec resume ...` reaches the sessions saved before 0.8.0).
+# Exported instead of prefixed -- which is what a documented prefix leads to -- it turns the
+# wrapper off for every `codex` in that shell, and no surface said so: doctor's wrapper row,
+# auto-status and the use/switch notice all reported a connected wrapper while plain `codex`
+# ran with the caller's CODEX_HOME, account and API key (2026-09-13). Like the relative entry,
+# it is a condition of the environment rather than of the entry's link state, so it stays out
+# of DRIFT_REASONS (entry_drift never returns it) and only shares the two description dicts.
+BYPASS_VARIABLE = 'XSWAP_BYPASS'
+BYPASS_REASON = 'bypass-variable'
+
+
+def bypass_set(env=None):
+    """True when this environment hands every `codex` straight to the real Codex."""
+    return (os.environ if env is None else env).get(BYPASS_VARIABLE) == '1'
+
+
 def dependency_entry(path, real=None):
     """True when the entry, or the executable behind it, sits in a project's dependency tree."""
     parts = set(Path(path).parts) | set(Path(real).parts if real else ())
@@ -631,6 +648,8 @@ DRIFT_CAUSES = {
         'working directory, so it names a different file in every directory and xswap never re-points it',
     RELATIVE_RECORD_REASON: 'the recorded codex entry {path} is not an absolute path, so it names a different file '
         'in every working directory: xswap cannot tell which entry it wrapped and leaves every codex alone',
+    BYPASS_REASON: 'XSWAP_BYPASS=1 is set in this environment, so the xswap-codex entry point hands every command '
+        "straight to the real Codex with the caller's own CODEX_HOME, account and API keys",
 }
 DRIFT_FIXES = {
     'replaced': 'reconnect it by hand: {reconnect}',
@@ -648,6 +667,8 @@ DRIFT_FIXES = {
         'directory you run it from',
     RELATIVE_RECORD_REASON: 'point the codex entry that still runs xswap-codex back at the real Codex by hand, then '
         'from a shell whose PATH holds no relative entry run: {reconnect}',
+    BYPASS_REASON: 'unset XSWAP_BYPASS in this shell, and set it for the one command that needs its own home '
+        'instead of exporting it',
 }
 
 
@@ -1414,13 +1435,19 @@ def status_data(manager, prune=False, cleanup=True):
     # which is the 2026-09-10 incident (doctor already FAILs on it). Reporting only; the repair
     # paths keep codex_path_entries' default and never see that entry.
     state = wrapper_state(settings, relative=True)[0]
+    # XSWAP_BYPASS=1 turns the entry point into a pass-through whatever PATH and the record say,
+    # so a connected wrapper reported the selection as in effect while plain `codex` ran with the
+    # caller's own home. It decides the answer wherever a wrapper is claimed at all.
+    bypassed = bypass_set() and state != 'unconfigured'
     return {'enabled': settings.get('enabled', False),
                       'accounts': settings.get('accounts', []),
-                      'codexWrapped': state == 'connected',
-                      # The recorded entry's link state says nothing about a PATH element, so name
-                      # the condition that decided codexWrapped. 'auto-disabled' keeps precedence:
-                      # wrapper_state reports 'unconfigured' for it, whatever PATH holds.
-                      'wrapperReason': RELATIVE_ENTRY_REASON if state == 'relative' else drift['reason'],
+                      'codexWrapped': state == 'connected' and not bypassed,
+                      # The recorded entry's link state says nothing about a PATH element or an
+                      # environment variable, so name the condition that decided codexWrapped.
+                      # 'auto-disabled' keeps precedence: wrapper_state reports 'unconfigured'
+                      # for it, whatever PATH or the environment holds.
+                      'wrapperReason': (BYPASS_REASON if bypassed else
+                                        RELATIVE_ENTRY_REASON if state == 'relative' else drift['reason']),
                       'weeklyRemainingThreshold': settings.get('weeklyRemainingThreshold', 0),
                       'pruned': len(pruned), 'prunedRuns': pruned, 'sessions': reported_sessions(sessions)}
 
