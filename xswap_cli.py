@@ -1297,7 +1297,11 @@ def codex_main():
     except BusyThreadError as error:
         print('xswap: ' + str(error), file=sys.stderr)
         return 1
-    except (LiveError, SwapError, OSError, ValueError):
+    # KeyError: auto.json is enabled but holds no `accounts`, which `settings['accounts']` above
+    # reads. Outside this tuple it left plain `codex` with an unhandled traceback and exit 1 --
+    # no line saying which command failed, and none of the recovery the other broken-record
+    # branches print -- for a record a half-written `auto-enable` leaves behind.
+    except (LiveError, SwapError, OSError, ValueError, KeyError):
         print('xswap: could not start automatic Codex CLI; inspect xswap auto-status or run xswap auto-disable.', file=sys.stderr)
         return 1
     except KeyboardInterrupt:

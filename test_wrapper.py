@@ -516,6 +516,23 @@ class WrapperEntryTests(WrapperFixture):
             codex_main()
         execve.assert_called_once_with(str(real), [str(real), 'resume', '--last'], ANY)
 
+    def test_an_enabled_record_without_a_pool_is_a_classified_error_not_a_traceback(self):
+        # codex_main read settings['accounts'] directly, and KeyError was outside its except
+        # tuple: a record left enabled without a pool (a half-written auto-enable) turned every
+        # plain `codex` into an unhandled traceback -- no line saying which command failed, and
+        # none of the recovery the other broken-record branches print.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        settings = read_settings(self.manager)
+        del settings['accounts']
+        atomic_json(self.manager.root / 'auto.json', settings)
+        with self.entry_env(), patch('sys.argv', ['xswap-codex', 'resume', '--last']), \
+                patch('os.execve') as execve, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(codex_main(), 1)
+        execve.assert_not_called()  # never falls through to the caller's own home
+        self.assertIn('could not start automatic Codex CLI', err.getvalue())
+        self.assertNotIn('Traceback', err.getvalue())
+
     def test_missing_real_codex_is_a_short_classified_error(self):
         real, updated, proxy, cli = self.wrapped_fixture()
         self.connect(proxy, cli)
