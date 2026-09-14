@@ -538,7 +538,8 @@ def swap_symlink(path, target):
 # xswap-codex with no record left. So it is a skip everywhere and only a human can repair it.
 RELATIVE_RECORD_REASON = 'relative-record'
 DRIFT_REASONS = ('ok', 'replaced', 'not-wrapped', 'missing', 'not-a-symlink', 'not-user-owned',
-    'dangling-target', 'not-executable', 'auto-disabled', 'unreadable', RELATIVE_RECORD_REASON)
+    'dangling-target', 'not-executable', 'auto-disabled', 'unreadable', 'proxy-missing',
+    RELATIVE_RECORD_REASON)
 # The one reason the PATH walk contributes instead of entry_drift: the `codex` a relative PATH
 # element resolved to. Deliberately outside DRIFT_REASONS -- entry_drift never returns it (the
 # condition belongs to the PATH element, not to the entry's link state) and its fix is the
@@ -555,6 +556,8 @@ DRIFT_CAUSES = {
     'not-executable': '{path} -> {target} is not an executable file, so xswap leaves it alone',
     'auto-disabled': 'automatic switching is disabled, so xswap leaves {path} alone (-> {target})',
     'unreadable': '{path} could not be inspected ({error}), so xswap leaves it alone',
+    'proxy-missing': 'the xswap-codex xswap recorded ({proxy}) no longer exists, so pointing {path} at it would '
+        'leave plain codex on a link to nothing',
     RELATIVE_ENTRY_REASON: '{path} is found through a relative PATH entry, which the shell resolves against the '
         'working directory, so it names a different file in every directory and xswap never re-points it',
     RELATIVE_RECORD_REASON: 'the recorded codex entry {path} is not an absolute path, so it names a different file '
@@ -569,6 +572,7 @@ DRIFT_FIXES = {
     'not-executable': 'point the link at a Codex executable, then run: {reconnect}',
     'auto-disabled': 'enable automatic switching and connect it: {reconnect}',
     'unreadable': 'check its permissions, then run: {reconnect}',
+    'proxy-missing': 'reinstall xswap, which is what installs the xswap-codex command, then run: {reconnect}',
     RELATIVE_ENTRY_REASON: 'make that PATH entry absolute; until then what plain codex runs depends on the '
         'directory you run it from',
     RELATIVE_RECORD_REASON: 'point the codex entry that still runs xswap-codex back at the real Codex by hand, then '
@@ -603,6 +607,13 @@ def entry_drift(path, proxy, enabled=True):
     result = {'action': 'skip', 'reason': 'replaced', 'path': str(path),
               'target': None, 'real': None, 'proxy': proxy, 'error': None}
     try:
+        # Before the entry: nothing about it can be repaired while the xswap-codex the record
+        # names is gone (xswap re-installed to another prefix, a venv or worktree deleted).
+        # Reconnecting pointed the entry at the missing file and reported success, so plain
+        # `codex` stopped resolving at all while `wrapper_drift` still said `ok` and doctor
+        # blamed the PATH ("... is not on this shell's PATH") of the directory that held it.
+        if proxy and not Path(proxy).is_file():
+            return {**result, 'reason': 'proxy-missing'}
         # lexists, not exists: a dangling symlink still occupies the entry and
         # takes a different repair than a missing one.
         if not os.path.lexists(path):
@@ -920,6 +931,14 @@ def enable(manager, accounts, wrap=False):
             if not os.path.isabs(executable):
                 raise LiveError(f'codex was found through a relative PATH entry ({executable}), which names a '
                                 'different file in every directory; make that PATH entry absolute, then retry')
+            # The same for xswap-codex, which had no guard: absolutising a relative hit against
+            # the working directory recorded whatever `bin/xswap-codex` that directory happened
+            # to hold as the proxy, pointed the global `codex` at it, and every later
+            # reconnect re-applied the recorded value -- so a project file stayed the thing
+            # plain `codex` runs from every directory, with doctor reporting `-> xswap-codex`.
+            if not os.path.isabs(proxy):
+                raise LiveError(f'xswap-codex was found through a relative PATH entry ({proxy}), which names a '
+                                'different file in every directory; make that PATH entry absolute, then retry')
             target = Path(executable)
             if target.resolve() != Path(proxy).resolve():
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
@@ -931,13 +950,13 @@ def enable(manager, accounts, wrap=False):
                 literal = link_target_path(target, original)
                 real = canonical_codex_path(manager, literal)
                 set_primary_wrapper(settings, {'path': str(target), 'originalTarget': original if real == literal else real,
-                                               'realCodex': real, 'proxy': str(Path(proxy).absolute())})
+                                               'realCodex': real, 'proxy': proxy})
                 if inside_root(manager, real):
                     print(f'xswap: the real Codex ({real}) is inside the xswap state directory; run: xswap relocate-codex',
                           file=sys.stderr)
                 # Persist rollback information before the atomic symlink swap.
                 atomic_json(manager.root / 'auto.json', settings)
-                swap_symlink(target, Path(proxy).absolute())
+                swap_symlink(target, proxy)
             elif not settings.get('wrapper'):
                 raise LiveError('existing codex wrapper has no recovery information')
         atomic_json(manager.root / 'auto.json', settings)

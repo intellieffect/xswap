@@ -488,6 +488,60 @@ class EnableLockTests(WrapperFixture):
         self.assertEqual(os.readlink(cli), str(real))  # and auto-disable can restore it
 
 
+class RecordedProxyTests(WrapperFixture):
+    """The recorded `proxy` is a real, absolute xswap-codex -- or there is no record."""
+
+    def test_enable_refuses_an_xswap_codex_found_through_a_relative_path_entry(self):
+        # `codex` had the isabs guard; `xswap-codex` did not, and enable absolutised its
+        # relative hit against the working directory. From a project whose PATH starts with
+        # `bin`, `auto-enable --wrap-codex` recorded <cwd>/bin/xswap-codex as the proxy and
+        # pointed the global `codex` at it: plain `codex` in *every* directory then ran a file
+        # the project controls, and `_relink` re-applied that path after every Codex update,
+        # while doctor read `codex -> xswap-codex` and reported OK.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        project = self.base / 'project'
+        (project / 'bin').mkdir(parents=True)
+        rogue = project / 'bin' / 'xswap-codex'
+        rogue.write_text('fixture')
+        rogue.chmod(0o700)
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+        with patch('shutil.which', side_effect=lambda name: 'bin/xswap-codex' if name == 'xswap-codex' else str(cli)), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(LiveError) as refused:
+            enable(self.manager, 'main,second', wrap=True)
+        self.assertIn('xswap-codex was found through a relative PATH entry (bin/xswap-codex)', str(refused.exception))
+        self.assertIn('make that PATH entry absolute', str(refused.exception))
+        self.assertEqual(os.readlink(cli), str(real))  # the codex entry is untouched
+        self.assertNotIn('wrapper', read_settings(self.manager))  # and nothing was recorded
+
+    def test_a_recorded_proxy_that_no_longer_exists_is_its_own_reason(self):
+        # xswap re-installed to another prefix (pipx -> uv), or the venv that provided
+        # xswap-codex was deleted: the recorded proxy is gone. Nothing stats it, so a Codex
+        # update that re-pointed the entry was "reconnected" to the missing file -- plain
+        # `codex` stopped resolving at all -- while wrapper_drift still said `ok`, auto-status
+        # said wrapped, and doctor blamed the PATH of the directory the entry lives in.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        self.repoint(cli, updated)  # what Codex's updater does
+        proxy.unlink()
+        settings = read_settings(self.manager)
+        self.assertEqual(wrapper_drift(settings)['reason'], 'proxy-missing')
+        with patch.dict(os.environ, {'PATH': str(cli.parent)}), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(reconnect_wrapper(self.manager))
+            state = status_data(self.manager, cleanup=False)
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(os.readlink(cli), str(updated))  # not relinked to the file that is gone
+        self.assertEqual(read_settings(self.manager)['wrapper'], settings['wrapper'])
+        self.assertEqual((state['codexWrapped'], state['wrapperReason']), (False, 'proxy-missing'))
+        row = doctor.check_wrapper(settings, self.manager.read()['accounts'], {'PATH': str(cli.parent)})
+        self.assertEqual(row['status'], 'FAIL')
+        self.assertIn('(proxy-missing)', row['detail'])
+        self.assertIn(f'the xswap-codex xswap recorded ({proxy}) no longer exists', row['detail'])
+        self.assertIn('Fix: reinstall xswap', row['detail'])
+        self.assertIn('xswap auto-enable --accounts main,second --wrap-codex', row['detail'])
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 

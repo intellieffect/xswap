@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1
+
+Follow-up to the 0.8.0 verification sweep (INT-5194): wrapper-record integrity and the records xswap reads back.
+
+- `xswap auto-enable` reads `auto.json` inside its own lock. It read the file before taking the lock, so a `reconnect_wrapper` that committed while enable waited -- one runs on every launch, `list`, usage read and alert tick -- was overwritten by enable's stale snapshot, and the entry that reconnect had just wrapped was left running `xswap-codex` with no record: `auto-disable` could not restore it and every surface read the surviving record and reported OK.
+- `xswap auto-enable --wrap-codex` refuses an `xswap-codex` found through a relative PATH entry, the way it already refused a relative `codex`. It absolutised the lookup against the working directory instead, so from a project holding `bin/xswap-codex` it recorded that file as the proxy and pointed the global `codex` at it -- plain `codex` in every directory then ran a file the project controls, every later reconnect re-applied it, and `xswap doctor` read `codex -> xswap-codex` and said OK.
+- A recorded `xswap-codex` that no longer exists (xswap re-installed to another prefix, a deleted venv or worktree) is the new named skip `proxy-missing` instead of an unnoticed dangling link. Nothing checked whether the recorded proxy still existed, so a Codex update that re-pointed the entry was "reconnected" to the missing file and plain `codex` stopped resolving at all, while `wrapper_drift` still said `ok`, `auto-status` said wrapped, and `xswap doctor` blamed the PATH of the directory the entry lives in. `xswap doctor` now FAILs naming the proxy and the fix (reinstall xswap, then re-run `auto-enable --wrap-codex`), `auto-status` reports `wrapperReason: proxy-missing`, and nothing is re-pointed until it is back.
+
 ## 0.8.0
 
 Hardening follow-up to the 2026-09-10 bypass incident, from a source-level comparison with claude-swap (INT-5186). Eleven gaps where xswap could not see, remember, or report a failure that happened outside a bridged session.

@@ -426,6 +426,11 @@ class AccountTests(unittest.TestCase):
         link = self.base / "codex-link"
         gone = self.base / "gone"
         link.symlink_to(gone)
+        # The xswap-codex the record names exists, as it does on a machine whose entry was
+        # wrapped: a missing one is its own reason ('proxy-missing') and would win here.
+        proxy = self.base / "xswap-codex"
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
         def connect():
             atomic_json(self.manager.root / "auto.json", {"enabled": True, "accounts": ["main", "work"],
                         "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
@@ -447,6 +452,9 @@ class AccountTests(unittest.TestCase):
         release.chmod(0o700)
         link = self.base / "codex-link"
         link.symlink_to(release)
+        proxy = self.base / "xswap-codex"  # installed, as on a machine whose entry was wrapped
+        proxy.write_text("fixture")
+        proxy.chmod(0o700)
         def disabled():
             atomic_json(self.manager.root / "auto.json", {"enabled": False, "accounts": ["main", "work"],
                         "wrapper": {"path": str(link), "proxy": str(self.base / "xswap-codex"),
