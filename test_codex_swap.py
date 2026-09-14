@@ -783,6 +783,68 @@ class AccountTests(unittest.TestCase):
             os.close(fd)
         self.assertNotIn("second", self.manager.read()["accounts"])
 
+    def test_remove_refuses_an_account_a_running_auto_session_can_still_switch_to(self):
+        # Only `account` was read, so the pool a running bridge records in the same status.json
+        # counted for nothing: `remove --purge` deleted the login that session would move to
+        # when its current account hits the weekly limit, and the switch it was set up to make
+        # then failed against a profile directory that no longer existed.
+        self.manager.register("main")
+        second = self.manager.prepare("second")
+        atomic_json(second / "auth.json", self.auth)
+        profile_dir = self.manager.root / "profiles" / "second"
+        run_dir = self.manager.root / "auto" / "cli-runs" / "x"
+        run_dir.mkdir(parents=True)
+        (run_dir / "status.json").write_text(json.dumps({"account": "main", "accounts": ["main", "second"]}))
+        fd = os.open(run_dir / ".bridge.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with self.assertRaisesRegex(SwapError, "second is used by a running auto session"):
+                self.manager.remove("second", purge=True)
+        finally:
+            os.close(fd)
+        self.assertIn("second", self.manager.read()["accounts"])
+        self.assertTrue(profile_dir.is_dir())
+        self.assertEqual(json.loads((second / "auth.json").read_text()), self.auth)
+
+    def test_remove_purge_refuses_when_the_record_names_another_home(self):
+        # The purge deleted <root>/profiles/<name> without ever comparing it with the recorded
+        # home, so it reported "Deleted the managed profile at ..." while the login it had just
+        # dropped stayed on disk -- and it deleted whatever the convention path held instead.
+        self.manager.register("main")
+        self.manager.prepare("second")
+        elsewhere = self.base / "elsewhere" / "codex"
+        elsewhere.mkdir(parents=True)
+        atomic_json(elsewhere / "auth.json", self.auth)
+        convention = self.manager.root / "profiles" / "second"
+        (convention / "codex" / "marker").write_text("not the recorded login")
+        data = self.manager.read()
+        data["accounts"]["second"]["home"] = str(elsewhere)
+        atomic_json(self.manager.registry, data)
+        with self.assertRaisesRegex(SwapError, "recorded home is .*elsewhere"):
+            self.manager.remove("second", purge=True)
+        # Neither directory was touched, and the account can still be removed without --purge.
+        self.assertTrue((elsewhere / "auth.json").exists())
+        self.assertTrue((convention / "codex" / "marker").exists())
+        self.assertIn("second", self.manager.read()["accounts"])
+        result = self.manager.remove("second")
+        self.assertEqual(result, {"removed": "second", "purged": False, "kept": str(elsewhere)})
+        self.assertTrue((elsewhere / "auth.json").exists())
+
+    def test_remove_purge_refusal_reaches_the_command_before_it_offers_to_delete(self):
+        self.manager.register("main")
+        self.manager.prepare("second")
+        elsewhere = self.base / "elsewhere" / "codex"
+        elsewhere.mkdir(parents=True)
+        data = self.manager.read()
+        data["accounts"]["second"]["home"] = str(elsewhere)
+        atomic_json(self.manager.registry, data)
+        with patch("codex_swap.Manager", return_value=self.manager), patch("builtins.input") as prompt, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(["remove", "second", "--purge"]), 1)
+        self.assertIn("Refusing to delete a directory this registry does not name", err.getvalue())
+        prompt.assert_not_called()
+        self.assertIn("second", self.manager.read()["accounts"])
+
     def test_remove_purge_safety_failure_reports_registry_already_removed(self):
         self.manager.register("main")
         second = self.manager.prepare("second")

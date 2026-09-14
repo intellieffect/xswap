@@ -563,7 +563,16 @@ class Manager:
             atomic_json(self.registry, data)
 
     def _auto_session_running(self, name):
-        """Best effort: report whether a live auto bridge (desktop or CLI) currently uses this account."""
+        """Best effort: report whether a live auto bridge (desktop or CLI) holds this account.
+
+        Both the account the bridge runs on right now (`account`) and the pool it may
+        switch to (`accounts`, recorded since 0.8.0) count. Reading only `account` let
+        `remove --purge` delete the login a running bridge would have moved to when its
+        current account hits the weekly limit: the bridge keeps running, and the switch
+        it was set up to make then fails with "selected account is disabled or removed"
+        against a profile directory that no longer exists. The pool is a claim on the
+        account for as long as the session lives, exactly like the current selection.
+        """
         candidates = [self.root / "auto" / ".bridge.lock"]
         cli_runs = self.root / "auto" / "cli-runs"
         try:
@@ -586,13 +595,35 @@ class Manager:
                         state = json.loads((lock_path.parent / "status.json").read_text())
                     except (OSError, ValueError):
                         state = None
-                    if isinstance(state, dict) and state.get("account") == name:
-                        return True
+                    if isinstance(state, dict):
+                        pool = state.get("accounts")
+                        if state.get("account") == name or (isinstance(pool, list) and name in pool):
+                            return True
                 else:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
         return False
+
+    def purge_target(self, name, entry):
+        """The directory `--purge` deletes for a managed account: the profile its record names.
+
+        `remove --purge` deleted `<root>/profiles/<name>` and never compared it with the
+        recorded `home`. The two agree only for a profile this root created and nothing has
+        moved since; when they differ -- a registry restored or copied under another
+        CODEX_SWAP_HOME, a hand-edited `home` -- the purge reported "Deleted the managed
+        profile at ..." while the login it had just dropped stayed on disk, and it deleted
+        whatever the convention path happened to hold instead. Only a human can say which of
+        the two was meant, so name both and delete neither.
+        """
+        target = self.root / "profiles" / name
+        recorded = Path(entry["home"])
+        if recorded != target / "codex":
+            raise SwapError(f"{name}'s recorded home is {recorded}, but --purge deletes the managed profile at "
+                            f"{target}, which is not where that login lives. Refusing to delete a directory this "
+                            f"registry does not name: run xswap remove {name} without --purge, then delete "
+                            f"{recorded} yourself if you no longer want it.")
+        return target
 
     def remove(self, name, purge=False):
         from xswap_cli import read_settings
@@ -604,6 +635,9 @@ class Manager:
             if self._auto_session_running(name):
                 raise SwapError(f"{name} is used by a running auto session.")
             data = self.read()
+            # Before anything is dropped: a purge that cannot name its directory must leave the
+            # registry entry in place, so the account can still be removed without --purge.
+            target = self.purge_target(name, data["accounts"][name]) if purge and data["accounts"][name].get("managed") else None
             entry = data["accounts"].pop(name)
             if data["active"] == name:
                 data["active"] = None
@@ -612,8 +646,7 @@ class Manager:
             self._forget_auth_failure(name)
             purged = False
             kept = entry["home"]
-            if purge and entry.get("managed"):
-                target = self.root / "profiles" / name
+            if target is not None:
                 resolved = target.resolve()
                 if (resolved != target or resolved.is_symlink() or not resolved.is_dir()
                         or resolved.stat().st_uid != os.getuid()):
@@ -1410,8 +1443,10 @@ def main(argv=None):
         elif args.command == "remove":
             name, _ = manager.account(args.name)
             entry = manager.read()["accounts"][name]
-            target = manager.root / "profiles" / name
             will_purge = args.purge and entry.get("managed")
+            # The same directory remove() will delete, refused here when the record names
+            # another one -- before the prompt offers to delete it.
+            target = manager.purge_target(name, entry) if will_purge else None
             if args.purge and not entry.get("managed"):
                 print(f"--purge is ignored for {name}: it is a registered home, not a managed profile.")
             if not args.yes:
