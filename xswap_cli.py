@@ -1098,6 +1098,14 @@ def enable(manager, accounts, wrap=False):
         atomic_json(manager.root / 'auto.json', settings)
     print('Auto switching enabled: ' + ' -> '.join(names) + '. New xswap CLI/app sessions use the pool.' +
           (' The codex command is also connected.' if settings.get('wrapper') else ''))
+    # The record that decides what plain `codex` does went into the root this shell named, and
+    # every other shell, launchd job and desktop app reads its own. Said here because this is
+    # where the choice is made; doctor's state root row repeats it afterwards.
+    from codex_swap import ROOT_VARIABLE, default_root
+    if os.environ.get(ROOT_VARIABLE) and settings.get('wrapper') and manager.root != default_root():
+        print(f'xswap: this shell\'s {ROOT_VARIABLE} put that record in {manager.root}; a shell, launchd job or '
+              f'app without {ROOT_VARIABLE} reads {default_root()} instead and runs whatever selection it holds. '
+              f'Export {ROOT_VARIABLE}={manager.root} wherever codex runs.', file=sys.stderr)
 
 
 def set_policy(manager, weekly_remaining):
@@ -1207,31 +1215,49 @@ def passthrough_env(manager, args):
     return manager.env(home)
 
 
-def missing_codex_message(real, settings):
+def missing_codex_message(real, settings, root=None):
     """One explicit stderr line for a wrapped codex entry with no real Codex behind it
-    (a purged runtime home that held the release, or a lost auto.json record)."""
+    (a purged runtime home that held the release, or a lost auto.json record).
+
+    `root` is the state root this shell read. It belongs in the line because the shell,
+    not the machine, chose it: with CODEX_SWAP_HOME exported in one shell and not in
+    another, the same `codex` entry answered to a different auto.json -- and in the shell
+    without it the recovery printed here cannot work, because `auto-disable` finds no
+    record there and `auto-enable --wrap-codex` refuses an entry it has none for.
+    """
     names = ','.join(settings.get('accounts') or []) or 'NAME,NAME'
     reconnect = f'xswap auto-enable --accounts {names} --wrap-codex'
+    where_root = f' This shell reads xswap state from {root} ({state_root_source()}).' if root else ''
     if real and not os.path.isabs(real):
         # Reinstalling Codex cannot fix this one: the record, not the installation, is what
         # cannot be resolved, and `auto-disable` leaves the entry it names untouched.
         return (f'xswap: the codex command is connected to xswap, but the real Codex auto.json records ({real}) is '
-                'not an absolute path, so it names a different file in every directory. Run: xswap doctor. '
+                f'not an absolute path, so it names a different file in every directory.{where_root} Run: xswap doctor. '
                 f'Recover: {DRIFT_FIXES[RELATIVE_RECORD_REASON].format(reconnect=reconnect)}')
     where = f'{real} is missing' if real else 'auto.json records no realCodex'
-    return (f'xswap: the codex command is connected to xswap, but the real Codex executable is unavailable ({where}). '
-            f'Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then {reconnect}')
+    return (f'xswap: the codex command is connected to xswap, but the real Codex executable is unavailable '
+            f'({where}).{where_root} Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then {reconnect}')
+
+
+def state_root_source(env=None):
+    """How this environment chose its state root, in the words every surface uses."""
+    from codex_swap import ROOT_VARIABLE
+    value = (os.environ if env is None else env).get(ROOT_VARIABLE)
+    return f'selected by {ROOT_VARIABLE}' if value else f'the default; {ROOT_VARIABLE} is not set in this shell'
 
 
 def codex_main():
     from codex_swap import Manager, SwapError
     try:
-        manager = Manager()
+        # create=False: this runs in whatever shell plain `codex` was typed in, and a shell
+        # without CODEX_SWAP_HOME reads the default root. Creating it made the failure below
+        # leave an empty second state root behind, which the recovery it prints cannot use.
+        manager = Manager(create=False)
         settings = read_settings(manager)
         recorded = (settings.get('wrapper') or {}).get('realCodex')
         real = recorded_real_codex(settings)
         if not real or not Path(real).is_file():
-            print(missing_codex_message(recorded, settings), file=sys.stderr)
+            print(missing_codex_message(recorded, settings, manager.root), file=sys.stderr)
             return 1
         args = sys.argv[1:]
         bypass = os.environ.get('XSWAP_BYPASS') == '1'

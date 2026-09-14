@@ -14,7 +14,7 @@ import stat
 import subprocess
 import time
 
-from codex_swap import SwapError, __version__, check_file_store, identity, resolve_openclaw_package_root
+from codex_swap import ROOT_VARIABLE, SwapError, __version__, check_file_store, default_root, identity, resolve_openclaw_package_root
 from xswap_credentials import CredentialError, read_auth
 from xswap_live import LiveError, jwt_claims
 from xswap_cli import BYPASS_REASON, BYPASS_VARIABLE, DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, bypass_set, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, path_state, read_settings, recorded_real_codex, status_data, wrapper_drift
@@ -251,6 +251,26 @@ def check_bypass(settings, env=None):
                      f"effect as soon as the codex command is connected. Fix: {fix}")
     return check("codex bypass", FAIL, f"{BYPASS_VARIABLE}=1 is set here ({BYPASS_REASON}): {cause}, so the "
                  f"wrapped entry {wrapper['path']} applies no selection in this shell. Fix: {fix}")
+
+
+def check_state_root(manager, env=None):
+    """Which auto.json this shell reads, when a variable rather than the default chose it.
+
+    None when CODEX_SWAP_HOME is not set: every shell then reads the same root and the
+    storage row already names it. When it is set, the same wrapped `codex` entry answers to
+    a different auto.json in any shell, launchd job or desktop app that does not export it
+    -- another account and another real Codex, or no record at all, in which case plain
+    `codex` reports the real Codex as unavailable and neither repair it prints can run
+    there (2026-09-13). Read-only, and the other root is named, never opened.
+    """
+    if not (os.environ if env is None else env).get(ROOT_VARIABLE):
+        return None
+    default = default_root()
+    if manager.root == default:
+        return check("state root", OK, f"{manager.root} ({ROOT_VARIABLE} names the default root)")
+    return check("state root", WARN, f"{manager.root}, selected by {ROOT_VARIABLE}; a shell, launchd job or app "
+                 f"without that variable reads {default} instead, so plain codex there follows whatever selection "
+                 f"that root holds, or none. Fix: export {ROOT_VARIABLE}={manager.root} wherever codex runs")
 
 
 def check_credential_store(manager):
@@ -687,6 +707,9 @@ def run(manager):
         bypass = check_bypass(settings)
         if bypass:
             results.append(bypass)
+        state_root = check_state_root(manager)
+        if state_root:
+            results.append(state_root)
     except LiveError as exc:
         settings, settings_ok = {}, False
         # One FAIL for the corrupted file; wrapper/auto-pool would only repeat the same cause.

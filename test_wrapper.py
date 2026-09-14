@@ -26,7 +26,7 @@ from unittest.mock import ANY, patch
 import test_cli
 import test_codex_swap
 import xswap_doctor as doctor
-from codex_swap import SwapError, __version__, atomic_json
+from codex_swap import Manager, SwapError, __version__, atomic_json
 from codex_swap import main as codex_swap_main
 from xswap_cli import (RELATIVE_ENTRY_REASON, RELATIVE_RECORD_REASON, STALE_RUN_SECONDS, codex_main,
                        codex_path_entries, disable, enable,
@@ -1211,6 +1211,80 @@ class PathEntriesTests(WrapperFixture):
         ok = doctor.check_wrapper(settings, accounts, env={'PATH': str(cli.parent)})
         self.assertEqual((ok['status'], ok['detail']), ('OK', f'{cli} -> xswap-codex'))
         self.assertEqual(os.readlink(cli), str(proxy))  # doctor is read-only
+
+
+class StateRootTests(WrapperFixture):
+    """CODEX_SWAP_HOME decides which auto.json a shell's `codex` obeys; say so where it decides."""
+
+    def fake_home(self):
+        """A HOME with no xswap state, so the default root is this test's to inspect."""
+        home = self.base / 'fake-home'
+        home.mkdir()
+        return home, home / '.local/share/codex-swap'
+
+    def test_a_pass_through_that_finds_no_state_names_the_root_and_creates_nothing(self):
+        # The xswap-codex entry point runs in whatever shell plain `codex` was typed in. Without
+        # CODEX_SWAP_HOME it read the default root, reported the real Codex as unavailable
+        # without naming any root -- and created an empty ~/.local/share/codex-swap on the way,
+        # a second, stateless root in which neither repair it printed can run (2026-09-13).
+        home, default = self.fake_home()
+        with patch.dict(os.environ, {'HOME': str(home), 'CODEX_HOME': str(self.source)}), \
+                patch('sys.argv', ['xswap-codex', '--version']), patch('os.execve') as execve, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            os.environ.pop('CODEX_SWAP_HOME', None)
+            self.assertEqual(codex_main(), 1)
+        execve.assert_not_called()
+        self.assertFalse(default.exists())  # a failing pass-through invents no state root
+        self.assertIn('the real Codex executable is unavailable (auto.json records no realCodex)', err.getvalue())
+        self.assertIn(f'This shell reads xswap state from {default} '
+                      '(the default; CODEX_SWAP_HOME is not set in this shell)', err.getvalue())
+
+    def test_a_pass_through_names_the_root_a_variable_chose(self):
+        # The same failure in the shell that does export it: the root is the fact that tells the
+        # two shells apart, so it is in the line whichever of them printed it.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        real.unlink()
+        with patch.dict(os.environ, {'CODEX_SWAP_HOME': str(self.manager.root), 'CODEX_HOME': str(self.source)}), \
+                patch('sys.argv', ['xswap-codex', '--version']), patch('os.execve') as execve, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(codex_main(), 1)
+        execve.assert_not_called()
+        self.assertIn(f'This shell reads xswap state from {self.manager.root} (selected by CODEX_SWAP_HOME)',
+                      err.getvalue())
+
+    def test_connecting_the_codex_command_says_which_root_the_record_went_to(self):
+        # `auto-enable --wrap-codex` writes the record that decides what plain `codex` does, into
+        # the root this one shell named, and said nothing about it: every other shell, launchd
+        # job and desktop app reads its own root and runs a different selection there.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        home, default = self.fake_home()
+        with patch.dict(os.environ, {'HOME': str(home), 'CODEX_SWAP_HOME': str(self.manager.root)}), \
+                self.which(proxy, cli), contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            enable(self.manager, 'main,second', wrap=True)
+        self.assertIn('The codex command is also connected.', out.getvalue())
+        self.assertIn(f"this shell's CODEX_SWAP_HOME put that record in {self.manager.root}", err.getvalue())
+        self.assertIn(f'without CODEX_SWAP_HOME reads {default} instead', err.getvalue())
+        self.assertIn(f'Export CODEX_SWAP_HOME={self.manager.root} wherever codex runs', err.getvalue())
+        self.assertFalse(default.exists())  # naming the other root never creates it
+
+    def test_doctor_names_the_root_only_when_a_variable_decided_it(self):
+        home, default = self.fake_home()
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            os.environ.pop('CODEX_SWAP_HOME', None)
+            self.assertIsNone(doctor.check_state_root(self.manager))  # every shell reads the same root
+            row = doctor.check_state_root(self.manager, {'CODEX_SWAP_HOME': str(self.manager.root)})
+        self.assertEqual(row['status'], 'WARN')
+        self.assertIn(f'{self.manager.root}, selected by CODEX_SWAP_HOME', row['detail'])
+        self.assertIn(f'without that variable reads {default} instead', row['detail'])
+        self.assertIn(f'Fix: export CODEX_SWAP_HOME={self.manager.root} wherever codex runs', row['detail'])
+        # A variable that names the default root splits nothing: it is what every shell reads.
+        with patch.dict(os.environ, {'HOME': str(home), 'CODEX_SWAP_HOME': str(default)}):
+            row = doctor.check_state_root(Manager(root=default, create=False))
+        self.assertEqual((row['status'], row['detail']),
+                         ('OK', f'{default} (CODEX_SWAP_HOME names the default root)'))
+        self.assertFalse(default.exists())
 
 
 class BypassVariableTests(WrapperFixture):

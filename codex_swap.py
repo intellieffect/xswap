@@ -349,11 +349,28 @@ def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
     return winner["name"], {"remaining": remaining, "candidates": summary}
 
 
+# The state root every shell reads unless it exports ROOT_VARIABLE: which accounts exist,
+# which one is selected, and the record that connects the `codex` command all live under it,
+# so the variable silently decides what plain `codex` does in that shell (2026-09-13).
+ROOT_VARIABLE = "CODEX_SWAP_HOME"
+
+
+def default_root():
+    """The state root a shell without CODEX_SWAP_HOME uses; a path, never a read of it."""
+    return (Path.home() / ".local/share/codex-swap").expanduser().resolve()
+
+
 class Manager:
-    def __init__(self, root=None, source=None):
-        self.root = Path(root or os.environ.get("CODEX_SWAP_HOME", Path.home() / ".local/share/codex-swap")).expanduser().resolve()
+    def __init__(self, root=None, source=None, create=True):
+        self.root = Path(root or os.environ.get(ROOT_VARIABLE, default_root())).expanduser().resolve()
         self.source = Path(source or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
-        private_dir(self.root)
+        # `create=False` for a caller that only reads state and must not invent it: the
+        # xswap-codex entry point ran in whatever shell plain `codex` was typed in, so a shell
+        # without CODEX_SWAP_HOME made it create an empty ~/.local/share/codex-swap on its way
+        # to reporting that the real Codex was unavailable -- a second, stateless root that
+        # `auto-disable` and `auto-enable --wrap-codex` then both refused to work with.
+        if create or self.root.is_dir():
+            private_dir(self.root)
         self.registry = self.root / "accounts.json"
 
     @contextlib.contextmanager
