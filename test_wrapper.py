@@ -452,6 +452,42 @@ class WrapperEntryTests(WrapperFixture):
         self.assertNotIn('Traceback', err.getvalue())
 
 
+class EnableLockTests(WrapperFixture):
+    """enable() reads auto.json inside its own lock, like every other writer of that file."""
+
+    def test_a_commit_made_while_enable_waited_for_the_lock_is_not_discarded(self):
+        # enable() read auto.json before taking the lock, so a snapshot taken while a
+        # concurrent reconnect_wrapper held it -- one runs on every launch, list, usage read
+        # and alert tick, and holds across the OpenClaw subprocess and plugin copies -- was
+        # written back on top of that commit. The entry the competitor had just wrapped kept
+        # running xswap-codex with no record left: `auto-disable` exits 0 and leaves it, and
+        # every surface reads the surviving record and reports OK.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.repoint(cli, proxy)
+        record = {'path': str(cli), 'originalTarget': str(real), 'realCodex': str(real), 'proxy': str(proxy)}
+        committed = {'enabled': True, 'accounts': ['main', 'second'], 'wrapper': record}
+        acquire = self.manager.locked
+
+        @contextlib.contextmanager
+        def commit_then_lock():
+            # The competitor held the lock for the whole time enable was reading; its commit
+            # lands the moment enable is allowed in, which is what makes enable's snapshot stale.
+            atomic_json(self.manager.root / 'auto.json', committed)
+            with acquire():
+                yield
+
+        with patch.object(self.manager, 'codex', lambda: str(real)), \
+                patch.object(self.manager, 'locked', commit_then_lock), \
+                contextlib.redirect_stdout(io.StringIO()):
+            enable(self.manager, 'main,second')
+        stored = read_settings(self.manager)
+        self.assertEqual(stored['wrapper'], record)  # the wrapped entry still has its rollback record
+        self.assertEqual((stored['enabled'], stored['accounts']), (True, ['main', 'second']))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            disable(self.manager)
+        self.assertEqual(os.readlink(cli), str(real))  # and auto-disable can restore it
+
+
 class PathEntriesTests(WrapperFixture):
     """codex_path_entries(settings, env): every codex a PATH lookup can run, in lookup order.
 

@@ -898,9 +898,15 @@ def enable(manager, accounts, wrap=False):
     from codex_swap import atomic_json
     names = [value.strip() for value in accounts.split(',') if value.strip()]
     AccountPool(manager, names, manager.codex())
-    settings = read_settings(manager)
-    settings.update({'enabled': True, 'accounts': names})
     with manager.locked():
+        # Inside the lock, like every other auto.json writer. Read outside it, this snapshot
+        # was taken while a concurrent reconnect_wrapper (every launch, list, usage read and
+        # alert tick runs one) held the lock, and the write below then discarded that commit:
+        # the entry it had just wrapped kept running xswap-codex with no record left, so
+        # `auto-disable` could not restore it and doctor still reported OK. The competitor's
+        # whole lock hold is the window, not the microseconds between these two lines.
+        settings = read_settings(manager)
+        settings.update({'enabled': True, 'accounts': names})
         if wrap:
             proxy = shutil.which('xswap-codex')
             executable = shutil.which('codex')
