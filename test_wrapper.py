@@ -677,6 +677,59 @@ class DependencyEntryTests(WrapperFixture):
         self.assertEqual([w['path'] for w in settings['wrappers']], [str(cli)])
 
 
+class DisableRecordTests(WrapperFixture):
+    """auto-disable keeps the rollback data for every entry it refused to restore."""
+
+    def secondary(self, path, real, proxy):
+        return {'path': str(path), 'originalTarget': str(real), 'realCodex': str(real), 'proxy': str(proxy)}
+
+    def test_records_disable_would_not_act_on_survive_the_disable(self):
+        # `wrappers` was popped whatever happened, so the records for the entries disable had
+        # just said it was leaving untouched -- a relative one it cannot identify, one changed
+        # outside xswap -- went with them: those entries kept running xswap-codex with nothing
+        # left naming what they should point back at, and no later command could restore them.
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        restorable = self.base / 'other-bin'
+        restorable.mkdir()
+        (restorable / 'codex').symlink_to(proxy)
+        changed = self.base / 'changed-bin'
+        changed.mkdir()
+        (changed / 'codex').symlink_to(updated)  # something else re-pointed it after xswap wrapped it
+        settings = read_settings(self.manager)
+        settings['wrappers'] = [self.secondary(restorable / 'codex', real, proxy),
+                                self.secondary('bin/codex', real, proxy),
+                                self.secondary(changed / 'codex', real, proxy)]
+        atomic_json(self.manager.root / 'auto.json', settings)
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            disable(self.manager)
+        # A relative record is reported wherever it is found, `wrappers` included.
+        self.assertIn('codex entry bin/codex is not an absolute path; left it untouched', err.getvalue())
+        self.assertIn(f'codex entry {changed / "codex"} changed outside xswap; left it untouched', err.getvalue())
+        stored = read_settings(self.manager)
+        self.assertEqual([w['path'] for w in stored['wrappers']], ['bin/codex', str(changed / 'codex')])
+        self.assertEqual(stored['wrappers'][0]['originalTarget'], str(real))
+        # What was restored is restored, and its record is dropped as before.
+        self.assertEqual(os.readlink(cli), str(real))
+        self.assertEqual(os.readlink(restorable / 'codex'), str(real))
+        self.assertEqual(os.readlink(changed / 'codex'), str(updated))  # never "restored" over
+        self.assertIs(stored['enabled'], False)
+
+    def test_a_disable_that_restores_everything_still_drops_wrappers(self):
+        real, updated, proxy, cli = self.wrapped_fixture()
+        self.connect(proxy, cli)
+        restorable = self.base / 'other-bin'
+        restorable.mkdir()
+        (restorable / 'codex').symlink_to(proxy)
+        settings = read_settings(self.manager)
+        settings['wrappers'] = [self.secondary(restorable / 'codex', real, proxy)]
+        atomic_json(self.manager.root / 'auto.json', settings)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            disable(self.manager)
+        self.assertNotIn('wrappers', read_settings(self.manager))
+
+
 class RecordedRealCodexTests(WrapperFixture):
     """A `realCodex` that is not absolute is never resolved against the working directory."""
 

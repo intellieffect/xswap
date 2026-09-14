@@ -1125,8 +1125,17 @@ def disable(manager):
     from xswap_relocate import inside_root
     with manager.locked():
         settings = read_settings(manager)
+        primary = settings.get('wrapper')
+        # Every secondary record this run did not restore. `wrappers` was popped whatever
+        # happened, so the records for the entries disable had just refused to touch -- a
+        # relative one it cannot identify, one changed outside xswap -- went with it: the entry
+        # kept running xswap-codex with its rollback target gone, and no later command, doctor
+        # included, could still name what it should point back at.
+        unrestored = []
         for record in wrapper_records(settings):
             if not os.path.isabs(record['path']):
+                if record is not primary:
+                    unrestored.append(record)
                 # A record written by 0.7.8 can hold the relative `shutil.which` result
                 # (RELATIVE_RECORD_REASON). Resolving it here would restore whatever `codex`
                 # this working directory holds -- a shim inside an unrelated repository -- and
@@ -1148,11 +1157,17 @@ def disable(manager):
                     print(f'xswap: {path} now points inside the xswap state directory ({restored}); '
                           'run: xswap relocate-codex', file=sys.stderr)
             else:
+                if record is not primary:
+                    unrestored.append(record)
                 # Several entries can be wrapped now, so name the one left behind.
                 print(f'codex entry {path} changed outside xswap; left it untouched.', file=sys.stderr)
-        # Secondary records are restored (or were changed outside xswap) and have nothing
-        # left to recover; only the primary keeps its recovery data, as before.
-        settings.pop('wrappers', None)
+        # A restored secondary record has nothing left to recover and is dropped, as before;
+        # one disable could not act on keeps its rollback data, because that entry may still
+        # run xswap-codex and the record is the only thing that names what it was.
+        if unrestored:
+            settings['wrappers'] = unrestored
+        else:
+            settings.pop('wrappers', None)
         settings['enabled'] = False
         atomic_json(manager.root / 'auto.json', settings)
     print('Auto switching disabled for new sessions. Running auto sessions remain active.')
