@@ -31,7 +31,7 @@ from xswap_alert import AlertError
 from xswap_alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 from xswap_path import absolute_which, relative_entry_message
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 
 class SwapError(Exception):
