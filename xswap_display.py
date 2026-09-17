@@ -178,6 +178,22 @@ def summary(row, now=None, lang="en"):
             'exhausted': left == 0, 'cached': row.get('cached', False), 'fetchedAt': row.get('fetchedAt')}
 
 
+def reset_order(rows, now=None):
+    """List order: the account whose weekly window resets soonest first.
+
+    Slot numbers travel with the row (`row['slot']`), so reordering the list never
+    moves the number `xswap switch <number>` takes. Rows without a readable weekly
+    reset keep their registration order at the end.
+    """
+    now = time.time() if now is None else now
+    def key(item):
+        index, row = item
+        window = weekly(row)
+        at = window['resetsAt'] if window else None
+        return (at is None, at if at is not None else 0.0, index)
+    return [row for _, row in sorted(enumerate(rows), key=key)]
+
+
 def policy_label(settings, lang="en"):
     if not settings.get('enabled'):
         return _t(lang, 'autoswitch_off')
@@ -193,6 +209,7 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
     if color is None:
         color = sys.stdout.isatty() and 'NO_COLOR' not in os.environ and os.environ.get('TERM') != 'dumb'
     now = time.time() if now is None else now
+    rows = reset_order(rows, now)
     lines = [_t(lang, 'header'), _t(lang, 'legend'), '']
     for index, row in enumerate(rows, 1):
         item = summary(row, now, lang)
