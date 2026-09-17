@@ -13,7 +13,7 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.8.1'
+uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
 xswap --version
 ```
 
@@ -261,7 +261,7 @@ After a successful install, `xswap upgrade` lists every running bridged session 
 Or run the underlying command directly:
 
 ```sh
-uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.8.1'
+uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
 ```
 
 Before uninstalling, restore the optional wrapper:
