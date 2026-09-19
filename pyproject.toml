@@ -5,16 +5,21 @@ build-backend = "hatchling.build"
 [project]
 name = "intellieffect-xswap"
 version = "0.8.2"
-description = "Account switching for Codex CLI, macOS desktop, and local OpenClaw"
+description = "Account switching for Codex CLI, macOS desktop, and local OpenClaw (Codex is the only provider today)"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
+keywords = ["codex", "cli", "account-switching", "openclaw", "chatgpt", "quota"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Utilities",
 ]
 requires-python = ">=3.11"
@@ -32,6 +37,8 @@ xswap-codex = "xswap.codex_cli:codex_main"
 
 [project.urls]
 Repository = "https://github.com/intellieffect/xswap"
+Issues = "https://github.com/intellieffect/xswap/issues"
+Changelog = "https://github.com/intellieffect/xswap/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xswap"]
