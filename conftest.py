@@ -58,7 +58,8 @@ def _freeze_real_roots() -> tuple[Path, ...]:
     ]
     # A developer with either variable exported in their normal shell has
     # their real store at the override, not at the default above.
-    for variable in ("CODEX_SWAP_HOME", "CODEX_HOME"):
+    # `OPENCLAW_STATE_DIR` relocates the OpenClaw sqlite store the same way.
+    for variable in ("CODEX_SWAP_HOME", "CODEX_HOME", "OPENCLAW_STATE_DIR"):
         value = os.environ.get(variable)
         if value:
             candidates.append(Path(value).expanduser())
@@ -79,12 +80,24 @@ def _resolved(path: Path) -> Path:
         return path
 
 
+def _fold(text: str) -> str:
+    """Case-fold on macOS, whose default APFS volume is case-insensitive.
+
+    `~/.Codex/accounts.json` and `~/.codex/accounts.json` are one file there,
+    so a case-sensitive compare would wave the first spelling through.
+    `os.path.normcase` is a no-op on POSIX, hence the explicit fold. Linux
+    filesystems are case-sensitive and are compared exactly.
+    """
+    return text.casefold() if sys.platform == "darwin" else text
+
+
 _REAL_ROOTS = _freeze_real_roots()
+_FOLDED_ROOTS = tuple((root, Path(_fold(str(root)))) for root in _REAL_ROOTS)
 
 # Cheap pre-filter, checked as a plain substring before any `Path` is built:
 # the hook runs on EVERY `open` in the process (imports, pytest internals,
 # stdlib chatter), and the overwhelming majority carry none of these.
-_HINTS = tuple({root.name for root in _REAL_ROOTS if root.name})
+_HINTS = tuple({_fold(root.name) for root in _REAL_ROOTS if root.name})
 
 # Audit events that announce a write. Names and argument shapes are CPython's
 # (`sys.audit` table): `shutil.rmtree`/`shutil.move` have no events of their
@@ -100,8 +113,15 @@ _WRITE_EVENTS = frozenset({
     "os.symlink",
     "os.link",
     "os.chmod",
+    "os.chown",
+    "os.utime",
+    "os.setxattr",
+    "os.removexattr",
     "os.truncate",
     "shutil.rmtree",
+    # sqlite opens its file from C, which emits NO `open` event -- this is the
+    # only signal, and sqlite is exactly how production writes `~/.openclaw`.
+    "sqlite3.connect",
 })
 
 
@@ -128,6 +148,25 @@ def _candidates(event: str, args: tuple) -> tuple:
         if isinstance(path, int) or not _is_write_open(mode, flags):
             return ()  # an already-open fd, or a read
         return (path,)
+    if event == "sqlite3.connect":
+        database = args[0]
+        if isinstance(database, bytes):
+            database = os.fsdecode(database)
+        if not isinstance(database, str):
+            try:
+                database = os.fspath(database)
+            except TypeError:
+                return ()
+        if database.startswith("file:"):
+            # A URI. `mode=ro` is how production takes its read-only views and
+            # backup sources; anything else may create or write.
+            location, _, query = database[len("file:"):].partition("?")
+            if "mode=ro" in query.split("&"):
+                return ()
+            return (location,)
+        if database == ":memory:":
+            return ()
+        return (database,)
     if event == "os.rename":
         # `os.replace` and `shutil.move`'s fast path fire this too. The
         # SOURCE counts as well as the destination: moving the store out of
@@ -148,7 +187,8 @@ def _candidates(event: str, args: tuple) -> tuple:
             return (os.fspath(args[0]),)
         except TypeError:
             return ()
-    return (args[0],)  # os.mkdir / os.remove / os.rmdir / os.chmod / os.truncate
+    # os.mkdir / remove / rmdir / chmod / chown / utime / (remove|set)xattr / truncate
+    return (args[0],)
 
 
 def _real_store_audit_hook(event: str, args: tuple) -> None:
@@ -178,12 +218,21 @@ def _real_store_audit_hook(event: str, args: tuple) -> None:
             # guarded here, so join before comparing -- unconditionally, since
             # a relative spelling that already carries a hint still can never
             # equal an absolute root.
-            candidate = os.path.join(os.getcwd(), candidate)
-        if not any(hint in candidate for hint in _HINTS):
+            #
+            # Known limit: a `dir_fd=`-relative call carries only the bare
+            # name, so it is joined against the cwd rather than the directory
+            # the fd names. Nothing in this codebase writes that way.
+            try:
+                candidate = os.path.join(os.getcwd(), candidate)
+            except OSError:
+                continue  # cwd was deleted; the syscall itself will fail
+        folded = _fold(candidate)
+        if not any(hint in folded for hint in _HINTS):
             continue  # cheap reject: the common case
         target = Path(os.path.normpath(candidate))
-        for root in _REAL_ROOTS:
-            if target == root or root in target.parents:
+        folded_target = Path(os.path.normpath(folded))
+        for root, folded_root in _FOLDED_ROOTS:
+            if folded_target == folded_root or folded_root in folded_target.parents:
                 raise RealStoreWriteBlocked(
                     f"{event} refused: {target} is inside the REAL store at "
                     f"{root}, not an isolated tmp directory. Fix the test's "
@@ -209,8 +258,10 @@ def _isolate_real_state(tmp_path_factory, monkeypatch):
     macOS Keychain lookups resolve `~/Library/Keychains` -- an isolated HOME
     makes those fail for reasons that have nothing to do with what is being
     tested. The two variables below are what `codex_swap` itself resolves
-    from, and the frozen audit hook covers the `$HOME`-derived defaults.
+    from (plus the OpenClaw state directory `xswap_openclaw_state` resolves),
+    and the frozen audit hook covers the `$HOME`-derived defaults.
     """
     root = tmp_path_factory.mktemp("xswap-state")
     monkeypatch.setenv("CODEX_SWAP_HOME", str(root / "state"))
     monkeypatch.setenv("CODEX_HOME", str(root / "codex-home"))
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(root / "openclaw-state"))

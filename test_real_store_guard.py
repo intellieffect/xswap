@@ -8,6 +8,7 @@ leaves the protected root byte-identical.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -97,3 +98,47 @@ def test_a_thread_outliving_the_env_patch_is_still_refused(monkeypatch):
 
     assert failure and isinstance(failure[0], RealStoreWriteBlocked)
     assert not target.exists()
+
+
+@pytest.mark.parametrize("root", _REAL_ROOTS, ids=lambda r: str(r))
+def test_sqlite_connect_for_write_is_refused(root):
+    # sqlite opens its file from C and emits no `open` event; `sqlite3.connect`
+    # is the only signal, and it is how production writes `~/.openclaw`.
+    import sqlite3
+
+    target = root / f"guard-{uuid.uuid4().hex}.sqlite"
+    with pytest.raises(RealStoreWriteBlocked):
+        sqlite3.connect(str(target))
+    with pytest.raises(RealStoreWriteBlocked):
+        sqlite3.connect(f"file:{target}?mode=rwc", uri=True)
+    assert not target.exists()
+
+
+def test_sqlite_read_only_uri_is_allowed():
+    # Production reads the real OpenClaw store through `mode=ro`; that must
+    # reach sqlite (and fail there, the file being absent) rather than the guard.
+    import sqlite3
+
+    target = _REAL_ROOTS[0] / f"guard-{uuid.uuid4().hex}.sqlite"
+    with pytest.raises(sqlite3.OperationalError):
+        sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+    assert not target.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="APFS is case-insensitive; Linux is not")
+def test_a_differently_cased_spelling_is_refused_on_macos():
+    root = _REAL_ROOTS[0]
+    target = root.parent / root.name.upper() / f"guard-{uuid.uuid4().hex}"
+    with pytest.raises(RealStoreWriteBlocked):
+        open(target, "w")
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("call", ["utime", "chown"])
+def test_metadata_mutations_are_refused(call):
+    target = _REAL_ROOTS[0] / f"guard-{uuid.uuid4().hex}"
+    with pytest.raises(RealStoreWriteBlocked):
+        if call == "utime":
+            os.utime(target, (0, 0))
+        else:
+            os.chown(target, os.getuid(), os.getgid())
