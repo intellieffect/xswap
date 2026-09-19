@@ -44,3 +44,5 @@ These setup checks do not validate a live browser backend or page navigation. Te
 Describe the concrete problem, changed behavior, relevant tests, and compatibility limits. Keep changes focused and preserve existing account/session behavior. Code that handles auth must redact raw payloads and preserve private file permissions. New protocol behavior needs a meaningful regression test; document unsupported surfaces explicitly.
 
 By contributing, you agree to license your contribution under this repository's MIT license. Do not submit code or data you do not have permission to contribute.
+
+Participation in this project is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
