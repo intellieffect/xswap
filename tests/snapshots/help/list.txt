@@ -1,0 +1,16 @@
+usage: xswap list [-h] [--offline] [--json] [--include-spark] [--details]
+                  [--short] [--warn PCT] [--lang {en,ko}] [--cached SECONDS]
+
+options:
+  -h, --help        show this help message and exit
+  --offline         Show local account labels without fetching usage
+  --json
+  --include-spark   Include Spark quotas in text output
+  --details         Show identity and all quota window details
+  --short           Print one line for a status line/prompt: `*name p5h/p7d ·
+                    ...`
+  --warn PCT        Print a warning per codex window below PCT remaining
+                    (1-100) to stderr and exit 3
+  --lang {en,ko}    Text output language
+  --cached SECONDS  Reuse a cached quota lookup if fresher than SECONDS
+                    instead of spawning Codex (not with --offline)

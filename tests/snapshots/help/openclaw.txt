@@ -1,0 +1,23 @@
+usage: xswap openclaw [-h] [--pool POOL] [--allow-mixed] [--agent AGENTS]
+                      [--dry-run] [--backup-dir BACKUP_DIR] [--clear-cooldown]
+                      [--yes]
+                      [name]
+
+positional arguments:
+  name
+
+options:
+  -h, --help            show this help message and exit
+  --pool POOL           Comma-separated accounts (>=2) OpenClaw rotates
+                        between on its own cooldowns; mutually exclusive with
+                        NAME
+  --allow-mixed         Allow --pool accounts from different ChatGPT
+                        organizations
+  --agent AGENTS        Target only this agent (repeatable; default: all)
+  --dry-run
+  --backup-dir BACKUP_DIR
+                        Directory for small, private auth-state backups
+  --clear-cooldown      Clear a stale OpenClaw auth-profile cooldown for
+                        NAME/--pool (or every registered account), restarting
+                        the local Gateway
+  --yes                 Skip the confirmation prompt

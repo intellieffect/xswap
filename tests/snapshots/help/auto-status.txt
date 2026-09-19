@@ -1,0 +1,7 @@
+usage: xswap auto-status [-h] [--prune]
+
+options:
+  -h, --help  show this help message and exit
+  --prune     Remove every non-running CLI run record now, not only stopped
+              ones older than a day, empty ones older than a minute, and
+              others older than 7 days

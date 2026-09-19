@@ -1,0 +1,10 @@
+usage: xswap add [-h] [--device-auth] [--prepare-only] [--use] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help      show this help message and exit
+  --device-auth
+  --prepare-only
+  --use           Select this account immediately after signing in

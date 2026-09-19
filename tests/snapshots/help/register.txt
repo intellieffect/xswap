@@ -1,0 +1,8 @@
+usage: xswap register [-h] [--home HOME] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help   show this help message and exit
+  --home HOME

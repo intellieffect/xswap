@@ -1,0 +1,7 @@
+usage: xswap disable [-h] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help  show this help message and exit

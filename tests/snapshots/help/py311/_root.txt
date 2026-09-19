@@ -1,0 +1,63 @@
+usage: xswap [-h] [--version]
+             {init,register,add,login,list,usage,menubar,dashboard,status,auto-status,auto-tick,auto-enable,auto-policy,repair-plugins,relocate-codex,doctor,auto-disable,upgrade,alert,use,switch,disable,enable,remove,map,unmap,openclaw,run,app,completion}
+             ...
+
+Codex account switcher for CLI + macOS desktop. Bare xswap opens the selected
+CLI account.
+
+positional arguments:
+  {init,register,add,login,list,usage,menubar,dashboard,status,auto-status,auto-tick,auto-enable,auto-policy,repair-plugins,relocate-codex,doctor,auto-disable,upgrade,alert,use,switch,disable,enable,remove,map,unmap,openclaw,run,app,completion}
+    init                First-run setup: register, add accounts, enable auto
+                        mode, set policy, then doctor
+    register            Register an existing signed-in Codex home without
+                        copying its tokens
+    add                 Sign in to an isolated account home
+    login               Re-authenticate a registered account whose login
+                        expired
+    list                List accounts with live remaining quotas and reset
+                        times
+    usage               Show live quota windows for the selected or named
+                        account
+    menubar             Build and open the macOS weekly quota menu
+    dashboard           Private presentation JSON for the menu app
+    status              Show selected account and login status
+    auto-status         Show desktop/CLI automatic switching state (no
+                        credentials)
+    auto-tick           One proactive check for launchd/cron: if the selected
+                        account is at or below the weekly reserve, select the
+                        best pool account (exit 0 switched, 1 error, 2 no
+                        action, 3 blocked)
+    auto-enable         Enable automatic switching for new xswap CLI/app
+                        sessions
+    auto-policy         Set weekly remaining percentage for proactive
+                        switching
+    repair-plugins      Materialize legacy shared plugin links without
+                        stopping sessions
+    relocate-codex      Move a Codex release that an in-session update
+                        installed inside xswap's state directory to the
+                        reference Codex home, and link xswap's homes to it
+    doctor              Diagnose codex install, accounts, plugins, and
+                        OpenClaw (read-only, no network)
+    auto-disable        Disable auto defaults and restore the codex symlink
+    upgrade             Reinstall xswap from the latest (or a chosen) released
+                        Git tag
+    alert               Install, remove, or inspect a launchd job that polls
+                        `list --warn` and posts macOS notifications
+    use (switch)        Select the default account for xswap and xswap app
+    disable             Hold an account out of selection without deleting it
+    enable              Restore a disabled account to selection
+    remove              Drop an account's registry entry; files are kept
+                        unless --purge
+    map                 Map a directory to a default account, or list existing
+                        mappings
+    unmap               Remove a directory's account mapping
+    openclaw            Sync an account (or pool) to local OpenClaw agents and
+                        reload Gateway auth
+    run                 Run Codex with the selected or named account
+    app                 Open an account-specific desktop instance
+    completion          Print a shell completion script (see
+                        xswap_completion.py)
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit

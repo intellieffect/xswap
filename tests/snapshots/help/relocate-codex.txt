@@ -1,0 +1,5 @@
+usage: xswap relocate-codex [-h] [--dry-run]
+
+options:
+  -h, --help  show this help message and exit
+  --dry-run   Print the planned moves without changing anything

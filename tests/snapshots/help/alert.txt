@@ -1,0 +1,19 @@
+usage: xswap alert [-h] [--install] [--uninstall] [--status] [--dry-run]
+                   [--warn PCT] [--every MINUTES] [--cached SECONDS]
+                   [--auto-switch]
+
+options:
+  -h, --help        show this help message and exit
+  --install         Write the wrapper script and plist, then load it
+  --uninstall       Unload the job and delete the wrapper script and plist
+  --status          Show whether the job is installed and loaded, and the last
+                    log tail
+  --dry-run         Print what --install/--uninstall would do without changing
+                    anything
+  --warn PCT        Threshold passed to `list --warn` (1-100, default 15)
+  --every MINUTES   Polling interval in whole minutes (default 30; launchd
+                    merges under 60s)
+  --cached SECONDS  Freshness passed to `list --cached` (default 600)
+  --auto-switch     With --install: run `xswap auto-tick --cached SECONDS`
+                    before the warn step and post a notification when it
+                    switches

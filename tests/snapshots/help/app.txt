@@ -1,0 +1,14 @@
+usage: xswap app [-h] [--app APP] [--dry-run] [--auto] [--accounts ACCOUNTS]
+                 [name]
+
+positional arguments:
+  name
+
+options:
+  -h, --help           show this help message and exit
+  --app APP
+  --dry-run
+  --auto               Keep one desktop session and switch accounts after
+                       quota exhaustion (experimental)
+  --accounts ACCOUNTS  Explicit fallback order, e.g. work,main; requires
+                       --auto

@@ -1,0 +1,17 @@
+usage: xswap use [-h] [--best] [--model MODEL] [--cached SECONDS]
+                 [--default-only] [--openclaw]
+                 [name]
+
+positional arguments:
+  name              Account name; switch also accepts a 1-based slot from
+                    xswap list
+
+options:
+  -h, --help        show this help message and exit
+  --best            Select the account with the most remaining quota right now
+  --model MODEL     Model hint for --best; never passed to codex
+  --cached SECONDS  With --best, reuse a cached quota lookup if fresher than
+                    SECONDS instead of spawning Codex
+  --default-only    Change only the default for future sessions
+  --openclaw        Also update all local OpenClaw agents and reload Gateway
+                    auth

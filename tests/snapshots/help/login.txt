@@ -1,0 +1,8 @@
+usage: xswap login [-h] [--device-auth] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help     show this help message and exit
+  --device-auth

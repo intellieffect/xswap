@@ -1,0 +1,5 @@
+usage: xswap auto-policy [-h] --weekly-remaining WEEKLY_REMAINING
+
+options:
+  -h, --help            show this help message and exit
+  --weekly-remaining WEEKLY_REMAINING

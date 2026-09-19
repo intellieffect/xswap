@@ -1,0 +1,8 @@
+usage: xswap map [-h] [name] [path]
+
+positional arguments:
+  name
+  path
+
+options:
+  -h, --help  show this help message and exit

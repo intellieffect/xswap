@@ -1,0 +1,5 @@
+usage: xswap repair-plugins [-h] [--dry-run]
+
+options:
+  -h, --help  show this help message and exit
+  --dry-run

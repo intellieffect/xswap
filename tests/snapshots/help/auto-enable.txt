@@ -1,0 +1,7 @@
+usage: xswap auto-enable [-h] --accounts ACCOUNTS [--wrap-codex]
+
+options:
+  -h, --help           show this help message and exit
+  --accounts ACCOUNTS
+  --wrap-codex         Also wrap the user-owned codex symlink, with rollback
+                       metadata

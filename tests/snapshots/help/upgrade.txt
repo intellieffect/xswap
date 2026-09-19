@@ -1,0 +1,6 @@
+usage: xswap upgrade [-h] [--tag TAG] [--dry-run]
+
+options:
+  -h, --help  show this help message and exit
+  --tag TAG   Install this tag instead of the latest release, e.g. v0.5.1
+  --dry-run
