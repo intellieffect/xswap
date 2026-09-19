@@ -60,5 +60,39 @@ class CollaboratorModules(unittest.TestCase):
                 self.assertNotIn("xswap.codex_cli", imported)
 
 
+class CodexCliLayers(unittest.TestCase):
+    """The layers `codex_cli` was split into must stay layers (INT-5610).
+
+    `settings` reads auto.json, `wrapper` owns the codex symlink, `runs` owns the
+    bridge run records, and only `codex_cli` -- the live bridge and the launcher --
+    sits on top of all three. Reaching back up at import time would restore the
+    1,600-line module the split removed, and would put the whole bridge (asyncio,
+    the WebSocket protocol) behind `doctor` and `tick` again. Function-local
+    imports are still allowed: that is how `wrapper._late` and `runs.reopen_command`
+    keep the suite's `patch('xswap.codex_cli.<name>')` targets biting.
+    """
+
+    LAYERS = ("xswap.settings", "xswap.wrapper", "xswap.runs")
+
+    def test_layers_do_not_import_the_bridge_or_the_command_line(self):
+        for module in self.LAYERS:
+            with self.subTest(module=module):
+                imported = imported_by(module)
+                self.assertNotIn("xswap.codex_cli", imported)
+                self.assertNotIn("xswap.cli", imported)
+
+    def test_settings_is_below_the_wrapper_and_the_run_records(self):
+        imported = imported_by("xswap.settings")
+        self.assertNotIn("xswap.wrapper", imported)
+        self.assertNotIn("xswap.runs", imported)
+
+    def test_doctor_and_tick_no_longer_pull_in_the_bridge(self):
+        # Both used to import `codex_cli` at module level for `read_settings` and the
+        # wrapper/run helpers; they now take them from `settings`, `wrapper` and `runs`.
+        for module in ("xswap.doctor", "xswap.tick"):
+            with self.subTest(module=module):
+                self.assertNotIn("xswap.codex_cli", imported_by(module))
+
+
 if __name__ == "__main__":
     unittest.main()

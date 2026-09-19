@@ -25,8 +25,8 @@ dependencies = ["websockets>=15,<18"]
 dev = ["pytest>=8", "pytest-xdist>=3.5", "pytest-cov>=5"]
 
 [project.scripts]
-xswap = "xswap.manager:main"
-codex-swap = "xswap.manager:main"
+xswap = "xswap.cli:main"
+codex-swap = "xswap.cli:main"
 xswap-proxy = "xswap.live:proxy_main"
 xswap-codex = "xswap.codex_cli:codex_main"
 

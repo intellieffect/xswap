@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from xswap.manager import describe_switch_report, is_auth_failed, rank_candidates, window_percent
-from xswap.codex_cli import read_settings
+from xswap.settings import read_settings
 from xswap.live import buckets_available, validate_threshold
 from xswap.usage import AUTH_FAILED_STATUS, SIGN_IN_REQUIRED, is_ok
 
