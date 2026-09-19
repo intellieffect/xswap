@@ -13,10 +13,8 @@ Independent community software. Not affiliated with or endorsed by OpenAI. Use y
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, and an installed Codex CLI. macOS and Linux are supported; desktop launching is macOS-only. Windows is not supported. No GitHub login is required for installation.
 
 ```sh
-```sh
 uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
 xswap --version
-```
 ```
 
 If the command isn't found, run `uv tool update-shell` and open a new terminal. The package name is `intellieffect-xswap`; this release is installed from GitHub, not PyPI.
@@ -66,10 +64,8 @@ zsh: `xswap completion zsh > "${fpath[1]}/_xswap"`, or add `eval "$(xswap comple
 ## Quick start
 
 ```sh
-```sh
 codex login                 # Skip if already signed in
 xswap init                  # Register that login, optionally add more accounts, enable auto mode, then run doctor
-```
 ```
 
 <details>
@@ -82,7 +78,6 @@ xswap init                  # Register that login, optionally add more accounts,
 Or run the four steps by hand:
 
 ```sh
-```sh
 codex login                 # Skip if already signed in
 xswap register main         # Reference the current login without copying it
 xswap add work --use        # Sign in to a separate local profile and select it
@@ -90,11 +85,9 @@ xswap login work            # Re-authenticate work after its login expires
 xswap use --best            # Select whichever signed-in account has the most quota right now
 xswap                       # Launch the selected account's CLI
 ```
-```
 
 `main` and `work` are example local labels. Each account stores its own credentials and conversations. Credential storage must use Codex's `file` mode; `keyring` and `auto` modes are rejected without changing your configuration. The very first account added is selected automatically even without `--use`; `xswap add work` on its own leaves an existing selection unchanged.
 
-```sh
 ```sh
 xswap list                  # Live quotas, Spark hidden by default
 xswap list --include-spark  # Also display Spark quotas
@@ -104,7 +97,6 @@ xswap app work              # Separate macOS desktop profile
 xswap disable work          # Hold an account out of selection without deleting it
 xswap enable work           # Restore it
 xswap remove work           # Drop an account from xswap
-```
 ```
 
 <details>
@@ -124,9 +116,7 @@ Quota checks use Codex App Server, do not submit a model prompt, and may refresh
 ### Pick the account with the most quota
 
 ```sh
-```sh
 xswap run --best -- exec "summarize this repo"
-```
 ```
 
 `codex exec` and other non-interactive commands have no `--remote` hook, so the live auto bridge below cannot switch them mid-run; with the `codex` command connected they run as the selected account (see Automatic switching), and `--best` is how you pick by quota instead. It checks every signed-in account's remaining quota and launches with whichever has the most headroom, right before Codex starts. It is a one-shot choice made at launch, not live switching during the run; add `--model` to hint which quota to weigh, and `--dry-run` to see the choice and each candidate's remaining quota without launching.
@@ -136,11 +126,9 @@ To persist that choice as the default for later `xswap` and `xswap app` launches
 ### Directory mappings
 
 ```sh
-```sh
 xswap map work ~/code/company   # Default to work whenever the cwd is inside ~/code/company
 xswap map                       # List current mappings
 xswap unmap ~/code/company      # Remove a mapping
-```
 ```
 
 <details>
@@ -153,9 +141,7 @@ The deepest matching directory wins. A mapping only applies where no account is 
 ## Alerts
 
 ```sh
-```sh
 xswap list --warn 15   # Warn on any codex window with less than 15% remaining
-```
 ```
 
 <details>
@@ -168,9 +154,7 @@ xswap list --warn 15   # Warn on any codex window with less than 15% remaining
 This is meant to be polled from `launchd` or `cron`, not run interactively. `xswap alert --install` sets that up for you:
 
 ```sh
-```sh
 xswap alert --install --warn 15 --every 30
-```
 ```
 
 <details>
@@ -185,11 +169,9 @@ On macOS this writes `~/.local/share/codex-swap/alert/run.sh` (a wrapper that ca
 Inside a session the bridge decides at turn start; nothing else moves the default selection, so a `codex exec` or a new session opened after the selected account ran down its week starts on an exhausted account. `xswap auto-tick` is the between-sessions check, meant for the same `launchd`/`cron` schedule as the alert:
 
 ```sh
-```sh
 xswap auto-tick --cached 600          # one check; exit 0 switched, 1 error, 2 no action, 3 blocked
 xswap auto-tick --dry-run             # print the decision; select nothing, signal no bridge
 xswap alert --install --auto-switch   # run it from the alert job, before the warn step
-```
 ```
 
 <details>
@@ -206,9 +188,7 @@ With `--auto-switch`, `run.sh` runs `xswap auto-tick --cached SECONDS` before `l
 `xswap list --short` prints one line: each account as `{*}{name} {p5h}/{p7d}`, joined by ` · `, where `*` marks the active account and `p5h`/`p7d` are the Codex bucket's primary/secondary window remaining percentages (unknown is `?`). Disabled accounts are omitted from `list --short`, but `xswap usage <name> --short` always shows the named account, even if it is disabled; with no accounts, `list --short` prints an empty line. `--short` composes with `--offline`; it is mutually exclusive with `--json`. Use it in a tmux status line:
 
 ```sh
-```sh
 set -g status-right '#(xswap list --short)'
-```
 ```
 
 ### Cached lookups
@@ -227,27 +207,21 @@ A login that the usage service rejects (a 401-class answer to the quota read, sh
 Start with an explicit pool of at least two signed-in accounts:
 
 ```sh
-```sh
 xswap auto-policy --weekly-remaining 10
 xswap run --auto --accounts work,main
 # Or: xswap app --auto --accounts work,main
-```
 ```
 
 To use that pool for future plain `xswap` and `xswap app` launches:
 
 ```sh
-```sh
 xswap auto-enable --accounts work,main
-```
 ```
 
 Optionally connect the ordinary `codex` command too:
 
 ```sh
-```sh
 xswap auto-enable --accounts work,main --wrap-codex
-```
 ```
 
 Until the `codex` command is connected, `xswap use` prints which home and account plain `codex` still uses, and `xswap doctor` warns once two or more accounts are registered.
@@ -266,11 +240,9 @@ Two topics that live here get long enough to warrant their own page: which envir
 - Between sessions nothing re-checks quota unless `xswap auto-tick` runs (see [Alerts](#alerts)); a new session or `codex exec` otherwise starts on the selected account as it is.
 
 ```sh
-```sh
 xswap auto-status
 xswap auto-policy --weekly-remaining 15   # Running compatible bridges reread this between turns
 xswap auto-disable                       # Restore the original codex symlink and future defaults
-```
 ```
 
 Disabling defaults does not terminate running sessions. Fixed-account commands (`xswap run --account main -- ...`, `xswap app main`) remain available.
@@ -325,10 +297,8 @@ Profile separation is **not a security sandbox**: configurations, skills, and ru
 Legacy xswap versions shared `plugins` via symlinks, which could escape the runtime's trusted `CODEX_HOME` boundary. Current profiles use local plugin caches; plugin changes are managed independently per home.
 
 ```sh
-```sh
 xswap repair-plugins --dry-run
 xswap repair-plugins
-```
 ```
 
 Repair atomically exchanges known legacy links with local code directories without expanding trust roots or stopping conversations. Source files and existing local plugin directories are preserved; external, broken, and cyclic cache links are rejected. Cached browser initialization failures require the browser tool's supported `js_reset` followed by initialization again. That clears its JavaScript state, not the Codex conversation. Repair does not reset other sessions automatically. Browser-service setup fixtures do not verify live browser hosting or navigation.
@@ -338,11 +308,9 @@ Repair atomically exchanges known legacy links with local code directories witho
 Requires a local running OpenClaw Gateway, `openclaw`, and `node` in PATH. Tested with OpenClaw 2026.8.1's public plugin SDK; incompatible SDKs fail with an error.
 
 ```sh
-```sh
 xswap openclaw work --dry-run
 xswap openclaw work
 xswap openclaw --pool main,work
-```
 ```
 
 This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, selects them for the requested local agents, saves private recovery backups, and reloads Gateway auth. It is not automatic synchronization and does not submit a verification prompt. API-key profiles and remote Gateways are unsupported. Partial updates are reported with backup information; do not publish those backups.
@@ -359,11 +327,9 @@ This explicitly copies ChatGPT OAuth credentials into OpenClaw's auth store, sel
 OpenClaw blocks an OpenAI auth profile for the rest of its rate-limit window after a single 429, and never re-checks it before that window ends. If the underlying limit actually clears earlier (a plan upgrade, a manual reset upstream), the profile stays locked out anyway — the symptom is `openai usage: 100% left` in `xswap list` sitting next to `[cooldown 6d]` in `openclaw models status`. `xswap doctor` reports this as a `NAME: openclaw cooldown` check: `FAIL` when the cooldown is active but xswap's own usage cache shows real quota remaining, `WARN` when it's in cooldown but the remaining amount isn't known locally, and it never fails a disabled account.
 
 ```sh
-```sh
 xswap openclaw NAME --clear-cooldown --dry-run
 xswap openclaw NAME --clear-cooldown
 xswap openclaw --pool a,b --clear-cooldown --yes
-```
 ```
 
 This stops the local Gateway (`openclaw gateway stop --force`), backs up its state database privately, clears only the stale `blockedUntil`/`blockedReason`/`blockedSource` keys (resetting the error count to 0) for the named account(s) — or every registered account when NAME/`--pool` is omitted — and starts the Gateway again. A failed Gateway stop aborts before anything is written; `--dry-run` only lists what would be cleared and never touches the Gateway or the database.
@@ -371,10 +337,8 @@ This stops the local Gateway (`openclaw gateway stop --force`), backs up its sta
 ## Update or uninstall
 
 ```sh
-```sh
 xswap upgrade                    # Reinstall the latest tag; add --tag vX.Y.Z for a specific release
 xswap upgrade --dry-run          # Print the command without running it
-```
 ```
 
 After a successful install, `xswap upgrade` lists every running bridged session with the command that reopens it on the new code (see Automatic switching). Nothing is stopped or restarted for you.
@@ -382,18 +346,14 @@ After a successful install, `xswap upgrade` lists every running bridged session 
 Or run the underlying command directly:
 
 ```sh
-```sh
 uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
-```
 ```
 
 Before uninstalling, restore the optional wrapper:
 
 ```sh
-```sh
 xswap auto-disable
 uv tool uninstall intellieffect-xswap
-```
 ```
 
 Account data is intentionally retained. These commands do not revoke credentials, undo an OpenClaw sync, or close running sessions.
@@ -408,9 +368,7 @@ If something is broken, run `xswap doctor` first. It is read-only and makes no n
 </details>
 
 ```sh
-```sh
 xswap doctor
-```
 ```
 
 ## Contributing and support

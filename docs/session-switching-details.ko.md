@@ -7,11 +7,9 @@
 `xswap switch NAME`(`xswap use NAME`과 동일)은 기본 계정을 선택하고 **실행 중인 호환 자동 모드 CLI·데스크톱 브리지 전체에 전환을 전달**합니다. 대기 중인 세션은 바로 적용하고, 응답 중인 세션은 모든 턴이 끝난 뒤 적용합니다. 서버 프로세스와 대화는 유지됩니다. 자동 풀 밖의 등록 계정도 수동 선택할 수 있으며, 이후 턴의 자동 전환 풀·잔여량 정책은 그대로 적용됩니다.
 
 ```sh
-```sh
 xswap switch work
 xswap auto-status                    # manualState: pending / applying / applied / failed
 xswap switch work --default-only      # 새 실행의 기본값만 변경
-```
 ```
 
 결과는 적용 완료(`applied`), 대기(`pending`), 미지원(`unsupported`), 실패(`failed`), 수신 미확인(`unconfirmed`) 건수로 표시합니다. 실제 인증 갱신 성공 응답이 있어야 적용 완료로 셉니다. 명령은 최대 2초 동안 응답을 확인하며, 대기 중인 요청의 후속 상태는 `auto-status`에서 확인합니다. 실패·수신 미확인은 종료 코드 1을 반환하며 저장된 기본 계정은 유지됩니다. 바쁜 세션에 반복 요청하면 마지막 선택이 대기 요청을 대체합니다.

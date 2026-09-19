@@ -9,10 +9,8 @@ Codex CLI·macOS 데스크톱·로컬 OpenClaw에서 사용할 OpenAI 계정을 
 필수: Python 3.11+, `uv`, 설치된 Codex CLI. OpenClaw 연결 시에는 로컬 `openclaw`와 `node`도 PATH에 있어야 합니다.
 
 ```sh
-```sh
 uv tool install 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
 xswap --version
-```
 ```
 
 명령을 찾지 못하면 `uv tool update-shell` 실행 후 새 터미널을 여십시오. `codex-swap`도 동일한 명령입니다. Claude 전용 `cswap`은 변경하지 않습니다.
@@ -59,10 +57,8 @@ zsh는 `xswap completion zsh > "${fpath[1]}/_xswap"` 실행 또는 `.zshrc`에 `
 ## 처음 사용하기
 
 ```sh
-```sh
 codex login   # 아직 로그인하지 않았다면 먼저 실행
 xswap init    # 그 로그인을 등록하고, 계정을 추가로 물어보고, 자동 전환·정책을 설정한 뒤 doctor까지 실행
-```
 ```
 
 <details>
@@ -75,7 +71,6 @@ xswap init    # 그 로그인을 등록하고, 계정을 추가로 물어보고,
 또는 네 단계를 직접 실행할 수도 있습니다.
 
 ```sh
-```sh
 xswap register main       # 현재 Codex 로그인 등록
 xswap add work --use      # 브라우저에서 추가 OpenAI 계정으로 로그인하고 바로 선택
 xswap login work          # work 계정의 로그인이 만료됐을 때 재인증
@@ -83,13 +78,11 @@ xswap use --best          # 잔여 사용량이 가장 많은 계정을 기본�
 xswap                     # 선택한 계정으로 Codex CLI 실행
 xswap app                 # 선택한 계정의 별도 데스크톱 창 열기
 ```
-```
 
 현재 Codex에 로그인하지 않았다면 먼저 `codex login`을 실행하십시오. `xswap list`로 등록 계정을, `xswap status`로 선택된 계정의 로컬 로그인 상태를 확인할 수 있습니다. **처음 추가하는 계정은 `--use` 없이도 자동으로 선택됩니다.** 이후 `xswap add work`처럼 계정을 추가로 등록할 때는 기존 선택이 그대로 유지됩니다.
 
 ## 잔여 사용량 보기
 
-```sh
 ```sh
 xswap list                 # 실시간 잔여 비율·초기화 시각 (Spark 기본 숨김)
 xswap list --include-spark # Spark 잔여량도 표시
@@ -97,7 +90,6 @@ xswap usage                # 선택한 계정만 조회
 xswap usage work            # 지정 계정만 조회
 xswap list --json           # 자동화용 조회 결과
 xswap list --offline        # 네트워크 조회 없이 계정 목록만
-```
 ```
 
 각 한도에 `77% left`처럼 **남은 비율**을 표시하고, 초기화 시각(로컬 시간대)과 남은 시간을 함께 보여줍니다. Codex 기본 한도를 먼저, 모델별 추가 한도를 별도 줄에 표시합니다. `5h`·`7d` 등의 주기는 서버가 제공한 실제 기간이며, 없는 한도를 임의로 만들어 표시하지 않습니다. `credits`는 서버가 제공한 별도 크레딧 잔액이며 구독 잔여 비율과 다릅니다.
@@ -123,9 +115,7 @@ xswap list --offline        # 네트워크 조회 없이 계정 목록만
 ### 잔여량 알림
 
 ```sh
-```sh
 xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 있으면 경고
-```
 ```
 
 `--warn PCT`는 1~100 사이 값만 받습니다. 기존 표(또는 `--json`) 출력은 그대로 stdout에 찍히고, 그 뒤 비활성화되지 않은(disabled 아닌) 계정 중 조회에 성공한 계정의 `codex` 한도 창을 검사해 기준치 미만인 창마다 `warn: 이름 창 N% left (resets ...)` 한 줄을 stderr로 출력합니다. 알 수 없는 잔여값은 절대 경고를 발생시키지 않습니다. 경고가 하나라도 발생하면 `xswap list --warn`은 종료코드 `3`을 반환하고, 아니면 `0`을 반환합니다. `--warn` 없는 평범한 `xswap list`는 영향받지 않고 항상 `0`을 반환합니다.
@@ -133,9 +123,7 @@ xswap list --warn 15   # codex 한도가 15% 미만 남은 창이 하나라도 �
 대화형으로 쓰기보다 `launchd`나 `cron`에서 주기적으로 호출하는 용도입니다. `xswap alert --install`이면 그 등록까지 대신 해줍니다.
 
 ```sh
-```sh
 xswap alert --install --warn 15 --every 30
-```
 ```
 
 <details>
@@ -150,11 +138,9 @@ macOS에서는 `~/.local/share/codex-swap/alert/run.sh`(설치 시점에 확정�
 세션 안에서는 브리지가 턴 시작 시점에만 판단하고, 세션 밖에서는 아무것도 기본 선택을 옮기지 않습니다. 그래서 선택된 계정의 주간 한도가 바닥난 뒤 새로 여는 세션이나 `codex exec`는 소진된 계정으로 시작됩니다. `xswap auto-tick`이 세션 사이의 점검 명령이며, 알림과 같은 `launchd`/`cron` 주기에서 돌리는 용도입니다.
 
 ```sh
-```sh
 xswap auto-tick --cached 600          # 1회 점검. 종료코드 0 전환함 / 1 오류 / 2 조치 없음 / 3 차단됨
 xswap auto-tick --dry-run             # 판단만 출력하고 선택·전달은 하지 않음
 xswap alert --install --auto-switch   # 알림 잡에서 warn 단계 전에 실행
-```
 ```
 
 <details>
@@ -171,31 +157,24 @@ xswap alert --install --auto-switch   # 알림 잡에서 warn 단계 전에 실�
 `xswap list --short`는 한 줄만 출력합니다. 계정마다 `{*}{name} {p5h}/{p7d}` 형식으로 ` · `로 이어 붙이며, `*`는 활성 계정 표시, `p5h`/`p7d`는 Codex 한도의 1차/2차 윈도우 잔여 비율(알 수 없으면 `?`)입니다. 비활성화(disabled)된 계정은 `list --short`에서 제외되지만, `xswap usage <계정명> --short`는 비활성화된 계정이라도 지정한 계정을 항상 표시하며, 계정이 하나도 없으면 `list --short`는 빈 줄을 출력합니다. `--short`는 `--offline`과 함께 쓸 수 있고, `--json`과는 동시에 쓸 수 없습니다. tmux 상태 표시줄 예시:
 
 ```sh
-```sh
 set -g status-right '#(xswap list --short)'
-```
 ```
 
 기존 버전 업데이트:
 
 ```sh
-```sh
 xswap upgrade                    # 최신 태그로 재설치, 특정 버전은 --tag vX.Y.Z
 xswap upgrade --dry-run          # 실행 없이 명령만 출력
-```
 ```
 
 또는 아래 명령을 직접 실행:
 
 ```sh
-```sh
 uv tool install --force 'git+https://github.com/intellieffect/xswap.git@v0.8.2'
-```
 ```
 
 ## 대화 중 자동 계정 전환 (실험적, 앱 + 대화형 CLI)
 
-```sh
 ```sh
 # 일회성 실행
 xswap app --auto --accounts work,main
@@ -208,7 +187,6 @@ codex resume --last          # 자동 모드 CLI 대화 이어가기
 xswap app                   # 자동 전환 앱 창
 xswap auto-status
 xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
-```
 ```
 
 <details>
@@ -246,12 +224,10 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 ## OpenClaw도 함께 전환하기
 
 ```sh
-```sh
 xswap openclaw work --dry-run       # 적용할 계정·에이전트 확인
 xswap openclaw work                 # 로컬 OpenClaw 전체 에이전트에 적용
 xswap use main --openclaw           # CLI·앱 기본 계정과 OpenClaw를 함께 전환
 xswap openclaw --pool main,work     # OpenClaw가 두 계정을 스스로 순환하도록 등록
-```
 ```
 
 `xswap openclaw`는 이름을 생략하면 현재 선택 계정을 사용합니다. 특정 에이전트만 바꾸려면 `xswap openclaw work --agent main --agent devagent`처럼 지정하십시오. 이 명령 자체는 xswap의 기본 계정을 바꾸지 않습니다.
@@ -279,11 +255,9 @@ OpenClaw 연결은 다음을 수행합니다.
 OpenClaw는 429 한 번이면 해당 시각 기준 한도 초기화 시점까지 OpenAI 인증 프로필을 잠그고, 그 창이 끝나기 전에는 다시 확인하지 않습니다. 실제 한도가 그보다 먼저 풀려도(플랜 업그레이드, 상위에서의 수동 초기화 등) 프로필은 그대로 잠겨 있습니다 — 증상은 `xswap list`에서 `openai usage: 100% left`인데 `openclaw models status`에는 `[cooldown 6d]`가 나란히 뜨는 것입니다. `xswap doctor`는 이를 `이름: openclaw cooldown` 항목으로 보고합니다: 쿨다운 중인데 xswap 자체 사용량 캐시에 실제 잔여량이 보이면 `FAIL`, 쿨다운 중이지만 잔여량을 로컬에서 알 수 없으면 `WARN`이며, 비활성화된 계정은 절대 실패로 표시하지 않습니다.
 
 ```sh
-```sh
 xswap openclaw 이름 --clear-cooldown --dry-run
 xswap openclaw 이름 --clear-cooldown
 xswap openclaw --pool a,b --clear-cooldown --yes
-```
 ```
 
 로컬 Gateway를 멈추고(`openclaw gateway stop --force`) 상태 DB를 비공개로 백업한 뒤, 지정한 계정(들)의 — NAME/`--pool`을 생략하면 등록된 모든 계정의 — 죽은 `blockedUntil`/`blockedReason`/`blockedSource` 키만 지우고 오류 횟수를 0으로 되돌린 다음 Gateway를 다시 시작합니다. Gateway 정지가 실패하면 아무것도 쓰지 않고 중단하며, `--dry-run`은 지울 항목만 보여줄 뿐 Gateway도 DB도 건드리지 않습니다.
@@ -348,7 +322,6 @@ OpenClaw 연결은 실행 시점의 인증을 동기화합니다. 이미 OpenCla
 
 ## 개발 및 검증
 
-```sh
 ```sh
 git clone https://github.com/intellieffect/xswap.git
 cd xswap

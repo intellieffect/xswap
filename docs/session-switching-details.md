@@ -7,11 +7,9 @@ This is the deep-dive companion to [Weekly dashboard and macOS menu bar](../READ
 `xswap switch NAME` (alias: `xswap use NAME`) now selects the default and sends a manual account change to **all running compatible auto-mode CLI/desktop bridges**. Idle bridges apply it immediately; busy bridges wait for all active turns to finish. The server process and conversation stay alive. The chosen registered account can be outside the automatic pool; the configured fallback pool and quota policy remain in effect for later turns.
 
 ```sh
-```sh
 xswap switch work
 xswap auto-status                    # manualState: pending / applying / applied / failed
 xswap switch work --default-only      # Only change the default for future launches
-```
 ```
 
 The command reports `applied`, `pending`, `unsupported`, `failed`, and `unconfirmed` counts. Only an acknowledged successful login counts as applied. Pending requests may take longer than the command's two-second acknowledgement window; check `auto-status`. Failure or unconfirmed delivery returns exit code 1; the saved default remains changed. Repeated requests to a busy bridge replace its pending selection with the latest one.
