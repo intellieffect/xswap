@@ -1,0 +1,10 @@
+usage: xswap auto-tick [-h] [--dry-run] [--cached SECONDS] [--json]
+
+options:
+  -h, --help        show this help message and exit
+  --dry-run         Print the decision without selecting or signalling
+                    anything
+  --cached SECONDS  Reuse a cached quota lookup if fresher than SECONDS
+                    instead of spawning Codex
+  --json            Machine-readable decision (names, percentages, short
+                    reasons; no tokens)

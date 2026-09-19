@@ -1,0 +1,376 @@
+#compdef xswap
+# Install: xswap completion zsh > "${fpath[1]}/_xswap"  (new shells pick it up)
+# or add:  eval "$(xswap completion zsh)"  to your .zshrc
+
+_xswap_account_names() {
+  local -a names
+  names=(${(f)"$(xswap list --offline --json 2>/dev/null | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')"})
+  (( $#names )) && _describe -t xswap-accounts 'account' names
+}
+
+_xswap_args_init() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--yes[Non-interactive: accept every safe default, prompt for nothing]' \
+    '--no-auto[Skip the automatic-switching step]' \
+    '--weekly-remaining=[Weekly remaining percentage for auto-policy (default 10)]:weekly_remaining:'
+}
+
+_xswap_args_register() {
+  _arguments \
+    '1:name:' \
+    '--help[show this help message and exit]' \
+    '--home=[]:home:_files'
+}
+
+_xswap_args_add() {
+  _arguments \
+    '1:name:' \
+    '--help[show this help message and exit]' \
+    '--device-auth[]' \
+    '--prepare-only[]' \
+    '--use[Select this account immediately after signing in]'
+}
+
+_xswap_args_login() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--device-auth[]'
+}
+
+_xswap_args_list() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--offline[Show local account labels without fetching usage]' \
+    '--json[]' \
+    '--include-spark[Include Spark quotas in text output]' \
+    '--details[Show identity and all quota window details]' \
+    '--short[Print one line for a status line/prompt: `*name p5h/p7d · ...`]' \
+    '--warn=[Print a warning per codex window below PCT remaining (1-100) to stderr and exit 3]:warn:' \
+    '--lang=[Text output language]:lang:' \
+    '--cached=[Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex (not with --offline)]:cached:'
+}
+
+_xswap_args_usage() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--json[]' \
+    '--include-spark[Include Spark quotas in text output]' \
+    '--details[Show identity and all quota window details]' \
+    '--short[Print one line: `name p5h/p7d`]' \
+    '--lang=[Text output language]:lang:' \
+    '--cached=[Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex]:cached:'
+}
+
+_xswap_args_menubar() {
+  _arguments \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_dashboard() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--lang=[Text output language]:lang:'
+}
+
+_xswap_args_status() {
+  _arguments \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_auto_status() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--prune[Remove every non-running CLI run record now, not only stopped ones older than a day, empty ones older than a minute, and others older than 7 days]'
+}
+
+_xswap_args_auto_tick() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--dry-run[Print the decision without selecting or signalling anything]' \
+    '--cached=[Reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex]:cached:' \
+    '--json[Machine-readable decision (names, percentages, short reasons; no tokens)]'
+}
+
+_xswap_args_auto_enable() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--accounts=[]:accounts:' \
+    '--wrap-codex[Also wrap the user-owned codex symlink, with rollback metadata]'
+}
+
+_xswap_args_auto_policy() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--weekly-remaining=[]:weekly_remaining:'
+}
+
+_xswap_args_repair_plugins() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--dry-run[]'
+}
+
+_xswap_args_relocate_codex() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--dry-run[Print the planned moves without changing anything]'
+}
+
+_xswap_args_doctor() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--json[]'
+}
+
+_xswap_args_auto_disable() {
+  _arguments \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_upgrade() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--tag=[Install this tag instead of the latest release, e.g. v0.5.1]:tag:' \
+    '--dry-run[]'
+}
+
+_xswap_args_alert() {
+  _arguments \
+    '--help[show this help message and exit]' \
+    '--install[Write the wrapper script and plist, then load it]' \
+    '--uninstall[Unload the job and delete the wrapper script and plist]' \
+    '--status[Show whether the job is installed and loaded, and the last log tail]' \
+    '--dry-run[Print what --install/--uninstall would do without changing anything]' \
+    '--warn=[Threshold passed to `list --warn` (1-100, default 15)]:warn:' \
+    '--every=[Polling interval in whole minutes (default 30; launchd merges under 60s)]:every:' \
+    '--cached=[Freshness passed to `list --cached` (default 600)]:cached:' \
+    '--auto-switch[With --install: run `xswap auto-tick --cached SECONDS` before the warn step and post a notification when it switches]'
+}
+
+_xswap_args_use() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--best[Select the account with the most remaining quota right now]' \
+    '--model=[Model hint for --best; never passed to codex]:model:' \
+    '--cached=[With --best, reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex]:cached:' \
+    '--default-only[Change only the default for future sessions]' \
+    '--openclaw[Also update all local OpenClaw agents and reload Gateway auth]'
+}
+
+_xswap_args_disable() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_enable() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_remove() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--purge[Also delete the managed profile directory (a registered home is never deleted)]' \
+    '--yes[Skip the confirmation prompt]'
+}
+
+_xswap_args_map() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '2:path:_files' \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_unmap() {
+  _arguments \
+    '1:path:_files' \
+    '--help[show this help message and exit]'
+}
+
+_xswap_args_openclaw() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--pool=[Comma-separated accounts (>=2) OpenClaw rotates between on its own cooldowns; mutually exclusive with NAME]:pool:' \
+    '--allow-mixed[Allow --pool accounts from different ChatGPT organizations]' \
+    '--agent=[Target only this agent (repeatable; default: all)]:agents:' \
+    '--dry-run[]' \
+    '--backup-dir=[Directory for small, private auth-state backups]:backup_dir:_files' \
+    '--clear-cooldown[Clear a stale OpenClaw auth-profile cooldown for NAME/--pool (or every registered account), restarting the local Gateway]' \
+    '--yes[Skip the confirmation prompt]'
+}
+
+_xswap_args_run() {
+  _arguments \
+    '1:args:' \
+    '--help[show this help message and exit]' \
+    '--account=[]:account:_xswap_account_names' \
+    '--dry-run[]' \
+    '--auto[Keep the interactive CLI session alive across quota account switches]' \
+    '--accounts=[Explicit automatic fallback order]:accounts:' \
+    '--best[Launch with the account with the most remaining quota right now (one-shot; not live switching)]' \
+    '--model=[Model hint for --best; never passed to codex]:model:' \
+    '--cached=[With --best, reuse a cached quota lookup if fresher than SECONDS instead of spawning Codex]:cached:'
+}
+
+_xswap_args_app() {
+  _arguments \
+    '1:name:_xswap_account_names' \
+    '--help[show this help message and exit]' \
+    '--app=[]:app:' \
+    '--dry-run[]' \
+    '--auto[Keep one desktop session and switch accounts after quota exhaustion (experimental)]' \
+    '--accounts=[Explicit fallback order, e.g. work,main; requires --auto]:accounts:'
+}
+
+_xswap_args_completion() {
+  _arguments \
+    '1:shell:(zsh bash)' \
+    '--help[show this help message and exit]'
+}
+
+_xswap() {
+  local curcontext="$curcontext" state line
+  local -a subcommands
+  subcommands=(
+    'init:First-run setup: register, add accounts, enable auto mode, set policy, then doctor'
+    'register:Register an existing signed-in Codex home without copying its tokens'
+    'add:Sign in to an isolated account home'
+    'login:Re-authenticate a registered account whose login expired'
+    'list:List accounts with live remaining quotas and reset times'
+    'usage:Show live quota windows for the selected or named account'
+    'menubar:Build and open the macOS weekly quota menu'
+    'dashboard:Private presentation JSON for the menu app'
+    'status:Show selected account and login status'
+    'auto-status:Show desktop/CLI automatic switching state (no credentials)'
+    'auto-tick:One proactive check for launchd/cron: if the selected account is at or below the weekly reserve, select the best pool account (exit 0 switched, 1 error, 2 no action, 3 blocked)'
+    'auto-enable:Enable automatic switching for new xswap CLI/app sessions'
+    'auto-policy:Set weekly remaining percentage for proactive switching'
+    'repair-plugins:Materialize legacy shared plugin links without stopping sessions'
+    'relocate-codex:Move a Codex release that an in-session update installed inside xswap'\''s state directory to the reference Codex home, and link xswap'\''s homes to it'
+    'doctor:Diagnose codex install, accounts, plugins, and OpenClaw (read-only, no network)'
+    'auto-disable:Disable auto defaults and restore the codex symlink'
+    'upgrade:Reinstall xswap from the latest (or a chosen) released Git tag'
+    'alert:Install, remove, or inspect a launchd job that polls `list --warn` and posts macOS notifications'
+    'use:Select the default account for xswap and xswap app'
+    'switch:Select the default account for xswap and xswap app'
+    'disable:Hold an account out of selection without deleting it'
+    'enable:Restore a disabled account to selection'
+    'remove:Drop an account'\''s registry entry; files are kept unless --purge'
+    'map:Map a directory to a default account, or list existing mappings'
+    'unmap:Remove a directory'\''s account mapping'
+    'openclaw:Sync an account (or pool) to local OpenClaw agents and reload Gateway auth'
+    'run:Run Codex with the selected or named account'
+    'app:Open an account-specific desktop instance'
+    'completion:Print a shell completion script (see xswap_completion.py)'
+  )
+  _arguments -C \
+    '--version[show program version]' \
+    '1: :->command' \
+    '*:: :->args'
+  case "$state" in
+    command)
+      _describe -t xswap-commands 'xswap command' subcommands
+      ;;
+    args)
+      case "${words[1]}" in
+        init)
+          _xswap_args_init
+          ;;
+        register)
+          _xswap_args_register
+          ;;
+        add)
+          _xswap_args_add
+          ;;
+        login)
+          _xswap_args_login
+          ;;
+        list)
+          _xswap_args_list
+          ;;
+        usage)
+          _xswap_args_usage
+          ;;
+        menubar)
+          _xswap_args_menubar
+          ;;
+        dashboard)
+          _xswap_args_dashboard
+          ;;
+        status)
+          _xswap_args_status
+          ;;
+        auto-status)
+          _xswap_args_auto_status
+          ;;
+        auto-tick)
+          _xswap_args_auto_tick
+          ;;
+        auto-enable)
+          _xswap_args_auto_enable
+          ;;
+        auto-policy)
+          _xswap_args_auto_policy
+          ;;
+        repair-plugins)
+          _xswap_args_repair_plugins
+          ;;
+        relocate-codex)
+          _xswap_args_relocate_codex
+          ;;
+        doctor)
+          _xswap_args_doctor
+          ;;
+        auto-disable)
+          _xswap_args_auto_disable
+          ;;
+        upgrade)
+          _xswap_args_upgrade
+          ;;
+        alert)
+          _xswap_args_alert
+          ;;
+        use|switch)
+          _xswap_args_use
+          ;;
+        disable)
+          _xswap_args_disable
+          ;;
+        enable)
+          _xswap_args_enable
+          ;;
+        remove)
+          _xswap_args_remove
+          ;;
+        map)
+          _xswap_args_map
+          ;;
+        unmap)
+          _xswap_args_unmap
+          ;;
+        openclaw)
+          _xswap_args_openclaw
+          ;;
+        run)
+          _xswap_args_run
+          ;;
+        app)
+          _xswap_args_app
+          ;;
+        completion)
+          _xswap_args_completion
+          ;;
+      esac
+      ;;
+  esac
+}
+
+compdef _xswap xswap

@@ -1,0 +1,11 @@
+usage: xswap init [-h] [--yes] [--no-auto]
+                  [--weekly-remaining WEEKLY_REMAINING]
+
+options:
+  -h, --help            show this help message and exit
+  --yes                 Non-interactive: accept every safe default, prompt for
+                        nothing
+  --no-auto             Skip the automatic-switching step
+  --weekly-remaining WEEKLY_REMAINING
+                        Weekly remaining percentage for auto-policy (default
+                        10)

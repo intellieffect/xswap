@@ -1,0 +1,20 @@
+usage: xswap run [-h] [--account ACCOUNT] [--dry-run] [--auto]
+                 [--accounts ACCOUNTS] [--best] [--model MODEL]
+                 [--cached SECONDS]
+                 ...
+
+positional arguments:
+  args
+
+options:
+  -h, --help           show this help message and exit
+  --account ACCOUNT
+  --dry-run
+  --auto               Keep the interactive CLI session alive across quota
+                       account switches
+  --accounts ACCOUNTS  Explicit automatic fallback order
+  --best               Launch with the account with the most remaining quota
+                       right now (one-shot; not live switching)
+  --model MODEL        Model hint for --best; never passed to codex
+  --cached SECONDS     With --best, reuse a cached quota lookup if fresher
+                       than SECONDS instead of spawning Codex

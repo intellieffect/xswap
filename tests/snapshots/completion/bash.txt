@@ -1,0 +1,155 @@
+# xswap bash completion
+# Install: add  eval "$(xswap completion bash)"  to your .bashrc
+
+_xswap_account_names() {
+  xswap list --offline --json 2>/dev/null | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p'
+}
+
+_xswap() {
+  local cur prev cmd
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  cmd="${COMP_WORDS[1]}"
+  local subcommands="init register add login list usage menubar dashboard status auto-status auto-tick auto-enable auto-policy repair-plugins relocate-codex doctor auto-disable upgrade alert use switch disable enable remove map unmap openclaw run app completion"
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+    return 0
+  fi
+  case "$cmd" in
+    init)
+      COMPREPLY=( $(compgen -W "--help --yes --no-auto --weekly-remaining" -- "$cur") )
+      ;;
+    register)
+      COMPREPLY=( $(compgen -W "--help --home" -- "$cur") )
+      ;;
+    add)
+      COMPREPLY=( $(compgen -W "--help --device-auth --prepare-only --use" -- "$cur") )
+      ;;
+    login)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --device-auth" -- "$cur") )
+      ;;
+    list)
+      COMPREPLY=( $(compgen -W "--help --offline --json --include-spark --details --short --warn --lang --cached" -- "$cur") )
+      ;;
+    usage)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --json --include-spark --details --short --lang --cached" -- "$cur") )
+      ;;
+    menubar)
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    dashboard)
+      COMPREPLY=( $(compgen -W "--help --lang" -- "$cur") )
+      ;;
+    status)
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    auto-status)
+      COMPREPLY=( $(compgen -W "--help --prune" -- "$cur") )
+      ;;
+    auto-tick)
+      COMPREPLY=( $(compgen -W "--help --dry-run --cached --json" -- "$cur") )
+      ;;
+    auto-enable)
+      COMPREPLY=( $(compgen -W "--help --accounts --wrap-codex" -- "$cur") )
+      ;;
+    auto-policy)
+      COMPREPLY=( $(compgen -W "--help --weekly-remaining" -- "$cur") )
+      ;;
+    repair-plugins)
+      COMPREPLY=( $(compgen -W "--help --dry-run" -- "$cur") )
+      ;;
+    relocate-codex)
+      COMPREPLY=( $(compgen -W "--help --dry-run" -- "$cur") )
+      ;;
+    doctor)
+      COMPREPLY=( $(compgen -W "--help --json" -- "$cur") )
+      ;;
+    auto-disable)
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    upgrade)
+      COMPREPLY=( $(compgen -W "--help --tag --dry-run" -- "$cur") )
+      ;;
+    alert)
+      COMPREPLY=( $(compgen -W "--help --install --uninstall --status --dry-run --warn --every --cached --auto-switch" -- "$cur") )
+      ;;
+    use|switch)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --best --model --cached --default-only --openclaw" -- "$cur") )
+      ;;
+    disable)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    enable)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    remove)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --purge --yes" -- "$cur") )
+      ;;
+    map)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    unmap)
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    openclaw)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --pool --allow-mixed --agent --dry-run --backup-dir --clear-cooldown --yes" -- "$cur") )
+      ;;
+    run)
+      if [[ "$prev" == "--account" ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --account --dry-run --auto --accounts --best --model --cached" -- "$cur") )
+      ;;
+    app)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "$(_xswap_account_names)" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help --app --dry-run --auto --accounts" -- "$cur") )
+      ;;
+    completion)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "zsh bash" -- "$cur") )
+        return 0
+      fi
+      COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+      ;;
+    *)
+      COMPREPLY=()
+      ;;
+  esac
+}
+complete -F _xswap xswap

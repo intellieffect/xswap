@@ -1,0 +1,10 @@
+usage: xswap remove [-h] [--purge] [--yes] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help  show this help message and exit
+  --purge     Also delete the managed profile directory (a registered home is
+              never deleted)
+  --yes       Skip the confirmation prompt

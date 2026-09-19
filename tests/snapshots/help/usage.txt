@@ -1,0 +1,16 @@
+usage: xswap usage [-h] [--json] [--include-spark] [--details] [--short]
+                   [--lang {en,ko}] [--cached SECONDS]
+                   [name]
+
+positional arguments:
+  name
+
+options:
+  -h, --help        show this help message and exit
+  --json
+  --include-spark   Include Spark quotas in text output
+  --details         Show identity and all quota window details
+  --short           Print one line: `name p5h/p7d`
+  --lang {en,ko}    Text output language
+  --cached SECONDS  Reuse a cached quota lookup if fresher than SECONDS
+                    instead of spawning Codex

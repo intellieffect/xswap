@@ -1,0 +1,5 @@
+usage: xswap dashboard [-h] [--lang {en,ko}]
+
+options:
+  -h, --help      show this help message and exit
+  --lang {en,ko}  Text output language
