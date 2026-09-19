@@ -2,6 +2,9 @@ name: Feature request
 description: Suggest an improvement or new capability for xswap
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: "Do not paste tokens, auth files, private account identifiers, or raw session logs. Use generic account names such as main and work."
   - type: textarea
     id: problem
     attributes:

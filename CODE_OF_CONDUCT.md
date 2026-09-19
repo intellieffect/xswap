@@ -59,8 +59,9 @@ appointed representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening a private report via the repository's Security tab or
-contacting the maintainers through GitHub. All complaints will be reviewed and
+reported to the maintainers privately through GitHub. If you have no private
+channel to a maintainer, open an issue that asks for private contact and leave
+out the details of the incident. All complaints will be reviewed and
 investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
