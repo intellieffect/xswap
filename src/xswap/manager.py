@@ -53,7 +53,6 @@ from xswap.core.quota import quota_windows
 from xswap.core.types import (
     AccountRecord,
     AccountUsageRow,
-    AuthStateEntry,
     RegistryData,
     UsageBucket,
 )
@@ -455,7 +454,7 @@ class Manager:
     def _read_auth_state(self) -> dict[str, Any]:
         return self._auth.read()
 
-    def auth_failure(self, name: str, label: str) -> AuthStateEntry | None:
+    def auth_failure(self, name: str, label: str) -> dict[str, Any] | None:
         return self._auth.failure(name, label)
 
     def remember_auth_failure(
