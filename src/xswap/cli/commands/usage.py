@@ -6,6 +6,7 @@ import os
 import sys
 
 from xswap.display import resolve_lang
+from xswap.exit_codes import ExitCode
 from xswap.manager import SwapError, identity, parse_cache_seconds, usage_warnings, validate_warn_threshold  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
@@ -61,7 +62,7 @@ def run_list(args, manager):
         messages = usage_warnings(rows, threshold)
         for message in messages:
             print(message, file=sys.stderr)
-        return 3 if messages else 0
+        return ExitCode.BLOCKED if messages else ExitCode.OK
 
 
 def run_usage(args, manager):

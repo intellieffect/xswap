@@ -1,0 +1,33 @@
+[
+  {
+    "name": "work",
+    "identity": "work@example.test",
+    "status": "ok",
+    "buckets": [
+      {
+        "id": "codex",
+        "usedPercent": 12.5,
+        "windowMinutes": 300,
+        "reached": null
+      }
+    ],
+    "resetCredits": null,
+    "fetchedAt": 1700000000.0,
+    "disabled": false,
+    "cached": false,
+    "slot": 1,
+    "active": true
+  },
+  {
+    "name": "spare",
+    "identity": "spare@example.test",
+    "status": "sign-in required",
+    "buckets": [],
+    "resetCredits": null,
+    "fetchedAt": null,
+    "disabled": false,
+    "cached": false,
+    "slot": 2,
+    "active": false
+  }
+]

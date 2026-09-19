@@ -304,4 +304,5 @@ def show_status(manager, prune=False):
     # patches `xswap.codex_cli.status_data`, and `show_status` used to read that
     # global. Drop once the re-export goes away.
     from xswap import codex_cli
-    print(json.dumps(codex_cli.status_data(manager, prune=prune), indent=2))
+    from xswap.json_output import auto_status_payload
+    print(json.dumps(auto_status_payload(codex_cli.status_data(manager, prune=prune)), indent=2))

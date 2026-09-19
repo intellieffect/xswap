@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "decision": "switched",
+  "reason": "switched",
+  "exitCode": 0,
+  "selected": "work",
+  "target": "spare",
+  "reserve": 10,
+  "dryRun": false,
+  "remaining": {
+    "work": 5,
+    "spare": 80
+  },
+  "candidates": [
+    {
+      "name": "spare",
+      "remaining7d": 80
+    }
+  ],
+  "report": null,
+  "lines": [
+    "switched: work -> spare (work weekly 5% left)"
+  ]
+}

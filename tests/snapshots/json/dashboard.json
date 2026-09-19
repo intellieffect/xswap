@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "accounts": [
+    {
+      "name": "work",
+      "active": true,
+      "line": "work 12.5% used"
+    }
+  ],
+  "policy": "auto: weekly reserve 10%",
+  "sessions": [
+    {
+      "account": "work",
+      "surface": "cli"
+    }
+  ],
+  "updatedAt": 1700000000.0
+}

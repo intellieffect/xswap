@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "accounts": [
+    "work",
+    "spare"
+  ],
+  "codexWrapped": true,
+  "wrapperReason": "connected",
+  "weeklyRemainingThreshold": 10,
+  "pruned": 0,
+  "prunedRuns": [],
+  "sessions": []
+}

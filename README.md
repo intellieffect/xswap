@@ -382,6 +382,8 @@ xswap doctor
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local tests and fixture-only integration checks. Report reproducible bugs through [GitHub Issues](https://github.com/intellieffect/xswap/issues); report vulnerabilities privately through [Security Advisories](https://github.com/intellieffect/xswap/security/advisories/new).
 
+Scripting against xswap's output? See [docs/json-schema.md](docs/json-schema.md) for every `--json` payload's fields and [docs/exit-codes.md](docs/exit-codes.md) for documented exit codes.
+
 [MIT license](LICENSE). OpenAI, Codex, ChatGPT, OpenClaw, and their distributed plugins remain governed by their own licenses and terms; their binaries or plugin code are not included in this repository.
 
 ### Weekly dashboard and macOS menu bar
