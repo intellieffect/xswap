@@ -9,8 +9,8 @@ Requires Python 3.11+, uv, and Node 22+ for OpenClaw fixture tests. Ordinary uni
 ```sh
 git clone https://github.com/intellieffect/xswap.git
 cd xswap
-uv sync
-uv run python -m unittest discover -v
+uv sync --group dev
+uv run pytest -q
 node --test tests/*.test.mjs
 uv build
 ```
