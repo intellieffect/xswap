@@ -22,19 +22,19 @@ Do not run mutating launcher commands against your usual account home just to te
 These require your own installed Codex binary. They use a local fixture backend and fake credentials, not real quota exhaustion. Inspect their scope before execution.
 
 ```sh
-uv run python tests/live_codex_smoke.py
-uv run python tests/live_cli_smoke.py
-XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
-XSWAP_TEST_PICKER=1 uv run python tests/live_cli_smoke.py
-XSWAP_TEST_MANUAL=1 uv run python tests/live_cli_smoke.py
-XSWAP_TEST_OUTAGE=1 uv run python tests/live_cli_smoke.py
+uv run python tests/live/live_codex_smoke.py
+uv run python tests/live/live_cli_smoke.py
+XSWAP_TEST_RESERVE=1 uv run python tests/live/live_cli_smoke.py
+XSWAP_TEST_PICKER=1 uv run python tests/live/live_cli_smoke.py
+XSWAP_TEST_MANUAL=1 uv run python tests/live/live_cli_smoke.py
+XSWAP_TEST_OUTAGE=1 uv run python tests/live/live_cli_smoke.py
 ```
 
 `XSWAP_SMOKE_CODEX=/absolute/path/to/codex` selects a binary. The CLI smoke test requires a PTY. macOS browser-runtime checks additionally require the locally installed app and browser plugin:
 
 ```sh
-uv run python tests/plugin_runtime_smoke.py
-XSWAP_TEST_BROWSER=1 XSWAP_TEST_RESERVE=1 uv run python tests/live_cli_smoke.py
+uv run python tests/live/plugin_runtime_smoke.py
+XSWAP_TEST_BROWSER=1 XSWAP_TEST_RESERVE=1 uv run python tests/live/live_cli_smoke.py
 ```
 
 These setup checks do not validate a live browser backend or page navigation. Tests must never redistribute provider binaries/plugins or use actual credentials as fixtures.

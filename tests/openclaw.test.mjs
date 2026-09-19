@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sync } from '../xswap_bridge/openclaw.mjs';
+import { sync } from '../src/xswap/bridge/openclaw.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xswap-test-'));

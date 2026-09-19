@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Moved the flat top-level modules into a `src/xswap` package and the tests into `tests/` (INT-5607). Pure move, no behavior change: `codex_swap` is now `xswap.manager`, `xswap_cli` is `xswap.codex_cli`, `xswap_bridge` is `xswap.bridge`, and every other `xswap_*` module dropped its prefix under `xswap.`. Root-level `codex_swap.py` and `xswap_cli.py` are kept as compatibility shims for one release, for an already-running older bridge process or a script that still imports them by the old name.
 - The test suite can no longer write the real account store. `conftest.py` freezes the real roots (`~/.local/share/codex-swap`, `~/.codex`, `~/.openclaw`, and an ambient `CODEX_SWAP_HOME`/`CODEX_HOME`) at import, before any fixture moves the environment, and installs a `sys.addaudithook` that refuses a write to any of them. Every test already isolated itself with a temporary directory and an environment patch, but that patch unwinds at teardown: a thread a test started -- the auto-switch loop, the alert tick, the bridge server -- that got around to writing afterwards resolved `default_root()` back to the developer's live store and overwrote `accounts.json`. An audit hook has no removal API, so it is still armed when the patch is gone; the refusal is deliberately not an `OSError`, which `Path.mkdir(exist_ok=True)` swallows. The runner is pytest instead of `python -m unittest discover`; the tests themselves are unchanged `unittest.TestCase` classes.
 
 ## 0.8.2
