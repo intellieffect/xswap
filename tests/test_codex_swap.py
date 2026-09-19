@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
@@ -13,10 +12,11 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.manager import Manager, SwapError, atomic_json, identity, main
 from xswap.live import AccountPool, LiveError
+from xswap.manager import Manager, SwapError, atomic_json, identity, main
 from xswap.usage import UsageError
 
 

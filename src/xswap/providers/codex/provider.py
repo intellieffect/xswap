@@ -12,9 +12,24 @@ import-time edge here would close that loop.
 """
 from __future__ import annotations
 
-from xswap.core.types import Check, CredentialState, Identity, UsageSnapshot, UsageWindow
+from collections.abc import Iterable, Iterator
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from xswap.core.types import (
+    AccountRecord,
+    Check,
+    CredentialState,
+    Identity,
+    UsageBucket,
+    UsageSnapshot,
+    UsageWindow,
+)
 from xswap.providers import base
 from xswap.providers.codex.usage import CODEX_QUOTA
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 # Labels `identity()` returns that are not an address: a local state, not a login.
 SENTINELS = ("not signed in", "unreadable auth cache")
@@ -31,13 +46,13 @@ class CodexProvider:
 
     # -- accounts --------------------------------------------------------------
 
-    def identity(self, home):
+    def identity(self, home: Path) -> Identity:
         from xswap.providers.codex.identity import identity
         label = identity(home)
         return Identity(label=label, stable_id=None if label in SENTINELS else label,
                         sentinel=label in SENTINELS)
 
-    def credential_state(self, home):
+    def credential_state(self, home: Path) -> CredentialState:
         from xswap.core.errors import CredentialError, SwapError
         from xswap.providers.codex.identity import check_file_store, identity
         try:
@@ -51,12 +66,12 @@ class CodexProvider:
             return CredentialState(CredentialState.UNREADABLE, label)
         return CredentialState(CredentialState.OK)
 
-    def account_home(self, root, name):
+    def account_home(self, root: str | Path, name: str) -> Path:
         """`<root>/profiles/<name>/codex`: where a managed Codex login lives."""
         from xswap.core.paths import profile_dir
         return profile_dir(root, name) / "codex"
 
-    def prepare_home(self, manager, home, source, accounts):
+    def prepare_home(self, manager: Manager, home: Path, source: Path, accounts: dict[str, AccountRecord]) -> None:
         from xswap.providers.codex.plugins import ensure_plugins
         from xswap.providers.codex.relocate import link_packages
         ensure_plugins(home, source)
@@ -64,7 +79,9 @@ class CodexProvider:
 
     # -- quota -----------------------------------------------------------------
 
-    def read_usage(self, manager, home, env=None, timeout=None):
+    def read_usage(
+        self, manager: Manager, home: Path, env: dict[str, str] | None = None, timeout: float | None = None
+    ) -> UsageSnapshot:
         """One live quota read for HOME, normalized.
 
         `check_file_store` and `read_limits` go through `manager._hooks`, which
@@ -74,7 +91,10 @@ class CodexProvider:
         import time
 
         from xswap.core.errors import UsageError
-        from xswap.providers.codex.usage import normalize_limits, normalize_reset_credits
+        from xswap.providers.codex.usage import (
+            normalize_limits,
+            normalize_reset_credits,
+        )
         manager._hooks.check_file_store(home)
         arguments = () if timeout is None else (timeout,)
         try:
@@ -88,7 +108,7 @@ class CodexProvider:
                              windows=tuple(self._windows(buckets)),
                              extras={"spark": [b for b in buckets if b["id"] != self.quota_shape.bucket_id]})
 
-    def _windows(self, buckets):
+    def _windows(self, buckets: list[UsageBucket]) -> Iterator[UsageWindow]:
         from xswap.core.quota import quota_windows
         from xswap.core.usage import window_label
         for window in quota_windows(buckets, self.quota_shape):
@@ -98,21 +118,24 @@ class CodexProvider:
 
     # -- selection and launching ----------------------------------------------
 
-    def activate(self, manager, name):
+    def activate(self, manager: Manager, name: str) -> None:
         """`xswap use NAME`: the registry selection plus the auto-pool reordering."""
-        return manager.use(name)
+        manager.use(name)
 
-    def login(self, manager, name, **options):
+    def login(self, manager: Manager, name: str, **options: Any) -> int:
         return manager.login(name, **options)
 
-    def launch(self, manager, name, argv, *, auto_pool=None):
+    def launch(self, manager: Manager, name: str | None, argv: list[str], *, auto_pool: list[str] | None = None) -> int:
         """`xswap run`: one account, or the live bridge across AUTO_POOL."""
         if auto_pool:
             from xswap.providers.codex.codex_cli import launch_cli
-            return launch_cli(manager, list(auto_pool), list(argv))
+            # launch_cli's `accounts` is the comma-joined form every other caller passes
+            # (cli.commands.launch reads it straight from `--accounts`); this path had no
+            # caller yet (INT-5614 dead code) so nothing observed it building a list instead.
+            return launch_cli(manager, ','.join(auto_pool), list(argv))
         return manager.launch_cli(name, list(argv))
 
-    def switch_running(self, manager, name):
+    def switch_running(self, manager: Manager, name: str) -> dict[str, Any]:
         from xswap.providers.codex.switch import switch_running
         return switch_running(manager, name)
 
@@ -123,25 +146,29 @@ class CodexProvider:
     # (`patch('xswap.codex_cli.status_data')`), and a function-local import there
     # keeps those patches biting -- the same late-lookup rule `wrapper._late` uses.
 
-    def status_data(self, manager, cleanup=True):
+    def status_data(self, manager: Manager, cleanup: bool = True) -> dict[str, Any]:
         from xswap.providers.codex.codex_cli import status_data
         return status_data(manager, cleanup=cleanup)
 
-    def bridge_hints(self, manager, state, version):
+    def bridge_hints(self, manager: Manager, state: dict[str, Any], version: str) -> list[dict[str, Any]]:
         from xswap.providers.codex.codex_cli import bridge_hints
         return bridge_hints(manager, state, version)
 
-    def session_hints(self, manager, target_version):
-        from xswap.providers.codex.codex_cli import bridge_hints, describe_bridge_hint, status_data
+    def session_hints(self, manager: Manager, target_version: str) -> list[str]:
+        from xswap.providers.codex.codex_cli import (
+            bridge_hints,
+            describe_bridge_hint,
+            status_data,
+        )
         return [describe_bridge_hint(hint)
                 for hint in bridge_hints(manager, status_data(manager, cleanup=False), target_version)]
 
-    def credit_lines(self, reset_credits):
+    def credit_lines(self, reset_credits: Any) -> list[str]:
         from xswap.providers.codex.usage import reset_credit_lines
         return reset_credit_lines(reset_credits)
 
     # -- diagnostics -----------------------------------------------------------
 
-    def doctor_checks(self, manager):
+    def doctor_checks(self, manager: Manager) -> Iterable[Check]:
         from xswap.providers.codex.doctor import run
         return [Check.from_dict(result) for result in run(manager)]

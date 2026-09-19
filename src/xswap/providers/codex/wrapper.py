@@ -14,18 +14,25 @@ from __future__ import annotations
 
 import contextlib
 import os
-from pathlib import Path
 import shutil
 import sys
 import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from xswap.providers.codex.live import AccountPool, LiveError, validate_threshold
 from xswap.core.fsutil import atomic_json
 from xswap.core.paths import ROOT_VARIABLE, default_root, settings_path
 from xswap.core.settings import read_settings
+from xswap.providers.codex.live import AccountPool, LiveError, validate_threshold
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
+
+Drift = dict[str, Any]
 
 
-def _late(name):
+def _late(name: str) -> Callable[..., Any]:
     """Resolve NAME through `xswap.providers.codex.codex_cli`, which re-exports it, at call time.
 
     These functions used to be defined in `codex_cli`, and the test suite still
@@ -40,17 +47,17 @@ def _late(name):
     return getattr(codex_cli, name)
 
 
-def link_target_path(link, target):
+def link_target_path(link: Path, target: str) -> str:
     """Absolute path of a symlink's target, resolving a relative target against the link's directory."""
     return str(link.parent / target) if not Path(target).is_absolute() else target
 
 
-def swap_symlink(path, target):
+def swap_symlink(path: Path, target: str) -> None:
     """Atomically point `path` at `target` without a window where the entry is missing."""
     temporary = path.with_name('.xswap-codex-' + uuid.uuid4().hex)
     try:
         temporary.symlink_to(target)
-        os.replace(temporary, path)
+        Path(temporary).replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -59,7 +66,7 @@ def swap_symlink(path, target):
 PROXY_NAME = 'xswap-codex'
 
 
-def recorded_proxies(settings):
+def recorded_proxies(settings: dict[str, Any]) -> list[str]:
     """The resolved path of every xswap-codex auto.json names, primary record first."""
     values = []
     for record in [settings.get('wrapper'), *(settings.get('wrappers') or [])]:
@@ -70,7 +77,7 @@ def recorded_proxies(settings):
     return values
 
 
-def wrapped_target(path, settings):
+def wrapped_target(path: str | Path, settings: dict[str, Any]) -> bool:
     """True when `path` reaches an xswap-codex rather than a Codex release.
 
     A machine can hold more than one xswap-codex (a pipx install beside a uv one, a
@@ -85,10 +92,10 @@ def wrapped_target(path, settings):
         real = os.path.realpath(path)
     except OSError:
         return False
-    return real in recorded_proxies(settings) or os.path.basename(real) == PROXY_NAME
+    return real in recorded_proxies(settings) or Path(real).name == PROXY_NAME
 
 
-def recorded_real_codex(settings):
+def recorded_real_codex(settings: dict[str, Any]) -> str | None:
     """The real Codex a wrapper record names, or None when that value cannot be used.
 
     None when nothing is recorded and when the value is not absolute. 0.7.8 stored
@@ -102,7 +109,7 @@ def recorded_real_codex(settings):
     is gone. `settings` is auto.json, or {'wrapper': record} for a `wrappers` entry.
     """
     real = (settings.get('wrapper') or {}).get('realCodex')
-    return real if isinstance(real, str) and os.path.isabs(real) else None
+    return real if isinstance(real, str) and Path(real).is_absolute() else None
 
 
 # The `codex` a project installed for itself. npm writes `node_modules/.bin/codex` for a
@@ -145,7 +152,7 @@ BYPASS_VARIABLE = 'XSWAP_BYPASS'
 BYPASS_REASON = 'bypass-variable'
 
 
-def bypass_set(env=None):
+def bypass_set(env: dict[str, str] | None = None) -> bool:
     """True when this environment hands every `codex` straight to the real Codex."""
     return (os.environ if env is None else env).get(BYPASS_VARIABLE) == '1'
 
@@ -157,7 +164,7 @@ def bypass_set(env=None):
 GLOBAL_MODULE_PARENTS = ('lib', 'pnpm', '.volta', '.nvm', '.fnm', '.asdf', '.bun')
 
 
-def _project_tree(path):
+def _project_tree(path: str | Path) -> bool:
     """True when `path` runs out of a dependency tree a project installed for itself."""
     parts = Path(path).parts
     for index, part in enumerate(parts):
@@ -166,7 +173,7 @@ def _project_tree(path):
     return False
 
 
-def dependency_entry(path, real=None):
+def dependency_entry(path: str | Path, real: str | Path | None = None) -> bool:
     """True when the entry, or the executable behind it, sits in a project's dependency tree."""
     return _project_tree(path) or bool(real and _project_tree(real))
 
@@ -212,7 +219,7 @@ DRIFT_FIXES = {
 }
 
 
-def entry_drift(path, proxy, enabled=True, adopt=False):
+def entry_drift(path: str | Path, proxy: str | None, enabled: bool = True, adopt: bool = False) -> Drift:
     """Classify one `codex` entry against the recorded xswap-codex proxy.
 
     Codex's standalone updater (ctrl+u in the TUI, `codex upgrade`, the install
@@ -269,7 +276,7 @@ def entry_drift(path, proxy, enabled=True, adopt=False):
             return {**result, 'reason': 'dangling-target'}
         if not os.access(real, os.X_OK):
             return {**result, 'reason': 'not-executable'}
-        if real.resolve() == Path(proxy).resolve():
+        if real.resolve() == Path(proxy).resolve():  # type: ignore[arg-type]  # every caller passes a real recorded proxy path here
             return {**result, 'reason': 'ok'}
     except (OSError, RuntimeError) as error:
         # RuntimeError: Path.resolve() on a symlink loop before Python 3.13. Its
@@ -284,7 +291,7 @@ def entry_drift(path, proxy, enabled=True, adopt=False):
     return {**result, 'action': 'reconnect', 'reason': 'replaced'}
 
 
-def wrapper_drift(settings):
+def wrapper_drift(settings: dict[str, Any]) -> Drift:
     """Classify the recorded codex entry; same keys as entry_drift, plus 'not-wrapped' and 'relative-record'."""
     wrapper = settings.get('wrapper') or {}
     proxy = wrapper.get('proxy')
@@ -293,13 +300,13 @@ def wrapper_drift(settings):
                 'target': None, 'real': None, 'proxy': proxy or None, 'error': None}
     # entry_drift stats and re-points the path it is given, and a relative one names a different
     # file in every working directory: never its subject (RELATIVE_RECORD_REASON).
-    if not os.path.isabs(wrapper['path']):
+    if not Path(wrapper['path']).is_absolute():
         return {'action': 'skip', 'reason': RELATIVE_RECORD_REASON, 'path': wrapper['path'],
                 'target': None, 'real': None, 'proxy': proxy, 'error': None}
     return _late('entry_drift')(wrapper['path'], proxy, bool(settings.get('enabled')))
 
 
-def describe_drift(drift, reconnect):
+def describe_drift(drift: Drift, reconnect: str) -> tuple[str, str]:
     """(cause, fix) for a drift result xswap did not act on; ('', '') for 'ok' and 'not-wrapped'.
 
     `reconnect` is the `xswap auto-enable --accounts ... --wrap-codex` line for the
@@ -312,7 +319,9 @@ def describe_drift(drift, reconnect):
     return DRIFT_CAUSES[reason].format(**values), DRIFT_FIXES[reason].format(**values)
 
 
-def codex_path_entries(settings, env=None, relative=False):
+def codex_path_entries(
+    settings: dict[str, Any], env: dict[str, str] | None = None, relative: bool = False
+) -> list[dict[str, Any]]:
     """Every `codex` a PATH lookup can run, in lookup order, classified against the recorded wrapper.
 
     Mirrors shutil.which's per-directory test (an existing file with the execute
@@ -345,7 +354,10 @@ def codex_path_entries(settings, env=None, relative=False):
         # one as what plain `codex` runs. An element that expands to an absolute path is an
         # ordinary entry from here on; one that does not stays relative (zsh leaves it alone,
         # and nothing may re-point it).
-        directory = os.path.expanduser(element) if element.startswith('~') else element
+        # os.path.expanduser, not Path.expanduser(): an unresolvable ~user (no such
+        # account) must come back unchanged, which is what marks it still relative
+        # below; Path.expanduser() raises RuntimeError for that case instead.
+        directory = os.path.expanduser(element) if element.startswith('~') else element  # noqa: PTH111
         # A relative PATH element (a project's `bin`, a direnv habit) names a different
         # file in every working directory, so it can never be the recorded entry and must
         # never be re-pointed: xswap would rewrite a `codex` shim inside the user's own
@@ -356,7 +368,7 @@ def codex_path_entries(settings, env=None, relative=False):
         # run ./codex for it, and `export PATH="$UNSET_VAR:$PATH"` writes one), so it is a
         # relative element too; dropping it first left the one element that can bypass
         # xswap out of every report while shutil.which still found it.
-        is_relative = not directory or not os.path.isabs(directory)
+        is_relative = not directory or not Path(directory).is_absolute()
         if is_relative and not relative:
             continue
         candidate = Path(directory) / 'codex'
@@ -390,7 +402,9 @@ def codex_path_entries(settings, env=None, relative=False):
     return entries
 
 
-def wrapper_state(settings, env=None, relative=False):
+def wrapper_state(
+    settings: dict[str, Any], env: dict[str, str] | None = None, relative: bool = False
+) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
     """What plain `codex` runs relative to the recorded wrapper: (state, first, entries).
 
     2026-09-10: Codex's standalone installer wrote ~/.local/bin/codex ahead of the
@@ -419,7 +433,7 @@ def wrapper_state(settings, env=None, relative=False):
     """
     entries = codex_path_entries(settings, env, relative=relative)
     state, first = path_state(settings, entries)
-    if relative and state == 'connected' and first is not None and not os.path.isabs(first['path']):
+    if relative and state == 'connected' and first is not None and not Path(first['path']).is_absolute():
         # This directory's `codex` is xswap-codex, but only this directory's: the element is
         # never re-pointed, so what plain `codex` runs everywhere else is decided by the
         # absolute entries alone. Returning 'connected' from the relative walk let a machine
@@ -428,14 +442,14 @@ def wrapper_state(settings, env=None, relative=False):
         # notice, as long as the working directory happened to hold an xswap-codex. The
         # caveat can only keep a connected answer; when the absolute entries say anything
         # else, they are the answer (2026-09-13).
-        absolute = [entry for entry in entries if os.path.isabs(entry['path'])]
+        absolute = [entry for entry in entries if Path(entry['path']).is_absolute()]
         absolute_state, absolute_first = path_state(settings, absolute)
         if absolute_state != 'connected':
             return absolute_state, absolute_first, absolute
     return state, first, entries
 
 
-def path_state(settings, entries):
+def path_state(settings: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
     """(state, first) for one codex_path_entries list; the PATH walk is the caller's.
 
     Split out of wrapper_state so a caller that needs both views -- doctor reports what
@@ -457,7 +471,7 @@ def path_state(settings, entries):
     return 'shadowed', first
 
 
-def shadowing_entry(settings, env=None):
+def shadowing_entry(settings: dict[str, Any], env: dict[str, str] | None = None) -> tuple[str, str] | None:
     """(path, target) of a wrappable `codex` entry ahead of the recorded one on PATH, or None.
 
     Acts only when the recorded entry is itself on this PATH: then the new entry
@@ -471,11 +485,12 @@ def shadowing_entry(settings, env=None):
     state, first, entries = wrapper_state(settings, env)
     if state != 'shadowed' or not any(entry['path'] == wrapper['path'] for entry in entries):
         return None
+    assert first is not None  # "shadowed" always carries a first PATH entry  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
     drift = _late('entry_drift')(first['path'], wrapper['proxy'], adopt=True)
     return (first['path'], drift['target']) if drift['action'] == 'reconnect' else None
 
 
-def wrapper_records(settings):
+def wrapper_records(settings: dict[str, Any]) -> list[dict[str, Any]]:
     """Every wrapped codex entry with rollback data: the primary `wrapper`, then `wrappers` (0.8.0)."""
     records = []
     for record in [settings.get('wrapper'), *(settings.get('wrappers') or [])]:
@@ -484,7 +499,7 @@ def wrapper_records(settings):
     return records
 
 
-def set_primary_wrapper(settings, record):
+def set_primary_wrapper(settings: dict[str, Any], record: dict[str, Any]) -> None:
     """Make `record` the primary `wrapper` (the entry plain `codex` runs through).
 
     A previous primary at another path moves to `wrappers` so auto-disable
@@ -503,7 +518,7 @@ def set_primary_wrapper(settings, record):
         settings.pop('wrappers', None)
 
 
-def _relink(manager, settings, path, proxy, problem):
+def _relink(manager: Manager, settings: dict[str, Any], path: Path, proxy: str, problem: str) -> bool:
     """Persist the rollback record, then atomically point `path` at xswap-codex.
 
     False after one stderr line when the link cannot be replaced; the record
@@ -520,7 +535,7 @@ def _relink(manager, settings, path, proxy, problem):
     return True
 
 
-def reconnect_wrapper(manager):
+def reconnect_wrapper(manager: Manager) -> str | None:
     """Keep plain `codex` connected while automatic switching is enabled.
 
     Runs on every xswap launch, usage read, and selection, and when a bridged
@@ -580,7 +595,7 @@ def reconnect_wrapper(manager):
     return result
 
 
-def enable(manager, accounts, wrap=False):
+def enable(manager: Manager, accounts: str, wrap: bool = False) -> None:
     names = [value.strip() for value in accounts.split(',') if value.strip()]
     AccountPool(manager, names, manager.codex())
     with manager.locked():
@@ -602,7 +617,7 @@ def enable(manager, accounts, wrap=False):
             # would wrap whatever `bin/codex` this directory happens to hold (a project's
             # own shim) and record a `path` no other directory can find again, which no
             # later `auto-disable` could restore -- so refuse instead.
-            if not os.path.isabs(executable):
+            if not Path(executable).is_absolute():
                 raise LiveError(f'codex was found through a relative PATH entry ({executable}), which names a '
                                 'different file in every directory; make that PATH entry absolute, then retry')
             # The same for xswap-codex, which had no guard: absolutising a relative hit against
@@ -610,7 +625,7 @@ def enable(manager, accounts, wrap=False):
             # to hold as the proxy, pointed the global `codex` at it, and every later
             # reconnect re-applied the recorded value -- so a project file stayed the thing
             # plain `codex` runs from every directory, with doctor reporting `-> xswap-codex`.
-            if not os.path.isabs(proxy):
+            if not Path(proxy).is_absolute():
                 raise LiveError(f'xswap-codex was found through a relative PATH entry ({proxy}), which names a '
                                 'different file in every directory; make that PATH entry absolute, then retry')
             target = Path(executable)
@@ -623,7 +638,10 @@ def enable(manager, accounts, wrap=False):
                 if not target.is_symlink() or target.lstat().st_uid != os.getuid():
                     raise LiveError('codex wrapper installation requires a user-owned codex symlink; use xswap instead')
                 original = os.readlink(target)
-                from xswap.providers.codex.relocate import canonical_codex_path, inside_root
+                from xswap.providers.codex.relocate import (
+                    canonical_codex_path,
+                    inside_root,
+                )
                 # A release the installer put under an owned home's packages link is recorded
                 # through the reference home, so purging auto/ cannot take plain codex with it.
                 literal = link_target_path(target, original)
@@ -655,7 +673,7 @@ def enable(manager, accounts, wrap=False):
               f'Export {ROOT_VARIABLE}={manager.root} wherever codex runs.', file=sys.stderr)
 
 
-def set_policy(manager, weekly_remaining):
+def set_policy(manager: Manager, weekly_remaining: float) -> None:
     threshold = validate_threshold(weekly_remaining)
     with manager.locked():
         settings = read_settings(manager)
@@ -666,7 +684,7 @@ def set_policy(manager, weekly_remaining):
           'Bridges older than 0.3.2 need a new auto session once; none were stopped.')
 
 
-def disable(manager):
+def disable(manager: Manager) -> None:
     from xswap.providers.codex.relocate import inside_root
     with manager.locked():
         settings = read_settings(manager)
@@ -678,7 +696,7 @@ def disable(manager):
         # included, could still name what it should point back at.
         unrestored = []
         for record in wrapper_records(settings):
-            if not os.path.isabs(record['path']):
+            if not Path(record['path']).is_absolute():
                 if record is not primary:
                     unrestored.append(record)
                 # A record written by 0.7.8 can hold the relative `shutil.which` result

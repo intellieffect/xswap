@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
+from typing import Any
 
 
-def private_dir(path: Path, error):
+def private_dir(path: Path, error: type[Exception]) -> None:
     """Create/repair `path` as a user-owned 0700 directory, or raise `error`.
 
     The error class is the caller's (Manager passes SwapError) so the message
@@ -29,7 +30,7 @@ def private_dir(path: Path, error):
     path.chmod(0o700)
 
 
-def atomic_json(path: Path, data):
+def atomic_json(path: Path, data: Any) -> None:
     fd, tmp = tempfile.mkstemp(prefix=".swap-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as f:
@@ -37,7 +38,7 @@ def atomic_json(path: Path, data):
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        if Path(tmp).exists():
+            Path(tmp).unlink()

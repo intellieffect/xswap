@@ -1,13 +1,13 @@
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.manager import Manager, SwapError, atomic_json
 from xswap.credentials import CredentialError, read_auth
 from xswap.live import AccountPool, LiveError, load_credentials
+from xswap.manager import Manager, SwapError, atomic_json
 
 
 class CredentialTests(unittest.TestCase):

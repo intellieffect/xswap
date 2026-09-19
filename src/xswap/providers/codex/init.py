@@ -10,10 +10,18 @@ a real TTY; the default `default_ask` reads one line from stdin.
 """
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from xswap.manager import SwapError, check_file_store, identity
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
+
+Ask = Callable[..., str]
 
 REGISTER_PROMPT = "Register the existing Codex login as an account? name"
 ADD_PROMPT = "Add another account? name (blank to skip)"
@@ -23,7 +31,7 @@ POLICY_PROMPT_TEMPLATE = "Set the weekly quota reserve to {pct:g}% remaining? [Y
 NOT_SIGNED_IN = ("not signed in", "unreadable auth cache")
 
 
-def default_ask(prompt, default=None):
+def default_ask(prompt: str, default: str | None = None) -> str:
     """Read one scripted answer from stdin; an empty line accepts `default`."""
     suffix = f" [{default}]" if default else ""
     try:
@@ -34,18 +42,18 @@ def default_ask(prompt, default=None):
     return raw if raw else (default or "")
 
 
-def _yes(answer, default_yes=True):
+def _yes(answer: str | None, default_yes: bool = True) -> bool:
     answer = (answer or "").strip().lower()
     if not answer:
         return default_yes
     return answer in ("y", "yes")
 
 
-def _account_names(manager):
+def _account_names(manager: Manager) -> list[str]:
     return list(manager.read()["accounts"].keys())
 
 
-def _step_register(manager, args, ask, interactive, lines):
+def _step_register(manager: Manager, args: argparse.Namespace, ask: Ask, interactive: bool, lines: list[str]) -> None:
     home = manager.source
     try:
         check_file_store(home)
@@ -58,10 +66,7 @@ def _step_register(manager, args, ask, interactive, lines):
     if any(entry["home"] == str(home) for entry in manager.read()["accounts"].values()):
         lines.append("register: skipped (this Codex home is already registered)")
         return
-    if args.yes or not interactive:
-        name = "main"
-    else:
-        name = ask(REGISTER_PROMPT, "main")
+    name = "main" if args.yes or not interactive else ask(REGISTER_PROMPT, "main")
     if not name:
         lines.append("register: skipped (no name given)")
         return
@@ -73,7 +78,7 @@ def _step_register(manager, args, ask, interactive, lines):
     lines.append(f"register: registered {name} ({identity(home)})")
 
 
-def _step_add(manager, args, ask, interactive, lines):
+def _step_add(manager: Manager, args: argparse.Namespace, ask: Ask, interactive: bool, lines: list[str]) -> None:
     if args.yes or not interactive:
         lines.append("add: skipped (--yes) -- sign in to another account later: xswap add work")
         return
@@ -90,7 +95,7 @@ def _step_add(manager, args, ask, interactive, lines):
         if identity(home) not in NOT_SIGNED_IN:
             lines.append(f"add {name}: skipped (already has a login)")
             continue
-        result = subprocess.call([manager.codex(), "login"], env=manager.env(home))
+        result = subprocess.call([manager.codex(), "login"], env=manager.env(home))  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         if result:
             lines.append(f"add {name}: codex login failed (exit {result})")
             continue
@@ -106,7 +111,7 @@ def _step_add(manager, args, ask, interactive, lines):
         lines.append("add: no additional accounts -- sign in to another account later: xswap add work")
 
 
-def _step_auto(manager, args, ask, interactive, lines):
+def _step_auto(manager: Manager, args: argparse.Namespace, ask: Ask, interactive: bool, lines: list[str]) -> None:
     from xswap.providers.codex.codex_cli import enable, read_settings
     from xswap.providers.codex.live import LiveError
 
@@ -138,7 +143,7 @@ def _step_auto(manager, args, ask, interactive, lines):
         lines.append(f"auto: skipped ({exc})")
 
 
-def _step_policy(manager, args, ask, interactive, lines):
+def _step_policy(manager: Manager, args: argparse.Namespace, ask: Ask, interactive: bool, lines: list[str]) -> None:
     from xswap.providers.codex.codex_cli import read_settings, set_policy
 
     settings = read_settings(manager)
@@ -160,20 +165,22 @@ def _step_policy(manager, args, ask, interactive, lines):
     lines.append(f"policy: weekly reserve set to {pct:g}%")
 
 
-def run_init(manager, args, ask=None, interactive=None):
+def run_init(
+    manager: Manager, args: argparse.Namespace, ask: Ask | None = None, interactive: bool | None = None
+) -> int:
     """Run register -> add -> auto -> policy -> doctor in order. Returns doctor's exit code."""
-    from xswap.providers.codex.doctor import print_report, run as run_doctor
+    from xswap.providers.codex.doctor import print_report
+    from xswap.providers.codex.doctor import run as run_doctor
 
     if ask is None:
         ask = default_ask
-    if interactive is None:
-        interactive = sys.stdin.isatty() and not args.yes
+    resolved_interactive: bool = sys.stdin.isatty() and not args.yes if interactive is None else interactive
 
-    lines = []
-    _step_register(manager, args, ask, interactive, lines)
-    _step_add(manager, args, ask, interactive, lines)
-    _step_auto(manager, args, ask, interactive, lines)
-    _step_policy(manager, args, ask, interactive, lines)
+    lines: list[str] = []
+    _step_register(manager, args, ask, resolved_interactive, lines)
+    _step_add(manager, args, ask, resolved_interactive, lines)
+    _step_auto(manager, args, ask, resolved_interactive, lines)
+    _step_policy(manager, args, ask, resolved_interactive, lines)
     print("\n".join(lines))
     print()
     return print_report(run_doctor(manager))

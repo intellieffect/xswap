@@ -14,7 +14,6 @@ import uuid
 from pathlib import Path
 
 import pytest
-
 from conftest import _REAL_ROOTS, RealStoreWriteBlocked
 
 

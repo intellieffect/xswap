@@ -2,6 +2,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
+
 from xswap.codex_cli import WebSocketBridge
 
 
@@ -91,9 +92,10 @@ class PickerTests(IsolatedAsyncioTestCase):
         self.assertEqual(bridge.outbox.get_nowait(), {'id': 1, 'result': {'main': True}})
 
     async def test_filters_other_writers_but_keeps_own_loaded_threads(self):
-        import tempfile
         import fcntl
+        import tempfile
         from pathlib import Path
+
         from xswap.codex_cli import writer_busy
         with tempfile.TemporaryDirectory() as home:
             tid = '00000000-0000-4000-8000-000000000001'

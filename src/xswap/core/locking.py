@@ -11,12 +11,14 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+from collections.abc import Iterator
+from pathlib import Path
 
 LOCK_FILE_MODE = 0o600
 
 
 @contextlib.contextmanager
-def locked(path):
+def locked(path: str | Path) -> Iterator[None]:
     """Hold an exclusive lock on `path`, waiting for whoever has it."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR, LOCK_FILE_MODE)
     try:
@@ -27,7 +29,7 @@ def locked(path):
 
 
 @contextlib.contextmanager
-def try_locked(path):
+def try_locked(path: str | Path) -> Iterator[bool]:
     """locked(), but yields False instead of waiting when someone else holds the lock."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR, LOCK_FILE_MODE)
     try:

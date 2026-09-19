@@ -11,28 +11,38 @@ namespace at call time. The quota read itself goes through
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
-from pathlib import Path
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap._version import __version__
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
-from xswap.core.ranking import rank_candidates
 from xswap.core.json_output import accounts_payload
-from xswap.core.usage import AUTH_FAILED_STATUS, UsageError, is_sign_in_failure, short_line
+from xswap.core.ranking import rank_candidates
+from xswap.core.types import AccountUsageRow, UsageBucket
+from xswap.core.usage import (
+    AUTH_FAILED_STATUS,
+    UsageError,
+    is_sign_in_failure,
+    short_line,
+)
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
 
 class UsageCache:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
-    def path(self):
+    def path(self) -> Path:
         return self.manager.root / "usage-cache.json"
 
-    def cached(self, name, label, max_age):
+    def cached(self, name: str, label: str, max_age: float | None) -> dict[str, Any] | None:
         """Return {"buckets", "fetchedAt"} from a still-fresh cache entry, or None.
 
         A saved entry whose identity label no longer matches the account's current
@@ -54,7 +64,7 @@ class UsageCache:
             return None
         return {"buckets": buckets, "fetchedAt": fetched_at, "resetCredits": entry.get("resetCredits")}
 
-    def forget(self, name):
+    def forget(self, name: str) -> None:
         """Drop a removed account's cache entry (label may be an email). Caller holds the lock."""
         try:
             data = json.loads(self.manager.usage_cache_path().read_text())
@@ -63,7 +73,7 @@ class UsageCache:
         if isinstance(data, dict) and data.pop(name, None) is not None:
             atomic_json(self.manager.usage_cache_path(), data)
 
-    def still_registered(self, name):
+    def still_registered(self, name: str) -> bool:
         """Whether NAME is still in the registry. Caller holds the lock.
 
         A usage fetch takes seconds, and `remove` drops the account's cache and auth-state
@@ -78,7 +88,14 @@ class UsageCache:
         except SwapError:
             return True
 
-    def remember(self, name, buckets, fetched_at, label, reset_credits=None):
+    def remember(
+        self,
+        name: str,
+        buckets: list[UsageBucket],
+        fetched_at: float,
+        label: str,
+        reset_credits: Any = None,
+    ) -> None:
         """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
         with self.manager.locked():
             if not self.manager._still_registered(name):
@@ -92,9 +109,17 @@ class UsageCache:
             data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label, "resetCredits": reset_credits}
             atomic_json(self.manager.usage_cache_path(), data)
 
-    def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
+    def account_usage(
+        self,
+        name: str,
+        home: Path,
+        offline: bool = False,
+        disabled: bool = False,
+        max_age: float | None = None,
+    ) -> AccountUsageRow:
         label = self.hooks.identity(home)
-        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
+        row: AccountUsageRow = {"name": name, "identity": label, "status": "offline", "buckets": [],
+                                 "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
         if disabled:
             row["status"] = "disabled"
         elif label in ("not signed in", "unreadable auth cache"):
@@ -116,6 +141,10 @@ class UsageCache:
                     buckets, fetched_at = snapshot.buckets, snapshot.fetched_at
                     row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
                                resetCredits=snapshot.reset_credits)
+                    if fetched_at is None:
+                        # A provider that returned a snapshot without stamping it; the
+                        # cache and the alert job both key on that stamp.
+                        raise UsageError("usage snapshot carries no fetch time")
                     self.manager.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
                     self.manager.clear_auth_failure(name)
                 except (UsageError, SwapError) as error:
@@ -124,7 +153,9 @@ class UsageCache:
                         self.manager.remember_auth_failure(name, label)
         return row
 
-    def account_rows(self, name=None, offline=False, max_age=None):
+    def account_rows(
+        self, name: str | None = None, offline: bool = False, max_age: float | None = None
+    ) -> list[AccountUsageRow]:
         data = self.manager.read()
         enabled_names = {n for n, _ in self.manager.enabled_accounts()}
         if name is not None:
@@ -141,7 +172,17 @@ class UsageCache:
             row["active"] = row["name"] == data["active"]
         return rows
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None, lang="en"):
+    def show_accounts(
+        self,
+        name: str | None = None,
+        offline: bool = False,
+        json_output: bool = False,
+        include_spark: bool = False,
+        details: bool = False,
+        short: bool = False,
+        max_age: float | None = None,
+        lang: str = "en",
+    ) -> list[AccountUsageRow]:
         if short and json_output:
             raise SwapError("--short and --json are mutually exclusive.")
         rows = self.manager.account_rows(name, offline, max_age)
@@ -163,7 +204,9 @@ class UsageCache:
                      shape=provider.quota_shape, credit_lines=provider.credit_lines))
         return rows
 
-    def best_account(self, model=None, exclude=(), max_age=None):
+    def best_account(
+        self, model: str | None = None, exclude: tuple[str, ...] = (), max_age: float | None = None
+    ) -> tuple[str | None, dict[str, Any]]:
         """Pick the signed-in account with the most quota headroom right now.
 
         A one-shot choice for launchers that have no `--remote` hook and so cannot

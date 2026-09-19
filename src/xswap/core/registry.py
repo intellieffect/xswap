@@ -17,36 +17,41 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import shutil
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
 from xswap.core.paths import auto_dir, cli_runs_dir, profile_dir, settings_path
 from xswap.core.settings import read_settings
+from xswap.core.types import AccountRecord, RegistryData
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
 # "no expected selection was pinned" for Registry.use. A sentinel rather than None, because
 # None is a real selection state (no account selected) a caller may legitimately pin against.
 UNSET = object()
 
 
-def validate_name(name):
+def validate_name(name: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}", name):
-        raise SwapError("Name must be 1–40 letters, digits, underscores or hyphens.")
+        raise SwapError("Name must be 1–40 letters, digits, underscores or hyphens.")  # noqa: RUF001  the published message uses an en dash
     return name
 
 
 class Registry:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
     @property
-    def path(self):
+    def path(self) -> Path:
         return self.manager.registry
 
-    def read(self):
+    def read(self) -> RegistryData:
         if not self.path.exists():
             return {"version": 1, "active": None, "accounts": {}}
         try:
@@ -58,7 +63,7 @@ class Registry:
         except (ValueError, OSError):
             raise SwapError("Invalid account registry; refusing to overwrite it.") from None
 
-    def provider_of(self, entry):
+    def provider_of(self, entry: AccountRecord) -> str:
         """Which platform an account record belongs to.
 
         Records written before this field existed carry no `provider`, and a read
@@ -69,7 +74,7 @@ class Registry:
         """
         return entry.get("provider") or self.manager.provider.name
 
-    def switch_target(self, target):
+    def switch_target(self, target: str) -> str:
         """Resolve a 1-based list position; use NAME remains literal for numeric names."""
         if re.fullmatch(r"[0-9]+", target):
             names = list(self.manager.read()["accounts"])
@@ -79,7 +84,7 @@ class Registry:
             return names[slot - 1]
         return target
 
-    def account(self, name=None, mapped=True):
+    def account(self, name: str | None = None, mapped: bool = True) -> tuple[str, Path]:
         data = self.manager.read()
         name = name or (self.manager.default_account() if mapped else data["active"])
         if name not in data["accounts"]:
@@ -88,7 +93,7 @@ class Registry:
             raise SwapError(f"No matching account. Run: xswap register main, or xswap add NAME{hint}")
         return name, Path(data["accounts"][name]["home"])
 
-    def register(self, name, home=None):
+    def register(self, name: str, home: str | Path | None = None) -> Path:
         validate_name(name)
         home = Path(home or self.manager.source).expanduser().resolve()
         self.hooks.check_file_store(home)
@@ -107,7 +112,7 @@ class Registry:
             atomic_json(self.path, data)
         return home
 
-    def prepare(self, name):
+    def prepare(self, name: str) -> Path:
         validate_name(name)
         self.hooks.check_file_store(self.manager.source)
         with self.manager.locked():
@@ -127,7 +132,7 @@ class Registry:
             atomic_json(self.path, data)
         return home
 
-    def use(self, name, expected=UNSET):
+    def use(self, name: str, expected: Any = UNSET) -> Path | bool:
         with self.manager.locked():
             # First thing inside the lock: a caller pinning the selection must not raise on the
             # new account's state (disabled, signed out) when the answer is "someone else chose".
@@ -153,7 +158,7 @@ class Registry:
             atomic_json(self.path, data)
         return home
 
-    def select_if_unset(self, name):
+    def select_if_unset(self, name: str) -> bool:
         # Mirrors use(): the None check, the signed-in check, and the write share one lock
         # so a concurrent add/use cannot race between "no active account" and setting one.
         with self.manager.locked():
@@ -169,16 +174,16 @@ class Registry:
             atomic_json(self.path, data)
         return True
 
-    def require_enabled(self, name):
+    def require_enabled(self, name: str) -> None:
         data = self.manager.read()
         if data["accounts"][name].get("disabled"):
             raise SwapError(f"Account {name} is disabled. Run: xswap enable {name}")
 
-    def enabled_accounts(self):
+    def enabled_accounts(self) -> list[tuple[str, Path]]:
         data = self.manager.read()
         return [(name, Path(value["home"])) for name, value in data["accounts"].items() if not value.get("disabled")]
 
-    def set_disabled(self, name, disabled):
+    def set_disabled(self, name: str, disabled: bool) -> None:
         with self.manager.locked():
             name, _ = self.manager.account(name)
             data = self.manager.read()
@@ -188,7 +193,7 @@ class Registry:
                 data["accounts"][name].pop("disabled", None)
             atomic_json(self.path, data)
 
-    def auto_session_running(self, name):
+    def auto_session_running(self, name: str) -> bool:
         """Best effort: report whether a live auto bridge (desktop or CLI) holds this account.
 
         Both the account the bridge runs on right now (`account`) and the pool it may
@@ -231,7 +236,7 @@ class Registry:
                 os.close(fd)
         return False
 
-    def purge_target(self, name, entry):
+    def purge_target(self, name: str, entry: AccountRecord) -> Path:
         """The directory `--purge` deletes for a managed account: the profile its record names.
 
         `remove --purge` deleted `<root>/profiles/<name>` and never compared it with the
@@ -251,14 +256,14 @@ class Registry:
                             f"{recorded} yourself if you no longer want it.")
         return target
 
-    def remove(self, name, purge=False):
+    def remove(self, name: str, purge: bool = False) -> dict[str, Any]:
         """Registry drop plus the usage-cache and auth-state entries, under ONE lock hold.
 
         The two `_forget_*` calls are the facade's lock-free helpers precisely so this
         whole sequence stays a single acquisition of a single lock file.
         """
         with self.manager.locked():
-            name, home = self.manager.account(name)
+            name, _home = self.manager.account(name)
             settings = read_settings(self.manager)
             if settings.get("enabled") and name in settings.get("accounts", []):
                 raise SwapError(f"{name} is in the automatic switching pool. Run xswap auto-disable or auto-enable with a new pool first.")

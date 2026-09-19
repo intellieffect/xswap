@@ -15,28 +15,34 @@ what `usage-cache`-era code, the JSON payload builder and the suite all read;
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, cast
+
+from xswap.core.types import CheckPayload
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
 
-def check(name, status, detail=""):
+def check(name: str, status: str, detail: str = "") -> CheckPayload:
     """One result row. The unit every provider check returns."""
     return {"name": name, "status": status, "detail": detail}
 
 
-def collect(manager):
+def collect(manager: Manager) -> list[CheckPayload]:
     """Every check MANAGER's provider offers, as dict rows, in the provider's order."""
-    return [result if isinstance(result, dict) else result.as_dict()
+    return [cast(CheckPayload, result) if isinstance(result, dict) else result.as_dict()
             for result in manager.provider.doctor_checks(manager)]
 
 
-def format_report(results):
+def format_report(results: list[CheckPayload]) -> str:
     name_width = max((len(r["name"]) for r in results), default=0)
     lines = [f"{r['status']:<5} {r['name']:<{name_width}}  {r['detail']}".rstrip() for r in results]
     return "\n".join(lines)
 
 
-def print_report(results, json_output=False):
+def print_report(results: list[CheckPayload], json_output: bool = False) -> int:
     if json_output:
         from xswap.core.json_output import doctor_payload
         print(json.dumps(doctor_payload(results), ensure_ascii=False, indent=2))

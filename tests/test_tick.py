@@ -6,9 +6,10 @@ from unittest.mock import patch
 
 import test_codex_swap
 from test_codex_swap import dual_window_raw
+
 from xswap.manager import Manager, atomic_json, main, rank_candidates
-from xswap.usage import AUTH_FAILED_STATUS, UsageError, normalize_limits
 from xswap.tick import decide
+from xswap.usage import AUTH_FAILED_STATUS, UsageError, normalize_limits
 
 REPORT = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
 

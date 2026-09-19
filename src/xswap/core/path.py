@@ -12,8 +12,8 @@ instead of refusing.
 """
 from __future__ import annotations
 
-import os
 import shutil
+from pathlib import Path
 
 from xswap.core.errors import XswapError
 
@@ -22,14 +22,14 @@ class RelativeEntryError(XswapError):
     """`name` is on PATH only through a relative element."""
 
 
-def relative_entry_message(name, found):
+def relative_entry_message(name: str, found: str) -> str:
     """The sentence every surface uses for a relative PATH hit, verbatim."""
     return (f"{name} was found through a relative PATH entry ({found}), which names a different "
             "file in every directory, so xswap will not run it. Fix: make that PATH entry absolute, "
             "then retry.")
 
 
-def absolute_which(name, error=RelativeEntryError):
+def absolute_which(name: str, error: type[Exception] = RelativeEntryError) -> str | None:
     """shutil.which(name) when it is absolute; None when nothing was found at all.
 
     A relative answer raises `error` -- the caller's own error class, so the message
@@ -40,6 +40,6 @@ def absolute_which(name, error=RelativeEntryError):
     executing it.
     """
     found = shutil.which(name)
-    if found is None or os.path.isabs(found):
+    if found is None or Path(found).is_absolute():
         return found
     raise error(relative_entry_message(name, found))

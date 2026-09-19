@@ -6,16 +6,16 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import sqlite3
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.manager import Manager, atomic_json, identity, main
 import xswap.codex_cli as xswap_cli
 import xswap.doctor as doctor
+from xswap.manager import Manager, atomic_json, identity, main
 
 
 def fake_jwt(exp=None, claims=None):

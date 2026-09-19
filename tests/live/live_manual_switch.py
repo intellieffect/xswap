@@ -8,13 +8,15 @@ import asyncio
 import fcntl
 import json
 import os
-from pathlib import Path
-import tempfile
 import sys
+import tempfile
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from xswap.manager import Manager, private_dir
 from xswap.live import AccountPool, Bridge
+from xswap.manager import Manager, private_dir
 from xswap.switch import switch_running
+
 
 async def main():
     source = Manager()

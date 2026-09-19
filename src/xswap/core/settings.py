@@ -12,12 +12,16 @@ discarded (see `wrapper.enable`).
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import LiveError
 from xswap.core.paths import settings_path
 
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
-def read_settings(manager):
+
+def read_settings(manager: Manager) -> dict[str, Any]:
     path = settings_path(manager.root)
     if not path.exists():
         return {}

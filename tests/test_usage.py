@@ -2,15 +2,25 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
-import sys
 import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from xswap.manager import Manager, SwapError, atomic_json, identity, main
-from xswap.usage import UsageError, normalize_limits, normalize_reset_credits, read_limits, reset_credit_lines, reset_label, short_line, usage_lines, warnings
+from xswap.usage import (
+    UsageError,
+    normalize_limits,
+    normalize_reset_credits,
+    read_limits,
+    reset_credit_lines,
+    reset_label,
+    short_line,
+    usage_lines,
+    warnings,
+)
 
 
 def response():

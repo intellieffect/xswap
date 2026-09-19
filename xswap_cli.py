@@ -5,5 +5,5 @@ script that still does `import xswap_cli`, keeps working. Remove after the
 next release.
 """
 
-from xswap.codex_cli import *  # noqa: F401,F403
+from xswap.codex_cli import *  # noqa: F403
 from xswap.codex_cli import codex_main  # noqa: F401

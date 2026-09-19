@@ -1,14 +1,15 @@
 import fcntl
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.manager import atomic_json, main, private_dir
 import test_codex_swap
 import test_live
+
+from xswap.manager import atomic_json, main, private_dir
 from xswap.switch import read_private_json, switch_running
 
 

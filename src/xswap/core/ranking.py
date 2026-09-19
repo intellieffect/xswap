@@ -8,11 +8,27 @@ the rows, which is what a pure caller with nothing but fixtures gets.
 """
 from __future__ import annotations
 
-from xswap.core.quota import buckets_available, quota_windows, short_percent, weekly_percent, window_percent  # noqa: F401
+from collections.abc import Sequence
+from typing import Any
+
+from xswap.core.quota import (  # noqa: F401
+    buckets_available,
+    quota_windows,
+    short_percent,
+    weekly_percent,
+    window_percent,
+)
+from xswap.core.types import AccountUsageRow, QuotaShape, UsageSnapshot
 from xswap.core.usage import is_ok, window_label
 
 
-def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0, shape=None):
+def rank_candidates(
+    rows: Sequence[AccountUsageRow | UsageSnapshot],
+    model: str | None = None,
+    exclude: tuple[str, ...] = (),
+    weekly_remaining: float = 0,
+    shape: QuotaShape | None = None,
+) -> tuple[str | None, dict[str, Any]]:
     """Pick the row with the most headroom: (name or None, {"remaining", "candidates"}).
 
     Shared by Manager.best_account (exhaustion only, weekly_remaining=0) and
@@ -25,9 +41,9 @@ def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0, shape=None
     `rows` are the dicts `Manager.account_rows()` produces; an `UsageSnapshot` is
     accepted in their place and read through the same keys (see `snapshot_row`).
     """
-    rows = [snapshot_row(row) for row in rows]
+    normalized: list[AccountUsageRow] = [snapshot_row(row) for row in rows]
     excluded = set(exclude)
-    candidates = [row for row in rows if not row["disabled"] and row["name"] not in excluded]
+    candidates = [row for row in normalized if not row["disabled"] and row["name"] not in excluded]
     if not candidates:
         return None, {"remaining": {}, "candidates": []}
     summary, ranked = [], []
@@ -39,19 +55,19 @@ def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0, shape=None
     if not ranked:
         return None, {"remaining": {}, "candidates": summary}
 
-    def rank_key(row):
-        known = [w for w in quota_windows(row["buckets"], shape) if w["remainingPercent"] is not None]
+    def rank_key(row: AccountUsageRow) -> tuple[float, float]:
+        known = [(w, w["remainingPercent"]) for w in quota_windows(row["buckets"], shape) if w["remainingPercent"] is not None]
         if not known:
             return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
-        tightest = min(known, key=lambda w: w["remainingPercent"])
-        return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
+        tightest, tightest_remaining = min(known, key=lambda pair: pair[1])
+        return (-tightest_remaining, tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
 
     winner = min(ranked, key=rank_key)
     remaining = {window_label(w): w["remainingPercent"] for w in quota_windows(winner["buckets"], shape)}
     return winner["name"], {"remaining": remaining, "candidates": summary}
 
 
-def snapshot_row(row):
+def snapshot_row(row: AccountUsageRow | UsageSnapshot) -> AccountUsageRow:
     """A row dict for either input shape.
 
     `Manager.account_rows()` has always produced dicts, and everything that stores
@@ -62,5 +78,5 @@ def snapshot_row(row):
     """
     if isinstance(row, dict):
         return row
-    return {"name": row.account, "buckets": row.buckets, "status": "ok", "disabled": False,
-            "fetchedAt": row.fetched_at, "resetCredits": row.reset_credits}
+    return {"name": row.account, "identity": row.account, "buckets": row.buckets, "status": "ok",
+            "disabled": False, "cached": False, "fetchedAt": row.fetched_at, "resetCredits": row.reset_credits}

@@ -1,8 +1,15 @@
 """Opt-in: actual shipped trusted runtime, browser setup only (no browser actions).
 Fake credentials are unnecessary: no account login, network request, or page access.
 """
-import asyncio, contextlib, json, os, signal, sys, tempfile
+import asyncio
+import contextlib
+import json
+import os
+import signal
+import sys
+import tempfile
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from xswap.plugins import ensure_plugins
 

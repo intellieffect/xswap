@@ -2,13 +2,20 @@ import contextlib
 import io
 import json
 import os
-from pathlib import Path
 import re
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.display import STRINGS, dashboard, policy_label, render, resolve_lang, summary
+from xswap.display import (
+    STRINGS,
+    dashboard,
+    policy_label,
+    render,
+    resolve_lang,
+    summary,
+)
 from xswap.usage import normalize_limits
 
 

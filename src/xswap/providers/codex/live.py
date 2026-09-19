@@ -8,23 +8,38 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from datetime import datetime
 import fcntl
 import json
 import os
-from pathlib import Path
 import signal
 import stat
 import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable, Coroutine
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from xswap.providers.codex.usage import CODEX_QUOTA, UsageError, clean, is_sign_in_failure, normalize_limits, read_limits
 from xswap.core import quota
-from xswap.providers.codex.credentials import CredentialError, read_auth
 from xswap.core.errors import LiveError
 from xswap.core.paths import auto_dir
+from xswap.core.types import UsageBucket
+from xswap.providers.codex.credentials import CredentialError, read_auth
+from xswap.providers.codex.usage import (
+    CODEX_QUOTA,
+    UsageError,
+    clean,
+    is_sign_in_failure,
+    normalize_limits,
+    read_limits,
+)
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
+
+Message = dict[str, Any]
 
 
 class SignInRequired(LiveError):
@@ -36,7 +51,7 @@ class SignInRequired(LiveError):
     """
 
 
-def sign_in_required(name):
+def sign_in_required(name: str) -> str:
     return f'sign-in required; run: xswap login {name}'
 
 
@@ -53,7 +68,7 @@ FAILURE_EVENTS = frozenset({'manual-switch-failed', 'candidate-unavailable', 'no
                             'continuation-failed', 'refresh-failed', 'quota-check-failed'})
 
 
-def failure_reason(exc):
+def failure_reason(exc: BaseException) -> str:
     """Curated, non-secret one-liner for status.json, bridge.log, and the disconnect message.
 
     LiveError/UsageError carry hand-written constants only. SwapError and OSError
@@ -83,11 +98,11 @@ def failure_reason(exc):
 class IdentityMismatch(LiveError):
     """The app server reports a different login than the one just sent to it."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('identity mismatch')
 
 
-def append_log_line(path, line):
+def append_log_line(path: Path, line: str) -> bool:
     """Append one line to a private bridge log; never raise (logging must not stop a bridge).
 
     Only a user-owned regular file is written through (O_NOFOLLOW plus an fstat
@@ -116,7 +131,7 @@ def append_log_line(path, line):
         return False
 
 
-def compact_log(path, incoming):
+def compact_log(path: Path, incoming: int) -> None:
     """Rewrite the log with its newest lines when `incoming` more bytes would pass the cap."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -137,13 +152,13 @@ def compact_log(path, incoming):
             stream.write(b''.join(lines[-BRIDGE_LOG_KEEP_LINES:]))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        if Path(tmp).exists():
+            Path(tmp).unlink()
 
 
-def jwt_claims(token):
+def jwt_claims(token: str) -> dict[str, Any]:
     try:
         part = token.split('.')[1]
         value = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
@@ -152,7 +167,7 @@ def jwt_claims(token):
         return {}
 
 
-def token_emails(token):
+def token_emails(token: str) -> set[str]:
     """Email labels a ChatGPT access token carries, for comparison with account/read.
 
     Real access tokens keep the address under the profile namespace; id tokens
@@ -164,7 +179,7 @@ def token_emails(token):
     return {value.casefold() for value in candidates if isinstance(value, str) and value}
 
 
-def load_credentials(home):
+def load_credentials(home: Path) -> dict[str, Any]:
     """Read the original credential store; never write or return raw errors."""
     try:
         data = read_auth(home)
@@ -189,12 +204,12 @@ def load_credentials(home):
         raise LiveError('cannot read ChatGPT credentials') from None
 
 
-def validate_threshold(value):
+def validate_threshold(value: float) -> float:
     """`xswap.core.quota.validate_threshold`, under the name this module has always exported."""
     return quota.validate_threshold(value)
 
 
-def buckets_available(buckets, model=None, weekly_remaining=0):
+def buckets_available(buckets: list[UsageBucket], model: str | None = None, weekly_remaining: float = 0) -> bool | None:
     """Same rule as quota_available, but on already-normalized buckets.
 
     The rule itself is platform-neutral and lives in `xswap.core.quota`; what is
@@ -203,20 +218,21 @@ def buckets_available(buckets, model=None, weekly_remaining=0):
     return quota.buckets_available(buckets, model, weekly_remaining, shape=CODEX_QUOTA)
 
 
-def quota_available(raw, model=None, weekly_remaining=0):
+def quota_available(raw: Any, model: str | None = None, weekly_remaining: float = 0) -> bool | None:
     """Unknown is not available. Require all applicable known windows > 0."""
     weekly_remaining = validate_threshold(weekly_remaining)
     return buckets_available(normalize_limits(raw), model, weekly_remaining)
 
 
-def usage_failure(turn):
+def usage_failure(turn: dict[str, Any]) -> bool:
     return (turn.get('status') == 'failed' and
             (turn.get('error') or {}).get('codexErrorInfo') == 'usageLimitExceeded')
 
 
 class AccountPool:
-    def __init__(self, manager, names, codex):
-        from xswap.manager import check_file_store, validate_name
+    def __init__(self, manager: Manager, names: list[str], codex: str) -> None:
+        from xswap.core.registry import validate_name
+        from xswap.manager import check_file_store
         if len(names) < 2 or len(set(names)) != len(names):
             raise LiveError('provide at least two distinct accounts with --accounts first,second')
         self.manager, self.codex = manager, codex
@@ -232,11 +248,11 @@ class AccountPool:
         self.names = names
 
     @property
-    def weekly_remaining(self):
+    def weekly_remaining(self) -> float:
         from xswap.providers.codex.codex_cli import read_settings
         return validate_threshold(read_settings(self.manager).get('weeklyRemainingThreshold', 0))
 
-    def prepare(self, name, require_quota=True):
+    def prepare(self, name: str, require_quota: bool = True) -> tuple[dict[str, Any], Any]:
         # Manual selections may be outside the automatic fallback pool.
         from xswap.manager import check_file_store, identity
         if name not in {n for n, _ in self.manager.enabled_accounts()}:
@@ -269,11 +285,11 @@ class AccountPool:
             self.manager.clear_auth_failure(name)
         return load_credentials(home), raw
 
-    def refresh(self, name):
+    def refresh(self, name: str) -> dict[str, Any]:
         credentials, _ = self.prepare(name)
         return credentials
 
-    def credentials(self, name):
+    def credentials(self, name: str) -> dict[str, Any]:
         """Tokens only, for putting a login back after a failed verification: no usage read."""
         from xswap.manager import check_file_store
         if name not in {n for n, _ in self.manager.enabled_accounts()}:
@@ -282,7 +298,7 @@ class AccountPool:
         check_file_store(home)
         return load_credentials(home)
 
-    def first_available(self):
+    def first_available(self) -> str:
         """The first pool member whose current login is not recorded as rejected; the
         pool's first name when every member is (prepare then reports the reason)."""
         from xswap.manager import SwapError, identity
@@ -297,7 +313,14 @@ class AccountPool:
 
 
 class Bridge:
-    def __init__(self, pool, argv, env, emit=None, status_path=None):
+    def __init__(
+        self,
+        pool: AccountPool,
+        argv: list[str],
+        env: dict[str, str],
+        emit: Callable[[Message], None] | None = None,
+        status_path: Path | None = None,
+    ) -> None:
         self.pool, self.argv, self.env = pool, argv, env
         self.emit = emit or self.stdout_message
         self.status_path = status_path
@@ -338,11 +361,11 @@ class Bridge:
         self.verify_reason = None
 
     @staticmethod
-    def stdout_message(message):
+    def stdout_message(message: Message) -> None:
         sys.stdout.write(json.dumps(message, separators=(',', ':')) + '\n')
         sys.stdout.flush()
 
-    def status(self, event, exc=None, **extra):
+    def status(self, event: str, exc: BaseException | None = None, **extra: Any) -> None:
         # Whitelist operational metadata only. No prompts, tokens, raw RPC errors.
         # `exc` is the exception behind a failure event: its classified reason goes
         # into the record and the log; its type goes into the log only.
@@ -374,23 +397,26 @@ class Bridge:
             self.log(event, extra, type(exc).__name__ if exc is not None else None)
         self.status_log(event)
 
-    def log(self, event, fields, exc_type=None):
+    def log(self, event: str, fields: dict[str, Any], exc_type: str | None = None) -> None:
         """One bridge.log line per event: local time, event, account, the event's extras, exception type."""
         parts = [datetime.now().astimezone().isoformat(timespec='milliseconds'), event,
                  'account=' + json.dumps(self.current)]
         parts.extend(f'{key}={json.dumps(value, default=str)}' for key, value in fields.items())
         if exc_type:
             parts.append('exc=' + json.dumps(exc_type))
-        append_log_line(self.status_path.parent / BRIDGE_LOG_NAME, ' '.join(parts))
+        # `log` is only called from `status`, which only calls it `if self.status_path:`.
+        append_log_line(self.status_path.parent / BRIDGE_LOG_NAME, ' '.join(parts))  # type: ignore[union-attr]
 
-    def status_log(self, event):
+    def status_log(self, event: str) -> None:
         print(f'xswap auto: {event} ({self.current})', file=sys.stderr, flush=True)
 
-    async def send(self, message):
-        self.process.stdin.write((json.dumps(message) + '\n').encode())
-        await self.process.stdin.drain()
+    async def send(self, message: Message) -> None:
+        # `self.process` and its `stdin` pipe exist from `run()` onward; `send` is never
+        # called before that (the app-server subprocess is what every message goes to).
+        self.process.stdin.write((json.dumps(message) + '\n').encode())  # type: ignore[union-attr]
+        await self.process.stdin.drain()  # type: ignore[union-attr]
 
-    async def rpc(self, method, params, timeout=20):
+    async def rpc(self, method: str, params: dict[str, Any], timeout: float = 20) -> dict[str, Any]:
         self.counter += 1
         key = self.request_prefix + str(self.counter)
         future = asyncio.get_running_loop().create_future()
@@ -404,7 +430,7 @@ class Bridge:
         finally:
             self.requests.pop(key, None)
 
-    async def install(self, name, credentials, raw=None):
+    async def install(self, name: str, credentials: dict[str, Any], raw: Any = None) -> None:
         if self.active:
             raise LiveError('cannot change authentication while turns are active')
         await self.rpc('account/login/start', {'type': 'chatgptAuthTokens', **credentials})
@@ -426,13 +452,13 @@ class Bridge:
         self.quota_known = raw is not None
         self.status('switched' if changed else 'ready', quotaKnown=self.quota_known)
 
-    def record_verification(self, account, label, reason):
+    def record_verification(self, account: str | None, label: str | None, reason: str | None) -> None:
         self.verified_account = account
         self.verified_identity = label
         self.verified_at = time.time() if account else None
         self.verify_reason = reason
 
-    async def verify_identity(self, credentials):
+    async def verify_identity(self, credentials: dict[str, Any]) -> tuple[str | None, str | None]:
         """Read back which login the app server holds after account/login/start.
 
         account/read is local (no refresh, no network) and answers with the email
@@ -463,7 +489,7 @@ class Bridge:
             raise IdentityMismatch()
         return clean(email), None
 
-    async def restore_current(self):
+    async def restore_current(self) -> None:
         """Best effort after a mismatch: re-send the trusted account's tokens and re-check."""
         if self.current_id is None:
             self.record_verification(None, None, 'identity mismatch')  # nothing was installed before
@@ -478,7 +504,7 @@ class Bridge:
             return
         self.record_verification(self.current if label else None, label, reason or 'identity mismatch')
 
-    async def apply_manual_switch(self):
+    async def apply_manual_switch(self) -> bool:
         """Called with gate held; only idle servers may change authentication."""
         if not self.status_path or not self.initialized or self.stopping:
             return False
@@ -518,17 +544,19 @@ class Bridge:
             self.status('manual-switch-failed', exc=exc, candidate=candidate)
             return False
 
-    async def manual_switch_reader(self):
+    async def manual_switch_reader(self) -> None:
         while True:
             async with self.gate:
                 await self.apply_manual_switch()
             await asyncio.sleep(0.25)
 
-    def threshold(self):
+    def threshold(self) -> float:
         return validate_threshold(getattr(self.pool, 'weekly_remaining', 0))
 
-    async def choose(self, excluded, model=None, excluded_ids=None):
-        seen_ids = set(excluded_ids or ())
+    async def choose(
+        self, excluded: set[str], model: str | None = None, excluded_ids: set[str] | None = None
+    ) -> bool:
+        seen_ids: set[str | None] = set(excluded_ids or ())
         if excluded:
             seen_ids.add(self.current_id)
         outcomes = []
@@ -557,7 +585,7 @@ class Bridge:
                     or 'every pool account was already tried')
         return False
 
-    async def before_turn(self, model=None):
+    async def before_turn(self, model: str | None = None) -> None:
         if await self.apply_manual_switch():
             return
         if self.active:
@@ -584,12 +612,12 @@ class Bridge:
         if available is False:
             await self.choose({self.current}, model)
 
-    def schedule(self, awaitable):
+    def schedule(self, awaitable: Coroutine[Any, Any, Any]) -> None:
         task = asyncio.create_task(awaitable)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
-    async def refresh(self, message):
+    async def refresh(self, message: Message) -> None:
         try:
             previous = (message.get('params') or {}).get('previousAccountId')
             credentials = await asyncio.wait_for(asyncio.to_thread(self.pool.refresh, self.current), 9)
@@ -601,7 +629,7 @@ class Bridge:
                              'message': 'xswap: re-authenticate the active source account'}})
             self.status('refresh-failed', exc=exc)
 
-    async def on_server(self, message):
+    async def on_server(self, message: Message) -> None:
         key = message.get('id')
         if key in self.requests and 'method' not in message:
             if not self.requests[key].done():
@@ -638,7 +666,7 @@ class Bridge:
         if method == 'turn/completed' and self.failed:
             self.schedule(self.continue_failed())
 
-    async def continue_failed(self):
+    async def continue_failed(self) -> None:
         async with self.gate:
             if self.stopping or self.active:
                 return
@@ -673,7 +701,7 @@ class Bridge:
                 # One continuation at a time; other failures wait for its completion.
                 return
 
-    async def on_client(self, message):
+    async def on_client(self, message: Message) -> None:
         method = message.get('method')
         params = message.get('params') or {}
         if method == 'initialize':
@@ -724,15 +752,15 @@ class Bridge:
             return
         await self.send(message)
 
-    async def server_reader(self):
-        while line := await self.process.stdout.readline():
+    async def server_reader(self) -> None:
+        while line := await self.process.stdout.readline():  # type: ignore[union-attr]  # stdout=PIPE was requested in run()
             try:
                 await self.on_server(json.loads(line))
             except (ValueError, TypeError, KeyError):
                 raise LiveError('invalid app-server protocol message') from None
         raise LiveError('app-server exited')
 
-    async def client_reader(self):
+    async def client_reader(self) -> None:
         reader = asyncio.StreamReader(limit=32 * 1024 * 1024)
         protocol = asyncio.StreamReaderProtocol(reader)
         transport, _ = await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin.buffer)
@@ -742,7 +770,7 @@ class Bridge:
         finally:
             transport.close()
 
-    async def run(self):
+    async def run(self) -> None:
         self.process = await asyncio.create_subprocess_exec(*self.argv, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             env=self.env, start_new_session=True, limit=32 * 1024 * 1024)
@@ -774,7 +802,7 @@ class Bridge:
             self.status('stopped', **({'exc': failure} if failure is not None else {}))
 
 
-def proxy_main():
+def proxy_main() -> int:
     from xswap.manager import Manager, SwapError
     real = os.environ.get('XSWAP_REAL_CODEX')
     if not real or not Path(real).is_absolute() or not Path(real).is_file():
@@ -782,10 +810,10 @@ def proxy_main():
         return 1
     args = sys.argv[1:]
     if 'app-server' not in args:
-        os.execve(real, [real, *args], {k: v for k, v in os.environ.items() if k != 'CODEX_CLI_PATH'})
+        os.execve(real, [real, *args], {k: v for k, v in os.environ.items() if k != 'CODEX_CLI_PATH'})  # noqa: S606 -- argv list, no shell=True; command/args are program-constructed, not user strings
     # The wrapper is a stdio bridge, never a network listener or daemon manager.
     if any(arg in args for arg in ('daemon', 'proxy', 'generate-ts', 'generate-json-schema')):
-        os.execve(real, [real, *args], dict(os.environ))
+        os.execve(real, [real, *args], dict(os.environ))  # noqa: S606 -- argv list, no shell=True; command/args are program-constructed, not user strings
     try:
         manager = Manager()
         names = os.environ.get('XSWAP_ACCOUNTS', '').split(',')

@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import time
 
-from xswap.core.types import Check, CredentialState, Identity, QuotaShape, UsageSnapshot, UsageWindow
+from xswap.core.types import (
+    Check,
+    CredentialState,
+    Identity,
+    QuotaShape,
+    UsageSnapshot,
+    UsageWindow,
+)
 from xswap.providers import base
 
 FAKE_QUOTA = QuotaShape(bucket_id="widget", short_minutes=60, weekly_minutes=4320)

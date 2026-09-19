@@ -11,13 +11,22 @@ subscription quota takes a `QuotaShape` (see `xswap.core.quota`).
 """
 from __future__ import annotations
 
-from datetime import datetime
 import math
 import time
+from datetime import datetime
+from typing import Any
 
 from xswap.core import quota
-from xswap.core.errors import UsageError  # noqa: F401  re-exported: this module's error class
-from xswap.core.types import DAY_MINUTES, QuotaShape
+from xswap.core.errors import (
+    UsageError,
+)
+from xswap.core.types import (
+    DAY_MINUTES,
+    AccountUsageRow,
+    QuotaShape,
+    UsageBucket,
+    UsageWindowPayload,
+)
 
 # A usage fetch classified as "this login was rejected" (401-class), in the
 # wording it has had since 0.7.6. A fetch classified this way is recorded per
@@ -28,23 +37,23 @@ SIGN_IN_REQUIRED = "sign in again to read usage"
 AUTH_FAILED_STATUS = "sign-in required"
 
 
-def is_sign_in_failure(error):
+def is_sign_in_failure(error: BaseException) -> bool:
     """True only for the sign-in classification above, never for outages or timeouts."""
     return isinstance(error, UsageError) and str(error) == SIGN_IN_REQUIRED
 
 
-def number(value):
+def number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def clean(value):
+def clean(value: Any) -> str:
     return "".join(c for c in str(value) if c.isprintable())[:100]
 
 
-def window_label(window):
+def window_label(window: UsageWindowPayload) -> str:
     minutes = window["windowMinutes"]
     if minutes is None:
-        return window["position"]
+        return window.get("position", "")
     if minutes % 1440 == 0:
         return f"{minutes / 1440:g}d"
     if minutes % 60 == 0:
@@ -52,7 +61,7 @@ def window_label(window):
     return f"{minutes:g}m"
 
 
-def reset_label(timestamp, now):
+def reset_label(timestamp: float | None, now: float) -> str:
     if timestamp is None:
         return "reset unknown"
     try:
@@ -68,12 +77,14 @@ def reset_label(timestamp, now):
     return f"resets {clock} (in {duration})"
 
 
-def is_ok(status):
+def is_ok(status: str) -> bool:
     """True for a successful quota fetch, whether live or served from the local cache."""
     return status in ("ok", "ok (cached)")
 
 
-def warnings(rows, threshold, now=None, shape=None):
+def warnings(
+    rows: list[AccountUsageRow], threshold: float, now: float | None = None, shape: QuotaShape | None = None
+) -> list[str]:
     """Pure evaluation for `list --warn`: which quota windows are below threshold.
 
     Only non-disabled rows (``row.get("disabled")`` falsy) with a successful status
@@ -88,14 +99,14 @@ def warnings(rows, threshold, now=None, shape=None):
             continue
         for window in quota.quota_windows(row.get("buckets", []), shape):
             remaining = window.get("remainingPercent")
-            if not number(remaining) or remaining >= threshold:
+            if remaining is None or not number(remaining) or remaining >= threshold:
                 continue
             lines.append(f"warn: {row.get('name')} {window_label(window)} {remaining:g}% left "
                          f"({reset_label(window.get('resetsAt'), now)})")
     return lines
 
 
-def short_line(rows, shape=None):
+def short_line(rows: list[AccountUsageRow], shape: QuotaShape | None = None) -> str:
     """One line per account for a status line/prompt: `{*}{name} {short}/{weekly}`, joined by ' · '.
 
     Pure formatting over rows shaped like show_accounts' output (name, active, status,
@@ -119,26 +130,28 @@ def short_line(rows, shape=None):
                     weekly = weekly or window
                 else:
                     short = short or window
-            if short and short.get("remainingPercent") is not None:
-                primary = str(math.floor(short["remainingPercent"] + 0.5))
-            if weekly and weekly.get("remainingPercent") is not None:
-                secondary = str(math.floor(weekly["remainingPercent"] + 0.5))
+            short_remaining = short.get("remainingPercent") if short else None
+            if short_remaining is not None:
+                primary = str(math.floor(short_remaining + 0.5))
+            weekly_remaining = weekly.get("remainingPercent") if weekly else None
+            if weekly_remaining is not None:
+                secondary = str(math.floor(weekly_remaining + 0.5))
         parts.append(f"{marker}{row['name']} {primary}/{secondary}")
     return " · ".join(parts)
 
 
-def usage_lines(buckets, now=None):
+def usage_lines(buckets: list[UsageBucket], now: float | None = None) -> list[str]:
     now = time.time() if now is None else now
     lines = []
     for bucket in buckets:
-        label = bucket["name"]
+        label = bucket.get("name", bucket["id"])
         for window in bucket["windows"]:
             remaining = window["remainingPercent"]
             value = f"{remaining:g}% left" if remaining is not None else "remaining unknown"
             lines.append(f"{label} {window_label(window)}: {value} · {reset_label(window['resetsAt'], now)}")
         if bucket["reached"]:
             lines.append(f"{label}: limit reached ({bucket['reached']})")
-        credits = bucket["credits"]
+        credits = bucket.get("credits")
         if credits and credits["unlimited"]:
             lines.append(f"{label} credits: unlimited")
         elif credits and credits["balance"] is not None:

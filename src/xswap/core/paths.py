@@ -21,26 +21,26 @@ from pathlib import Path
 ROOT_VARIABLE = "CODEX_SWAP_HOME"  # allow-listed: the published environment variable
 
 
-def default_root():
+def default_root() -> Path:
     """The state root a shell without ROOT_VARIABLE set uses; a path, never a read of it."""
     return (Path.home() / ".local/share/codex-swap").expanduser().resolve()  # allow-listed: the published state-dir name
 
 
-def auto_dir(root):
+def auto_dir(root: str | Path) -> Path:
     """`<root>/auto`: the automatic-switching runtime (bridge state, runtime homes)."""
     return Path(root) / "auto"
 
 
-def cli_runs_dir(root):
+def cli_runs_dir(root: str | Path) -> Path:
     """`<root>/auto/cli-runs`: one directory per wrapped CLI run."""
     return auto_dir(root) / "cli-runs"
 
 
-def settings_path(root):
+def settings_path(root: str | Path) -> Path:
     """`<root>/auto.json`: the wrapper/auto-switch record."""
     return Path(root) / "auto.json"
 
 
-def profile_dir(root, name):
+def profile_dir(root: str | Path, name: str) -> Path:
     """`<root>/profiles/<name>`: one account's per-platform homes."""
     return Path(root) / "profiles" / name

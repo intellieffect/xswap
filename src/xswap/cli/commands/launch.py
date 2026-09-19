@@ -4,11 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import TYPE_CHECKING
 
-from xswap.manager import SwapError, parse_cache_seconds  # import-time copies: not patch targets today (see cli/__init__ docstring)
+from xswap.manager import (  # import-time copies: not patch targets today (see cli/__init__ docstring)
+    SwapError,
+    parse_cache_seconds,
+)
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 
-def add_run_parser(sub):
+def add_run_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="Run Codex with the selected or named account")
     r.add_argument("--account"); r.add_argument("--dry-run", action="store_true")
     r.add_argument("--auto", action="store_true", help="Keep the interactive CLI session alive across quota account switches")
@@ -20,7 +27,7 @@ def add_run_parser(sub):
     return r
 
 
-def add_app_parser(sub):
+def add_app_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     a = sub.add_parser("app", help="Open an account-specific desktop instance")
     a.add_argument("name", nargs="?"); a.add_argument("--app"); a.add_argument("--dry-run", action="store_true")
     a.add_argument("--auto", action="store_true", help="Keep one desktop session and switch accounts after quota exhaustion (experimental)")
@@ -28,7 +35,7 @@ def add_app_parser(sub):
     return a
 
 
-def run_app(args, manager):
+def run_app(args: argparse.Namespace, manager: Manager) -> int:
     if args.auto:
         if args.name:
             raise SwapError("Use --accounts instead of a positional name with --auto.")
@@ -42,7 +49,7 @@ def run_app(args, manager):
     return manager.launch_app(args.name, args.app, args.dry_run)
 
 
-def run_codex(args, manager):
+def run_codex(args: argparse.Namespace, manager: Manager) -> int:
     """`xswap run ...` and the bare `xswap`, which is why every field is read with getattr."""
     rest = getattr(args, "args", [])
     if rest[:1] == ["--"]:

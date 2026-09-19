@@ -1,12 +1,19 @@
 """`openclaw`: push an account or pool to the local OpenClaw agents."""
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from xswap.manager import SwapError  # import-time copies: not patch targets today (see cli/__init__ docstring)
+from xswap.manager import (
+    SwapError,  # import-time copies: not patch targets today (see cli/__init__ docstring)
+)
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 
-def add_openclaw_parser(sub):
+def add_openclaw_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     o = sub.add_parser("openclaw", help="Sync an account (or pool) to local OpenClaw agents and reload Gateway auth")
     o.add_argument("name", nargs="?")
     o.add_argument("--pool", help="Comma-separated accounts (>=2) OpenClaw rotates between on its own cooldowns; mutually exclusive with NAME")
@@ -20,7 +27,7 @@ def add_openclaw_parser(sub):
     return o
 
 
-def run_openclaw(args, manager):
+def run_openclaw(args: argparse.Namespace, manager: Manager) -> None:
     if args.pool and args.name:
         raise SwapError("--pool and a positional NAME are mutually exclusive.")
     if args.allow_mixed and not args.pool:

@@ -11,10 +11,25 @@ import stat
 import time
 from unittest import TestCase
 from unittest.mock import patch
+
 import test_codex_swap
 import test_live
-from xswap.codex_cli import enable, disable, interactive_args, server_overrides, read_settings, launch_cli, show_status, reconnect_wrapper, codex_main, passthrough_subcommand, serve_cli
+
+from xswap.codex_cli import (
+ codex_main,
+ disable,
+ enable,
+ interactive_args,
+ launch_cli,
+ passthrough_subcommand,
+ read_settings,
+ reconnect_wrapper,
+ serve_cli,
+ server_overrides,
+ show_status,
+)
 from xswap.live import LiveError
+
 
 class CliTests(TestCase):
  setUp=test_codex_swap.AccountTests.setUp
@@ -349,7 +364,9 @@ class CliTests(TestCase):
    (str(self.bin_b/'codex'),'wrapper',str(self.proxy))])
  def test_new_run_dir_makes_every_level_private_and_repairs_auto(self):
   # A CLI launch used to create `auto` through mkdir(parents=True), i.e. with the umask (INT-5085).
-  import os,stat
+  import os
+  import stat
+
   from xswap.codex_cli import new_run_dir
   old=os.umask(0o022);self.addCleanup(os.umask,old)
   auto=self.manager.root/'auto';auto.mkdir(parents=True);auto.chmod(0o755)
@@ -474,6 +491,7 @@ class CliTests(TestCase):
   self.assertTrue(all(100<=r['ageSeconds']<=200 for r in report['prunedRuns']))
  def test_launch_sweeps_stale_records_before_creating_its_own(self):
   import stat
+
   from xswap.codex_cli import new_run_dir
   now=time.time()
   stale,_=self.make_run('stale',updated_at=now-8*86400,event='policy-applied')
@@ -513,8 +531,8 @@ class CliTests(TestCase):
   self.assertEqual(data['sessions'],[])
   self.assertNotIn('prunedRuns',data)  # the menu app's payload is unchanged
  def test_upgrade_count_and_doctor_leave_records_alone(self):
-  from xswap.manager import __version__
   from xswap.doctor import check_auto_runs
+  from xswap.manager import __version__
   from xswap.upgrade import running_session_hints
   stale,_=self.make_run('stale',updated_at=time.time()-8*86400)
   running,fd=self.make_run('running',updated_at=time.time()-8*86400,hold_lock=True)
@@ -612,8 +630,8 @@ class CliTests(TestCase):
   self.assertEqual((session['conversationId'],session['codexHome'],session['accounts']),(self.THREAD,str(runtime),['main','second']))
   self.assertNotIn('must-not-leak',out.getvalue())
  def test_bridge_hints_flag_only_running_sessions_on_another_version(self):
-  from xswap.manager import __version__,atomic_json
-  from xswap.codex_cli import bridge_hints,status_data
+  from xswap.codex_cli import bridge_hints, status_data
+  from xswap.manager import __version__, atomic_json
   runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
   atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})
   self.bridged_run('a-old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime)})
@@ -630,8 +648,8 @@ class CliTests(TestCase):
   # from this list takes its reopen hint with it while doctor's own loop still counts it --
   # "doctor says OK while an old bridge runs", the 2026-09-10 state item 6 exists to end.
   import xswap.doctor as xswap_doctor
-  from xswap.manager import __version__,atomic_json
-  from xswap.codex_cli import SESSION_REPORT_LIMIT,bridge_hints,status_data
+  from xswap.codex_cli import SESSION_REPORT_LIMIT, bridge_hints, status_data
+  from xswap.manager import __version__, atomic_json
   atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})
   self.bridged_run('a-running-old',{'bridgeVersion':'0.7.2'})
   for index in range(SESSION_REPORT_LIMIT):
@@ -650,7 +668,7 @@ class CliTests(TestCase):
   # -- the desktop record every time, and here the session that just failed, while a
   # six-day-old one stayed. auto-status is the only way to reach lastFailure/manualReason
   # and the bridge.log path, and prunedRuns says nothing about a record the cap withheld.
-  from xswap.codex_cli import SESSION_REPORT_LIMIT,reported_sessions,status_data
+  from xswap.codex_cli import SESSION_REPORT_LIMIT, reported_sessions, status_data
   last={'event':'manual-switch-failed','account':'main','candidate':'second','reason':'usage service unavailable','at':0}
   self.bridged_run('a-just-failed',{'updatedAt':time.time(),'event':'stopped','reason':'app-server exited','lastFailure':last},hold_lock=False)
   for index in range(SESSION_REPORT_LIMIT):
@@ -667,8 +685,8 @@ class CliTests(TestCase):
   running=[{'running':True,'updatedAt':float(i)} for i in range(SESSION_REPORT_LIMIT+3)]
   self.assertEqual(len(reported_sessions(running)),SESSION_REPORT_LIMIT+3)
  def test_bridge_hint_uses_plain_codex_when_the_wrapper_is_connected(self):
-  from xswap.manager import __version__,atomic_json
-  from xswap.codex_cli import bridge_hints,status_data
+  from xswap.codex_cli import bridge_hints, status_data
+  from xswap.manager import __version__, atomic_json
   # codexWrapped follows the PATH lookup (item 1), so the entry must be a real
   # executable on the pinned PATH or the enumeration skips it.
   self.setup_pool()
@@ -682,24 +700,24 @@ class CliTests(TestCase):
   [hint]=bridge_hints(self.manager,state,__version__)
   self.assertEqual(hint['hint'],f'bridge 0.7.2 · reopen with codex resume {self.THREAD} to load {__version__}')
  def test_bridge_hint_names_the_pool_when_auto_defaults_are_off(self):
+  from xswap.codex_cli import bridge_hints, status_data
   from xswap.manager import __version__
-  from xswap.codex_cli import bridge_hints,status_data
   runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
   self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(runtime),'account':'second','accounts':['main','second']})
   [hint]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
   self.assertEqual(hint['hint'],f'bridge 0.7.2 · reopen with xswap run --auto --accounts second,main -- resume {self.THREAD} to load {__version__}')
   self.assertNotIn('CODEX_HOME',hint['hint'])
  def test_bridge_hint_never_names_an_unsaved_conversation_and_desktop_reopens_the_app(self):
-  from xswap.manager import __version__,atomic_json
-  from xswap.codex_cli import bridge_hints,status_data
+  from xswap.codex_cli import bridge_hints, status_data
+  from xswap.manager import __version__, atomic_json
   self.bridged_run('old',{'bridgeVersion':'0.7.2','conversationId':self.THREAD,'codexHome':str(self.manager.root/'auto'/'cli-codex')})
   desktop=self.manager.root/'auto';atomic_json(desktop/'status.json',{'account':'main','bridgeVersion':'0.7.2','updatedAt':time.time()})
   fd=os.open(desktop/'.bridge.lock',os.O_CREAT|os.O_RDWR,0o600);fcntl.flock(fd,fcntl.LOCK_EX);self.addCleanup(os.close,fd)
   hints=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
   self.assertEqual([h['hint'] for h in hints],[f'bridge 0.7.2 · quit and reopen it with xswap app to load {__version__}',f'bridge 0.7.2 · exit and reopen it to load {__version__}'])
  def test_bridge_hint_needs_both_a_rollout_file_and_a_pool_of_two_to_name_a_command(self):
-  from xswap.manager import __version__,atomic_json
-  from xswap.codex_cli import bridge_hints,status_data
+  from xswap.codex_cli import bridge_hints, status_data
+  from xswap.manager import __version__, atomic_json
   # Two independent rules send a session to the generic line, and the fixture above
   # satisfies neither, so each needs a record where only the other rule could fire:
   # a thread with no rollout file cannot be resumed at all, and with auto defaults
@@ -717,7 +735,7 @@ class CliTests(TestCase):
   [lone]=bridge_hints(self.manager,status_data(self.manager,cleanup=False),__version__)
   self.assertEqual(lone['hint'],generic)  # saved now, but one account is not a pool to reopen with
  def test_list_shows_the_reopen_hint_under_the_running_session(self):
-  from xswap.manager import __version__,atomic_json
+  from xswap.manager import __version__, atomic_json
   self.manager.register('main')
   runtime=self.manager.root/'auto'/'cli-codex';self.save_thread(runtime)
   atomic_json(self.manager.root/'auto.json',{'enabled':True,'accounts':['main','second']})

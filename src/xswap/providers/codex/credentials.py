@@ -1,12 +1,16 @@
 """Read local credentials through one verified file descriptor."""
+from __future__ import annotations
+
 import json
 import os
 import stat
+from pathlib import Path
+from typing import Any
 
 from xswap.core.errors import CredentialError
 
 
-def read_auth(home):
+def read_auth(home: Path) -> dict[str, Any]:
     # Reject final-component symlinks and non-regular files, including FIFOs
     # without blocking. Never repair a user's credential file implicitly.
     fd = None

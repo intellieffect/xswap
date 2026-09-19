@@ -7,16 +7,20 @@ Gateway stop/write/start -- exactly as they did on `Manager`.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
 from xswap.core.path import absolute_which
 
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
-def parse_pool(value):
+
+def parse_pool(value: str | list[str]) -> list[str]:
     """Split "a, b,a" (or dedupe an already-split list) into >=2 distinct, ordered names."""
     parts = value.split(",") if isinstance(value, str) else value
     seen = []
@@ -29,7 +33,7 @@ def parse_pool(value):
     return seen
 
 
-def resolve_openclaw_package_root(executable):
+def resolve_openclaw_package_root(executable: str) -> Path | None:
     """Walk up from the openclaw executable to its package.json (name: "openclaw")."""
     for directory in Path(executable).resolve().parents:
         package = directory / "package.json"
@@ -43,11 +47,19 @@ def resolve_openclaw_package_root(executable):
 
 
 class OpenClawSync:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
-    def sync(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
+    def sync(
+        self,
+        names: str | list[str] | None = None,
+        agents: list[str] | None = None,
+        dry: bool = False,
+        backup_dir: str | Path | None = None,
+        select: bool = False,
+        allow_mixed: bool = False,
+    ) -> dict[str, Any]:
         # Directory mappings scope a single launched session; OpenClaw sync mutates
         # shared agent state, so an omitted/pooled name must resolve through the
         # active account only, never a directory mapping.
@@ -87,7 +99,7 @@ class OpenClawSync:
                    "backupRoot": str(Path(backup_dir).expanduser().resolve() if backup_dir else self.manager.root / "backups" / "openclaw")}
         # Serialize xswap mutations across the bridge + Gateway reload. OpenClaw also locks its own stores.
         with self.manager.locked():
-            result = subprocess.run([node, str(helper)], input=json.dumps(request), text=True,
+            result = subprocess.run([node, str(helper)], input=json.dumps(request), text=True,  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                     capture_output=True, env=self.manager.env(home), timeout=90)
             try:
                 output = json.loads(result.stdout.strip().splitlines()[-1])
@@ -98,7 +110,7 @@ class OpenClawSync:
             if dry:
                 print(json.dumps(output, indent=2))
                 return output
-            reload_result = subprocess.run([executable, "secrets", "reload", "--json"],
+            reload_result = subprocess.run([executable, "secrets", "reload", "--json"],  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                            capture_output=True, text=True, env=self.manager.env(home), timeout=45)
             try:
                 reload_json = json.loads(reload_result.stdout)
@@ -117,13 +129,26 @@ class OpenClawSync:
         print(f"OpenClaw now selects {label} for {len(output['completed'])} agents{rotates}; Gateway auth reloaded.\nBackup: {output['backup']}")
         return output
 
-    def clear_cooldown(self, names=None, dry=False, yes=False, backup_dir=None):
+    def clear_cooldown(
+        self,
+        names: str | list[str] | None = None,
+        dry: bool = False,
+        yes: bool = False,
+        backup_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
         """Clear a stale OpenClaw auth-profile cooldown (one 429 lasts until its reset
         time even after the real limit is gone) for the given account(s), or every
         registered account when none are named. Stops the local Gateway before writing
         and restarts it after; a failed stop aborts before the database is touched.
         """
-        from xswap.providers.codex.openclaw_state import OpenClawStateError, clear_cooldown, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+        from xswap.providers.codex.openclaw_state import (
+            OpenClawStateError,
+            clear_cooldown,
+            default_sqlite_path,
+            format_until,
+            profile_id_for_home,
+            read_cooldowns,
+        )
 
         data = self.manager.read()
         if names:
@@ -180,7 +205,7 @@ class OpenClawSync:
         backup_root = Path(backup_dir).expanduser().resolve() if backup_dir else self.manager.root / "backups" / "openclaw-cooldown"
 
         with self.manager.locked():
-            stop = subprocess.run([executable, "gateway", "stop", "--force"],
+            stop = subprocess.run([executable, "gateway", "stop", "--force"],  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                   capture_output=True, text=True, env=self.manager.env(self.manager.source), timeout=45)
             if stop.returncode:
                 raise SwapError("OpenClaw Gateway stop failed; the database was not touched. "
@@ -190,7 +215,7 @@ class OpenClawSync:
             except OpenClawStateError as exc:
                 raise SwapError(f"Cooldown clear failed after the Gateway was stopped; restart it manually: "
                                  f"openclaw gateway start. {exc}") from None
-            start = subprocess.run([executable, "gateway", "start"],
+            start = subprocess.run([executable, "gateway", "start"],  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                    capture_output=True, text=True, env=self.manager.env(self.manager.source), timeout=45)
             if start.returncode:
                 raise SwapError(f"Cleared the cooldown (backup: {backup_path}), but OpenClaw Gateway start failed; "

@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import xswap.manager as codex_swap
 import xswap.completion as xswap_completion
+import xswap.manager as codex_swap
 from xswap.manager import main
 
 # Subcommand -> whether its FIRST positional is an existing-account name

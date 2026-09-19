@@ -6,17 +6,21 @@ import contextlib
 import fcntl
 import json
 import os
-from pathlib import Path
-import shutil  # noqa: F401  patch target: xswap.providers.codex.codex_cli.shutil.rmtree (runs.scan_runs prunes through it)
 import shlex
+import shutil  # noqa: F401  patch target: xswap.providers.codex.codex_cli.shutil.rmtree (runs.scan_runs prunes through it)
 import signal
 import sys
 import tempfile
 import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from xswap.providers.codex.live import BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError
 from xswap.core.errors import BusyThreadError
 from xswap.core.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir
+from xswap.providers.codex.live import BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 # Moved out of this module (INT-5610) and re-exported: `auto.json` reading to
 # `settings`, the codex wrapper/symlink machinery to `wrapper`, run bookkeeping
@@ -24,21 +28,61 @@ from xswap.core.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir
 # siblings, the `xswap_cli` shim and the test suite still reach them by this
 # path -- and because the suite patches some of them here, which `wrapper._late`
 # and `runs._late` rely on.
-from xswap.core.settings import read_settings  # noqa: F401
-from xswap.providers.codex.wrapper import (  # noqa: F401
-    BYPASS_REASON, BYPASS_VARIABLE, DEPENDENCY_REASON, DRIFT_CAUSES, DRIFT_FIXES, DRIFT_REASONS,
-    GLOBAL_MODULE_PARENTS, PROXY_NAME, RELATIVE_ENTRY_REASON, RELATIVE_RECORD_REASON,
-    bypass_set, codex_path_entries, dependency_entry, describe_drift, disable, enable, entry_drift,
-    link_target_path, path_state, recorded_proxies, recorded_real_codex, reconnect_wrapper,
-    set_policy, set_primary_wrapper, shadowing_entry, swap_symlink, wrapped_target, wrapper_drift,
-    wrapper_records, wrapper_state)
+from xswap.core.settings import read_settings
 from xswap.providers.codex.runs import (  # noqa: F401
-    MIN_PRUNE_AGE_SECONDS, PRUNED_RECORD_KEYS, SESSION_KEYS, SESSION_REPORT_LIMIT,
-    STALE_RUN_SECONDS, STOPPED_RUN_SECONDS, SURFACE_LABELS, bridge_hint, bridge_hints,
-    bridge_label, describe_bridge_hint, prune_limit, prune_rule, reopen_command, reported_sessions,
-    run_dir_empty, scan_runs, show_status, status_data, stopped_cleanly)
-
-
+    MIN_PRUNE_AGE_SECONDS,
+    PRUNED_RECORD_KEYS,
+    SESSION_KEYS,
+    SESSION_REPORT_LIMIT,
+    STALE_RUN_SECONDS,
+    STOPPED_RUN_SECONDS,
+    SURFACE_LABELS,
+    bridge_hint,
+    bridge_hints,
+    bridge_label,
+    describe_bridge_hint,
+    prune_limit,
+    prune_rule,
+    reopen_command,
+    reported_sessions,
+    run_dir_empty,
+    scan_runs,
+    show_status,
+    status_data,
+    stopped_cleanly,
+)
+from xswap.providers.codex.wrapper import (  # noqa: F401
+    BYPASS_REASON,
+    BYPASS_VARIABLE,
+    DEPENDENCY_REASON,
+    DRIFT_CAUSES,
+    DRIFT_FIXES,
+    DRIFT_REASONS,
+    GLOBAL_MODULE_PARENTS,
+    PROXY_NAME,
+    RELATIVE_ENTRY_REASON,
+    RELATIVE_RECORD_REASON,
+    bypass_set,
+    codex_path_entries,
+    dependency_entry,
+    describe_drift,
+    disable,
+    enable,
+    entry_drift,
+    link_target_path,
+    path_state,
+    reconnect_wrapper,
+    recorded_proxies,
+    recorded_real_codex,
+    set_policy,
+    set_primary_wrapper,
+    shadowing_entry,
+    swap_symlink,
+    wrapped_target,
+    wrapper_drift,
+    wrapper_records,
+    wrapper_state,
+)
 
 # `upgrade` is Codex's own name for the standalone updater and was in neither set, so
 # interactive_args called it interactive: a wrapped `codex upgrade` ran inside the bridge,
@@ -61,7 +105,7 @@ PASSTHROUGH_EXCLUDED = {'login', 'logout', 'app', 'app-server', 'completion', 'h
     'update', 'upgrade'}
 
 
-def interactive_args(args):
+def interactive_args(args: list[str]) -> bool:
     if any(a in ('--help', '-h', '--version', '-V', '--remote') or a.startswith('--remote=') for a in args):
         return False
     skip = False
@@ -76,7 +120,7 @@ def interactive_args(args):
     return True
 
 
-def passthrough_subcommand(args):
+def passthrough_subcommand(args: list[str]) -> str | None:
     """The Codex subcommand a pass-through invocation runs as an xswap account, or None.
 
     None keeps the caller's own home: --help/--version/--remote forms, a bare
@@ -98,7 +142,7 @@ def passthrough_subcommand(args):
     return None
 
 
-def server_overrides(args):
+def server_overrides(args: list[str]) -> list[str]:
     result = []
     iterator = iter(args)
     for arg in iterator:
@@ -107,16 +151,14 @@ def server_overrides(args):
             if value is None:
                 raise LiveError('missing Codex option value')
             result.extend((arg, value))
-        elif arg.startswith(('--config=', '--enable=', '--disable=')) or (arg.startswith('-c') and len(arg) > 2):
-            result.append(arg)
-        elif arg == '--strict-config':
+        elif arg.startswith(('--config=', '--enable=', '--disable=')) or (arg.startswith('-c') and len(arg) > 2) or arg == '--strict-config':
             result.append(arg)
         elif arg in VALUE_FLAGS:
             next(iterator, None)
     return result
 
 
-def writer_busy(home, thread_id):
+def writer_busy(home: str | Path, thread_id: str) -> bool:
     """Probe an existing writer lock without deleting or modifying it."""
     try:
         value = str(uuid.UUID(thread_id))
@@ -137,7 +179,7 @@ def writer_busy(home, thread_id):
         os.close(fd)
 
 
-def saved_thread(home, thread_id):
+def saved_thread(home: str | Path, thread_id: str) -> bool:
     for folder in ('sessions', 'archived_sessions'):
         if any((Path(home) / folder).glob(f'**/*-{thread_id}.jsonl')):
             return True
@@ -145,31 +187,34 @@ def saved_thread(home, thread_id):
 
 
 class WebSocketBridge(Bridge):
-    def __init__(self, *args, socket, **kwargs):
+    #: Set from `serve_cli.handle` once the TUI subprocess exists; read by `Bridge.status`.
+    client_pid: int | None = None
+
+    def __init__(self, *args: Any, socket: Any, **kwargs: Any) -> None:
         self.socket = socket
-        self.outbox = asyncio.Queue(maxsize=4096)
+        self.outbox: asyncio.Queue[Any] = asyncio.Queue(maxsize=4096)
         self.ready = asyncio.Event()
-        self.initialize_result = None
-        self.resume_thread = None
-        self.thread_requests = set()
-        self.list_requests = set()
-        self.loaded_threads = set()
-        self.resume_candidates = []
+        self.initialize_result: dict[str, Any] | None = None
+        self.resume_thread: str | None = None
+        self.thread_requests: set[Any] = set()
+        self.list_requests: set[Any] = set()
+        self.loaded_threads: set[Any] = set()
+        self.resume_candidates: list[str] = []
         super().__init__(*args, emit=self.outbox.put_nowait, **kwargs)
         self.picker_prefix = self.request_prefix + 'picker-'
 
-    def status_log(self, event):
+    def status_log(self, event: str) -> None:
         # The foreground TUI owns the terminal, including stderr. Operational
         # status is still written by Bridge.status for xswap auto-status.
         pass
 
-    async def rpc(self, method, params, timeout=20):
+    async def rpc(self, method: str, params: dict[str, Any], timeout: float = 20) -> dict[str, Any]:
         result = await super().rpc(method, params, timeout)
         if method == 'initialize':
             self.initialize_result = result
         return result
 
-    async def picker_client(self, socket):
+    async def picker_client(self, socket: Any) -> None:
         """A picker borrows the initialized server, with isolated request IDs.
 
         It may browse sessions but cannot start turns or change authentication.
@@ -207,7 +252,7 @@ class WebSocketBridge(Bridge):
                     self.requests.pop(key, None)
             await socket.send(json.dumps(reply, separators=(',', ':')))
 
-    async def on_client(self, message):
+    async def on_client(self, message: dict[str, Any]) -> None:
         method = message.get('method')
         if method == 'thread/list' and 'id' in message:
             self.list_requests.add(message['id'])
@@ -219,7 +264,7 @@ class WebSocketBridge(Bridge):
         if method == 'initialize':
             self.ready.set()
 
-    def remember_thread(self, value):
+    def remember_thread(self, value: str | None) -> None:
         try:
             thread = str(uuid.UUID(value))
         except (ValueError, TypeError, AttributeError):
@@ -235,7 +280,7 @@ class WebSocketBridge(Bridge):
             with contextlib.suppress(LiveError, OSError, ValueError):
                 self.status('conversation-known')
 
-    def available_threads(self, message):
+    def available_threads(self, message: dict[str, Any]) -> dict[str, Any]:
         result = message.get('result')
         if not isinstance(result, dict) or not isinstance(result.get('data'), list):
             return message
@@ -246,7 +291,7 @@ class WebSocketBridge(Bridge):
                 or not writer_busy(home, row.get('id'))]
         return {**message, 'result': {**result, 'data': rows}}
 
-    async def on_server(self, message):
+    async def on_server(self, message: dict[str, Any]) -> None:
         key = message.get('id')
         if (isinstance(key, str) and key.startswith(self.picker_prefix)
                 and 'method' not in message and key not in self.requests):
@@ -262,12 +307,12 @@ class WebSocketBridge(Bridge):
                 self.loaded_threads.add(thread_id)
         await super().on_server(message)
 
-    async def client_reader(self):
-        async def receive():
+    async def client_reader(self) -> None:
+        async def receive() -> None:
             async for text in self.socket:
                 await self.on_client(json.loads(text))
 
-        async def write():
+        async def write() -> None:
             while True:
                 await self.socket.send(json.dumps(await self.outbox.get(), separators=(',', ':')))
 
@@ -282,19 +327,29 @@ class WebSocketBridge(Bridge):
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_class=WebSocketBridge):
+async def serve_cli(
+    pool: AccountPool,
+    real: str,
+    args: list[str],
+    env: dict[str, str],
+    status_path: Path,
+    socket_path: Path,
+    bridge_class: type[WebSocketBridge] = WebSocketBridge,
+) -> int:
     """One TUI and one child server. No TCP listener and no TUI restart."""
-    from xswap.manager import SwapError, private_dir
     from websockets.asyncio.server import unix_serve
     from websockets.exceptions import ConnectionClosed
+
+    from xswap.manager import SwapError, private_dir
     connected = False
-    active_bridge = None
+    active_bridge: WebSocketBridge | None = None
     client_ready = asyncio.Event()
     bridge_failed = False
 
-    async def handle(socket):
+    async def handle(socket: Any) -> None:
         nonlocal connected, active_bridge, bridge_failed
         if connected:
+            assert active_bridge is not None  # connected is only set True together with active_bridge  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
             try:
                 await active_bridge.picker_client(socket)
             except ConnectionClosed:
@@ -337,7 +392,7 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
         socket_path.chmod(0o600)
         # Explicit cwd preserves normal local CLI working-directory semantics.
         cwd_args = [] if any(a in ('-C', '--cd') or a.startswith('--cd=') or
-                            (a.startswith('-C') and len(a)>2) for a in args) else ['--cd', os.getcwd()]
+                            (a.startswith('-C') and len(a)>2) for a in args) else ['--cd', str(Path.cwd())]
         cli = await asyncio.create_subprocess_exec(real, '--remote', 'unix://' + str(socket_path),
                 *cwd_args, *args, env=env)
         client_ready.set()
@@ -367,7 +422,7 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
             if bridge_failed:
                 reason = getattr(active_bridge, 'failure', None) or 'unknown'
                 print(f'xswap auto: CLI bridge disconnected ({reason}); see {log_path} or xswap auto-status.', file=sys.stderr)
-            elif getattr(active_bridge, 'last_failure', None):
+            elif active_bridge is not None and active_bridge.last_failure:
                 # A session that recovered on its own still ended with something wrong in it;
                 # on 2026-09-10 nothing pointed the operator at the record afterwards.
                 failure = active_bridge.last_failure
@@ -380,7 +435,7 @@ async def serve_cli(pool, real, args, env, status_path, socket_path, bridge_clas
                 print(command, file=sys.stderr)
 
 
-def reconnect_command(pool, env, bridge):
+def reconnect_command(pool: AccountPool, env: dict[str, str], bridge: Bridge | None) -> str | None:
     """Only emit a known conversation and shell-quoted, non-secret metadata."""
     thread = getattr(bridge, 'resume_thread', None)
     manager = getattr(pool, 'manager', None)
@@ -390,13 +445,14 @@ def reconnect_command(pool, env, bridge):
     thread = next((t for t in candidates if saved_thread(env['CODEX_HOME'], t)), None)
     if not thread:
         return None
+    assert bridge is not None  # `thread` above is only truthy when getattr(bridge, ...) found one  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
     names = list(dict.fromkeys([bridge.current, *pool.names]))
     return shlex.join(['env', 'CODEX_SWAP_HOME=' + str(manager.root),
         'CODEX_HOME=' + env['CODEX_HOME'], 'xswap', 'run', '--auto',
         '--accounts', ','.join(names), '--', 'resume', thread])
 
 
-def resume_home(manager, args, default):
+def resume_home(manager: Manager, args: list[str], default: Path) -> Path:
     """Explicit UUID resumes use the home that already owns the conversation."""
     command = None
     session_id = None
@@ -445,7 +501,7 @@ def resume_home(manager, args, default):
     return default
 
 
-def new_run_dir(manager):
+def new_run_dir(manager: Manager) -> Path:
     """Create auto/cli-runs/<hex> with every level 0700, repairing an existing `auto`.
 
     mkdir(parents=True, mode=0o700) applies the mode to the leaf only, so an `auto`
@@ -467,7 +523,7 @@ def new_run_dir(manager):
     return run_dir
 
 
-def launch_cli(manager, accounts, args, dry=False):
+def launch_cli(manager: Manager, accounts: str, args: list[str], dry: bool = False) -> int:
     # Through manager, not xswap.core.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import private_dir
     names = [value.strip() for value in accounts.split(',') if value.strip()]
@@ -529,7 +585,7 @@ def launch_cli(manager, accounts, args, dry=False):
                 reconnect_wrapper(manager)
 
 
-def passthrough_account(manager):
+def passthrough_account(manager: Manager) -> tuple[str, Path, str | None]:
     """The account a pass-through Codex command runs as.
 
     Same resolution as `xswap run -- exec ...` without --account (Manager.launch_cli
@@ -554,7 +610,7 @@ def passthrough_account(manager):
     return name, home, mapped
 
 
-def passthrough_env(manager, args):
+def passthrough_env(manager: Manager, args: list[str]) -> dict[str, str]:
     """Environment for a pass-through Codex command while automatic switching is on.
 
     `codex exec`, `review`, and the other non-interactive subcommands have no --remote
@@ -586,7 +642,7 @@ def passthrough_env(manager, args):
     return manager.env(home)
 
 
-def missing_codex_message(real, settings, root=None):
+def missing_codex_message(real: str | None, settings: dict[str, Any], root: str | Path | None = None) -> str:
     """One explicit stderr line for a wrapped codex entry with no real Codex behind it
     (a purged runtime home that held the release, or a lost auto.json record).
 
@@ -599,7 +655,7 @@ def missing_codex_message(real, settings, root=None):
     names = ','.join(settings.get('accounts') or []) or 'NAME,NAME'
     reconnect = f'xswap auto-enable --accounts {names} --wrap-codex'
     where_root = f' This shell reads xswap state from {root} ({state_root_source()}).' if root else ''
-    if real and not os.path.isabs(real):
+    if real and not Path(real).is_absolute():
         # Reinstalling Codex cannot fix this one: the record, not the installation, is what
         # cannot be resolved, and `auto-disable` leaves the entry it names untouched.
         return (f'xswap: the codex command is connected to xswap, but the real Codex auto.json records ({real}) is '
@@ -610,13 +666,13 @@ def missing_codex_message(real, settings, root=None):
             f'({where}).{where_root} Run: xswap doctor. Recover: xswap auto-disable, reinstall Codex, then {reconnect}')
 
 
-def state_root_source(env=None):
+def state_root_source(env: dict[str, str] | None = None) -> str:
     """How this environment chose its state root, in the words every surface uses."""
     value = (os.environ if env is None else env).get(ROOT_VARIABLE)
     return f'selected by {ROOT_VARIABLE}' if value else f'the default; {ROOT_VARIABLE} is not set in this shell'
 
 
-def codex_main():
+def codex_main() -> int:
     from xswap.manager import Manager, SwapError
     try:
         # create=False: this runs in whatever shell plain `codex` was typed in, and a shell
@@ -636,7 +692,7 @@ def codex_main():
         env = dict(os.environ)
         if settings.get('enabled') and not bypass:
             env = passthrough_env(manager, args)
-        os.execve(real, [real, *args], env)
+        os.execve(real, [real, *args], env)  # noqa: S606 -- argv list, no shell=True; command/args are program-constructed, not user strings
     except BusyThreadError as error:
         print('xswap: ' + str(error), file=sys.stderr)
         return 1

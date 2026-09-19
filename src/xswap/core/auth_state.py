@@ -8,21 +8,27 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
+from xswap.core.types import AuthStateEntry
 from xswap.core.usage import AUTH_FAILED_STATUS
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
 
 class AuthState:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
-    def path(self):
+    def path(self) -> Path:
         return self.manager.root / "auth-state.json"
 
-    def read(self):
+    def read(self) -> dict[str, AuthStateEntry]:
         """{name: {"failedAt", "reason", "identity"}} or {} when absent/unreadable/not an object."""
         try:
             data = json.loads(self.manager.auth_state_path().read_text())
@@ -30,7 +36,7 @@ class AuthState:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def failure(self, name, label):
+    def failure(self, name: str, label: str) -> dict[str, Any] | None:
         """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
         nothing has cleared it since, else None. Like cached_usage, an entry recorded under
         another login label (a re-login under the same name) is a miss, not reused.
@@ -44,7 +50,9 @@ class AuthState:
             return None
         return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
 
-    def remember(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
+    def remember(
+        self, name: str, label: str, reason: str = AUTH_FAILED_STATUS, failed_at: float | None = None
+    ) -> None:
         """Record a service-rejected login for NAME's current label. Keeps the first failedAt
         while the same login keeps failing, so doctor's "since" is the first rejection and a
         30-minute alert job does not rewrite the file. Labels only (may be an email); never
@@ -61,13 +69,13 @@ class AuthState:
             data[name] = {"failedAt": time.time() if failed_at is None else failed_at, "reason": reason, "identity": label}
             atomic_json(self.manager.auth_state_path(), data)
 
-    def forget(self, name):
+    def forget(self, name: str) -> None:
         """Drop NAME's entry whatever its label. Caller holds the lock (mirrors UsageCache.forget)."""
         data = self.manager._read_auth_state()
         if data.pop(name, None) is not None:
             atomic_json(self.manager.auth_state_path(), data)
 
-    def clear(self, name):
+    def clear(self, name: str) -> None:
         """A successful fetch clears the record; no lock and no write when there is none."""
         if name not in self.manager._read_auth_state():
             return
@@ -75,7 +83,7 @@ class AuthState:
             self.manager._forget_auth_failure(name)
 
 
-def is_auth_failed(manager, name):
+def is_auth_failed(manager: Manager, name: str) -> bool:
     """True while the usage service's rejection of NAME's current login still stands.
 
     Module-level so callers and tests can reach it without a Manager method lookup;

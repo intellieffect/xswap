@@ -1,16 +1,23 @@
 import contextlib
 import io
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
 import test_codex_swap
+
 import xswap.doctor as doctor
+from xswap.codex_cli import (
+    disable,
+    enable,
+    launch_cli,
+    read_settings,
+    reconnect_wrapper,
+)
 from xswap.manager import atomic_json, main
-from xswap.codex_cli import disable, enable, launch_cli, read_settings, reconnect_wrapper
 from xswap.relocate import canonical_codex_path, inside_root, link_packages
 
 NEW = '0.154.0-aarch64-apple-darwin'

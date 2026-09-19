@@ -1,11 +1,20 @@
 """Weekly-first presentation. Never substitute a short window for a week."""
-from collections import Counter
-from datetime import datetime
+from __future__ import annotations
+
 import os
 import sys
 import time
+from collections import Counter
+from collections.abc import Mapping
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
 from xswap.core.quota import is_extra, weekly_window
+from xswap.core.types import AccountUsageRow, QuotaShape, UsageWindowPayload
 from xswap.core.usage import AUTH_FAILED_STATUS, is_ok, usage_lines
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 # Every user-visible string in this module lives here, keyed by a short id.
 # `ko` values are the original hard-coded strings, preserved verbatim.
@@ -75,13 +84,13 @@ STRINGS = {
 }
 
 
-def _t(lang, key, **kwargs):
+def _t(lang: str, key: str, **kwargs: Any) -> str:
     strings = STRINGS.get(lang) or STRINGS["en"]
     text = strings.get(key, STRINGS["en"][key])
     return text.format(**kwargs) if kwargs else text
 
 
-def resolve_lang(explicit=None, environ=None):
+def resolve_lang(explicit: str | None = None, environ: Mapping[str, str] | None = None) -> str:
     """"en" unless explicit=="ko", XSWAP_LANG starts with "ko", or (XSWAP_LANG unset)
     LC_ALL/LANG starts with "ko". Any other explicit value, and any unrecognized
     environment value, falls back to "en"."""
@@ -100,7 +109,7 @@ def resolve_lang(explicit=None, environ=None):
     return "en"
 
 
-def weekly(row, shape=None):
+def weekly(row: AccountUsageRow, shape: QuotaShape | None = None) -> UsageWindowPayload | None:
     """The quota bucket's long window for ROW, or None when it was not reported."""
     return weekly_window(row['buckets'], shape)
 
@@ -108,7 +117,7 @@ def weekly(row, shape=None):
 UNAVAILABLE_PREFIX = 'usage unavailable: '
 
 
-def status_note(row, lang="en"):
+def status_note(row: AccountUsageRow, lang: str = "en") -> str:
     """One line for a row without a usable weekly gauge, naming the fix when there is one.
 
     `xswap list` used to collapse every failure to "unavailable"; a login that the
@@ -128,7 +137,13 @@ def status_note(row, lang="en"):
     return _t(lang, 'unavailable') + (f' · {reason}' if reason else '')
 
 
-def fallback_warning(rows, settings, now=None, lang="en", shape=None):
+def fallback_warning(
+    rows: list[AccountUsageRow],
+    settings: dict[str, Any],
+    now: float | None = None,
+    lang: str = "en",
+    shape: QuotaShape | None = None,
+) -> str | None:
     """Say when automatic switching is on but no other pool account could take over."""
     if not settings.get('enabled'):
         return None
@@ -145,7 +160,9 @@ def fallback_warning(rows, settings, now=None, lang="en", shape=None):
     return _t(lang, 'no_fallback', reserve=reserve, names=', '.join(others))
 
 
-def summary(row, now=None, lang="en", shape=None):
+def summary(
+    row: AccountUsageRow, now: float | None = None, lang: str = "en", shape: QuotaShape | None = None
+) -> dict[str, Any]:
     now = time.time() if now is None else now
     window = weekly(row, shape)
     left = window['remainingPercent'] if window else None
@@ -175,7 +192,9 @@ def summary(row, now=None, lang="en", shape=None):
             'exhausted': left == 0, 'cached': row.get('cached', False), 'fetchedAt': row.get('fetchedAt')}
 
 
-def reset_order(rows, now=None, shape=None):
+def reset_order(
+    rows: list[AccountUsageRow], now: float | None = None, shape: QuotaShape | None = None
+) -> list[AccountUsageRow]:
     """List order: the account whose weekly window resets soonest first.
 
     Slot numbers travel with the row (`row['slot']`), so reordering the list never
@@ -183,7 +202,7 @@ def reset_order(rows, now=None, shape=None):
     reset keep their registration order at the end.
     """
     now = time.time() if now is None else now
-    def key(item):
+    def key(item: tuple[int, AccountUsageRow]) -> tuple[bool, float, int]:
         index, row = item
         window = weekly(row, shape)
         at = window['resetsAt'] if window else None
@@ -191,7 +210,7 @@ def reset_order(rows, now=None, shape=None):
     return [row for _, row in sorted(enumerate(rows), key=key)]
 
 
-def policy_label(settings, lang="en"):
+def policy_label(settings: dict[str, Any], lang: str = "en") -> str:
     if not settings.get('enabled'):
         return _t(lang, 'autoswitch_off')
     threshold = settings.get('weeklyRemainingThreshold', 0)
@@ -200,8 +219,19 @@ def policy_label(settings, lang="en"):
     return _t(lang, 'autoswitch_on_limit')
 
 
-def render(rows, settings, include_spark=False, details=False, color=None, now=None, lang="en", sessions=None,
-           hints=None, shape=None, credit_lines=None):
+def render(
+    rows: list[AccountUsageRow],
+    settings: dict[str, Any],
+    include_spark: bool = False,
+    details: bool = False,
+    color: bool | None = None,
+    now: float | None = None,
+    lang: str = "en",
+    sessions: list[dict[str, Any]] | None = None,
+    hints: list[dict[str, Any]] | None = None,
+    shape: QuotaShape | None = None,
+    credit_lines: Any = None,
+) -> str:
     if not rows:
         return _t(lang, 'no_accounts')
     if color is None:
@@ -249,7 +279,7 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
         lines.append(_t(lang, 'sessions'))
         counts = Counter((session.get('surface'), session.get('account')) for session in sessions if session.get('running'))
         for (surface, account), count in counts.items():
-            label = {'cli': 'CLI', 'desktop': 'Desktop'}.get(surface, 'Unknown')
+            label = {'cli': 'CLI', 'desktop': 'Desktop'}.get(surface or '', 'Unknown')
             lines.append(f"  ● {label} · {account or 'unknown'} · " + _t(lang, 'session_single' if count == 1 else 'session_count', count=count))
             # A session still running an older bridge sits under its group with the
             # command that reopens it on the installed code (xswap_cli.bridge_hints).
@@ -272,7 +302,7 @@ def render(rows, settings, include_spark=False, details=False, color=None, now=N
     return '\n'.join(lines)
 
 
-def dashboard(manager, lang="en"):
+def dashboard(manager: Manager, lang: str = "en") -> dict[str, Any]:
     # The menu bar polls this every five minutes: a natural background sweep.
     # The import is function-local: core never reaches a provider at import time.
     from xswap import providers
@@ -281,7 +311,7 @@ def dashboard(manager, lang="en"):
     state = provider.status_data(manager)
     rows = manager.account_rows()
     from xswap.core.json_output import dashboard_payload
-    return dashboard_payload({'accounts': [summary(row, lang=lang, shape=shape) for row in sorted(rows, key=lambda r: not r['active'])],
+    return dashboard_payload({'accounts': [summary(row, lang=lang, shape=shape) for row in sorted(rows, key=lambda r: not r.get('active'))],
             'policy': policy_label(state, lang),
             'sessions': [{'account': s['account'], 'surface': s['surface']} for s in state['sessions'] if s['running']],
             'updatedAt': time.time()})

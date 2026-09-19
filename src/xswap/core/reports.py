@@ -1,14 +1,16 @@
 """One-line summaries of a live-switch or login broadcast. Pure text, no state."""
 from __future__ import annotations
 
+from typing import Any
 
-def failure_reasons_text(report):
+
+def failure_reasons_text(report: dict[str, Any]) -> str:
     """` Failed: reason; reason.` from the bridges' own classified reasons, deduplicated, or empty."""
     reasons = list(dict.fromkeys(r for r in report.get("reasons") or [] if isinstance(r, str) and r))
     return " Failed: " + "; ".join(reasons) + "." if reasons else ""
 
 
-def describe_switch_report(report, name):
+def describe_switch_report(report: dict[str, Any], name: str) -> str:
     """One line for `use`/`switch`: which live bridges took the selection, without a zero-filled dump."""
     unsafe = report.get("unsafe")
     if unsafe:
@@ -28,7 +30,7 @@ def describe_switch_report(report, name):
     return text
 
 
-def describe_login_report(report, name):
+def describe_login_report(report: dict[str, Any], name: str) -> str:
     """One line for `login`: which live bridges on NAME re-authenticated."""
     unsafe = report.get("unsafe")
     if unsafe:

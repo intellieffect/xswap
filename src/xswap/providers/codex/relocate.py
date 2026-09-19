@@ -28,24 +28,29 @@ overwrites an existing one, edits shell configuration, or touches a Codex binary
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.paths import auto_dir, settings_path
+from xswap.core.types import AccountRecord
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 RUNTIME_HOME_NAMES = ('cli-codex', 'codex')  # auto CLI runtime, auto desktop runtime
 STANDALONE_ENTRIES = {'current', 'install.lock', 'releases'}  # what install.sh leaves after a completed install
 
 
-def _resolve(path):
+def _resolve(path: str | Path) -> Path:
     try:
         return Path(path).resolve()
     except (OSError, RuntimeError):
         return Path(path)
 
 
-def _accounts(manager, accounts):
+def _accounts(manager: Manager, accounts: dict[str, AccountRecord] | None) -> dict[str, AccountRecord]:
     if accounts is not None:
         return accounts
     from xswap.manager import SwapError
@@ -55,7 +60,7 @@ def _accounts(manager, accounts):
         return {}
 
 
-def codex_homes_inside_root(manager, accounts=None):
+def codex_homes_inside_root(manager: Manager, accounts: dict[str, AccountRecord] | None = None) -> list[Path]:
     """Homes xswap owns and passes to Codex as CODEX_HOME: the auto runtime homes and
     every managed profile home. Registered external homes are the user's own and are
     never listed here."""
@@ -69,7 +74,7 @@ def codex_homes_inside_root(manager, accounts=None):
     return homes
 
 
-def reference_home(manager, accounts=None):
+def reference_home(manager: Manager, accounts: dict[str, AccountRecord] | None = None) -> Path | None:
     """Where the real Codex release belongs: a registered home outside xswap's root
     whose packages/standalone already holds realCodex, else the source home
     (CODEX_HOME or ~/.codex). None when neither is a directory outside the root."""
@@ -95,7 +100,7 @@ def reference_home(manager, accounts=None):
     return None
 
 
-def inside_root(manager, path):
+def inside_root(manager: Manager, path: str | None) -> bool:
     """True when a recorded executable path lies inside xswap's state directory,
     literally or once symlinks are resolved. A literal path under the root breaks
     when auto/ is purged even if it currently resolves elsewhere; a resolved one
@@ -108,7 +113,9 @@ def inside_root(manager, path):
     return literal.is_relative_to(manager.root) or _resolve(literal).is_relative_to(manager.root)
 
 
-def canonical_codex_path(manager, path, accounts=None):
+def canonical_codex_path(
+    manager: Manager, path: str, accounts: dict[str, AccountRecord] | None = None
+) -> str:
     """Rewrite a path that passes through an owned home's `packages` link so that it
     no longer traverses xswap's root: <home>/packages/X -> <link target>/X.
 
@@ -133,7 +140,9 @@ def canonical_codex_path(manager, path, accounts=None):
     return str(literal)
 
 
-def link_packages(manager, home, accounts=None):
+def link_packages(
+    manager: Manager, home: str | Path, accounts: dict[str, AccountRecord] | None = None
+) -> str:
     """Make <home>/packages a link to the reference home's `packages` when the entry
     does not exist yet. Returns a short label and never raises: a launch must not
     fail over this. An existing real directory is left for `xswap relocate-codex`
@@ -163,7 +172,7 @@ def link_packages(manager, home, accounts=None):
     return 'linked'
 
 
-def _current_name(standalone):
+def _current_name(standalone: Path) -> str | None:
     from xswap.providers.codex.codex_cli import link_target_path
     current = standalone / 'current'
     if not current.is_symlink():
@@ -171,7 +180,7 @@ def _current_name(standalone):
     return Path(link_target_path(current, os.readlink(current))).name
 
 
-def _standalone_releases(standalone):
+def _standalone_releases(standalone: Path) -> list[Path]:
     """Release directories under <standalone>/releases; refuse any layout other than
     what a completed install.sh run leaves behind, so nothing unexpected is moved."""
     from xswap.manager import SwapError
@@ -193,7 +202,9 @@ def _standalone_releases(standalone):
     return found
 
 
-def _rewrite(manager, value, reference, accounts):
+def _rewrite(
+    manager: Manager, value: str, reference: Path | None, accounts: dict[str, AccountRecord]
+) -> str:
     literal = Path(value)
     for home in codex_homes_inside_root(manager, accounts):
         packages = home / 'packages'
@@ -207,7 +218,9 @@ def _rewrite(manager, value, reference, accounts):
     return value
 
 
-def _record_rewrites(manager, record, reference, accounts):
+def _record_rewrites(
+    manager: Manager, record: dict[str, Any], reference: Path | None, accounts: dict[str, AccountRecord]
+) -> dict[str, str]:
     """{key: new value} for the paths one wrapper record spells through xswap's root."""
     rewrites = {}
     for key in ('realCodex', 'originalTarget'):
@@ -219,7 +232,7 @@ def _record_rewrites(manager, record, reference, accounts):
     return rewrites
 
 
-def plan_relocation(manager):
+def plan_relocation(manager: Manager) -> dict[str, Any]:
     """Everything relocate() would do, computed without changing anything. Raises
     SwapError for any state it refuses to touch."""
     from xswap.manager import SwapError
@@ -279,7 +292,7 @@ def plan_relocation(manager):
             plan['moves'].append((release, destination))
     moved = {release.name for release, _ in plan['moves']}
 
-    def usable(name):
+    def usable(name: str | None) -> bool:
         return name is not None and (name in moved or (ref_releases / name).is_dir())
 
     # install.sh spells the recorded realCodex through `<standalone>/current`, and _rewrite
@@ -291,7 +304,9 @@ def plan_relocation(manager):
     # after the one doctor had asked for. Refuse while nothing has been changed.
     for entry in homes:
         current = entry['packages'] / 'standalone' / 'current'
-        if entry['holdsReal'] and Path(real).is_relative_to(current) and not usable(entry['current']):
+        # entry['holdsReal'] is only True when `real` was already truthy (see its own
+        # `bool(real) and ...` computation above), so `real` is a str here.
+        if entry['holdsReal'] and Path(real).is_relative_to(current) and not usable(entry['current']):  # type: ignore[arg-type]
             raise SwapError(f'{current} does not point at a release that can be moved to {reference / "packages"}, '
                             f'but auto.json records the real Codex through it ({real}); point it at a release under '
                             f'{current.parent / "releases"} (ln -sfn releases/<name> current), then retry. '
@@ -308,7 +323,7 @@ def plan_relocation(manager):
     return plan
 
 
-def _is_skeleton(aside):
+def _is_skeleton(aside: Path) -> bool:
     """True when only what install.sh itself leaves remains: `current`, `install.lock`,
     and an empty releases/ -- the only leftovers relocate() produces."""
     if [entry.name for entry in aside.iterdir()] not in ([], ['standalone']):
@@ -327,7 +342,7 @@ def _is_skeleton(aside):
     return True
 
 
-def relocate(manager, dry=False):
+def relocate(manager: Manager, dry: bool = False) -> dict[str, Any]:
     """Move Codex releases out of xswap-owned homes into the reference home and link
     those homes to it. Prints one line per change (or per planned change with
     `dry`) and returns the plan."""
@@ -341,7 +356,10 @@ def relocate(manager, dry=False):
             print(f'Nothing to relocate: the real Codex ({real}) is outside {manager.root} and no xswap-owned home holds a packages directory.')
             return plan
         reference = plan['reference']
-        ref_standalone = reference / 'packages' / 'standalone' if reference is not None else None
+        # plan_relocation() already raised SwapError if homes is non-empty and reference is
+        # None; the early return above means homes is non-empty here, so reference is set.
+        assert reference is not None  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
+        ref_standalone = reference / 'packages' / 'standalone'
         verb = 'move' if dry else 'moved'
         if reference is not None:
             lines.append(f'Reference Codex home: {reference}')
@@ -357,21 +375,21 @@ def relocate(manager, dry=False):
             for key, value in values.items():
                 lines.append(f'auto.json wrappers {record_path} {key} -> {value}')
         if dry:
-            print('\n'.join(lines + ['Dry run: nothing changed.']))
+            print('\n'.join([*lines, 'Dry run: nothing changed.']))
             return plan
         running = sum(1 for session in status_data(manager, cleanup=False)['sessions'] if session.get('running'))
         if plan['homes']:
             (ref_standalone / 'releases').mkdir(parents=True, exist_ok=True)
         for source, destination in plan['moves']:
             try:
-                os.rename(source, destination)
+                Path(source).rename(destination)
             except OSError as exc:
                 raise SwapError(f'cannot move {source} to {destination} ({exc.strerror or exc}); releases already moved stay under {ref_standalone / "releases"} and nothing was deleted.') from None
         if plan['current']:
             swap_symlink(ref_standalone / 'current', str(ref_standalone / 'releases' / plan['current']))
         for entry in plan['homes']:
             aside = entry['home'] / ('.packages-relocated-' + uuid.uuid4().hex)
-            os.rename(entry['packages'], aside)
+            Path(entry['packages']).rename(aside)
             swap_symlink(entry['packages'], str(reference / 'packages'))
             if _is_skeleton(aside):
                 shutil.rmtree(aside)
@@ -397,7 +415,7 @@ def relocate(manager, dry=False):
                 # A relative recorded path (0.7.8's `shutil.which` result) would resolve against
                 # the working directory and re-point a `codex` inside an unrelated repository;
                 # the record's own fields are still rewritten, the link is left to a human.
-                if (new_original and record.get('path') and os.path.isabs(record['path'])
+                if (new_original and record.get('path') and Path(record['path']).is_absolute()
                         and path.is_symlink() and os.readlink(path) == old_original):
                     repoints.append((path, new_original))
             settings['wrapper'] = wrapper
