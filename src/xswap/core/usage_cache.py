@@ -141,7 +141,10 @@ class UsageCache:
                     buckets, fetched_at = snapshot.buckets, snapshot.fetched_at
                     row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
                                resetCredits=snapshot.reset_credits)
-                    assert fetched_at is not None  # a successful read_usage() always stamps its snapshot  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
+                    if fetched_at is None:
+                        # A provider that returned a snapshot without stamping it; the
+                        # cache and the alert job both key on that stamp.
+                        raise UsageError("usage snapshot carries no fetch time")
                     self.manager.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
                     self.manager.clear_auth_failure(name)
                 except (UsageError, SwapError) as error:

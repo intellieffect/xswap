@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
@@ -36,7 +36,7 @@ class AuthState:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def failure(self, name: str, label: str) -> AuthStateEntry | None:
+    def failure(self, name: str, label: str) -> dict[str, Any] | None:
         """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
         nothing has cleared it since, else None. Like cached_usage, an entry recorded under
         another login label (a re-login under the same name) is a miss, not reused.
@@ -48,7 +48,7 @@ class AuthState:
         failed_at = entry.get("failedAt")
         if not isinstance(failed_at, (int, float)) or isinstance(failed_at, bool):
             return None
-        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS), "identity": label}
+        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
 
     def remember(
         self, name: str, label: str, reason: str = AUTH_FAILED_STATUS, failed_at: float | None = None

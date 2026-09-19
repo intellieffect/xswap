@@ -38,7 +38,7 @@ UNSET = object()
 
 def validate_name(name: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}", name):
-        raise SwapError("Name must be 1-40 letters, digits, underscores or hyphens.")
+        raise SwapError("Name must be 1–40 letters, digits, underscores or hyphens.")  # noqa: RUF001  the published message uses an en dash
     return name
 
 
