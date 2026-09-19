@@ -21,6 +21,9 @@ requires-python = ">=3.11"
 authors = [{name = "IntelliEffect"}]
 dependencies = ["websockets>=15,<18"]
 
+[dependency-groups]
+dev = ["pytest>=8", "pytest-xdist>=3.5", "pytest-cov>=5"]
+
 [project.scripts]
 xswap = "codex_swap:main"
 codex-swap = "codex_swap:main"
@@ -42,3 +45,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["F", "E9", "B", "UP"]
+
+[tool.pytest.ini_options]
+# The sources are flat top-level modules and the `test_*.py` files sit beside
+# them in the repo root, so the root itself is the test path. `tests/` is
+# excluded on purpose: it holds live smoke scripts (`live_*.py`,
+# `plugin_runtime_smoke.py`) that drive a real Codex binary and are run by
+# hand, not collected.
+testpaths = ["."]
+python_files = ["test_*.py"]
+norecursedirs = ["tests", ".git", "build", "dist", ".venv", "*.egg-info"]
