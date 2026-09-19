@@ -93,7 +93,9 @@ PRIVATE_MARKERS = ("bigno", "intellieffect", "@", "/Users/", "/Volumes/")
 
 
 def _is_py311():
-    return sys.version_info[:2] == (3, 11)
+    # 3.11 and 3.12 wrap the root usage line the same way (measured); the
+    # argparse change that the default snapshot reflects landed in 3.13.
+    return sys.version_info[:2] < (3, 13)
 
 
 def _root_help_path():
