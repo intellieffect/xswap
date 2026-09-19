@@ -269,5 +269,8 @@ class PackagedModulesTests(unittest.TestCase):
         root = pathlib.Path(__file__).parent
         with (root / "pyproject.toml").open("rb") as stream:
             listed = set(tomllib.load(stream)["tool"]["setuptools"]["py-modules"])
-        present = {p.stem for p in root.glob("*.py") if not p.name.startswith("test_")}
+        # conftest.py is pytest's own fixture/guard module for this suite, not a
+        # shipped one; it is no more packaged than the test_*.py files beside it.
+        present = {p.stem for p in root.glob("*.py")
+                   if not p.name.startswith("test_") and p.name != "conftest.py"}
         self.assertEqual(sorted(present - listed), [])

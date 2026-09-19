@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The test suite can no longer write the real account store. `conftest.py` freezes the real roots (`~/.local/share/codex-swap`, `~/.codex`, `~/.openclaw`, and an ambient `CODEX_SWAP_HOME`/`CODEX_HOME`) at import, before any fixture moves the environment, and installs a `sys.addaudithook` that refuses a write to any of them. Every test already isolated itself with a temporary directory and an environment patch, but that patch unwinds at teardown: a thread a test started -- the auto-switch loop, the alert tick, the bridge server -- that got around to writing afterwards resolved `default_root()` back to the developer's live store and overwrote `accounts.json`. An audit hook has no removal API, so it is still armed when the patch is gone; the refusal is deliberately not an `OSError`, which `Path.mkdir(exist_ok=True)` swallows. The runner is pytest instead of `python -m unittest discover`; the tests themselves are unchanged `unittest.TestCase` classes.
+
 ## 0.8.2
 
 - `xswap list` orders accounts by how soon their weekly window resets, soonest first, instead of by registration order. With every pool account but one at the limit, the account that comes back first was wherever it happened to be registered, and the reset times had to be read line by line to find it. Slot numbers travel with the row, so the number `xswap switch <number>` takes is unchanged; an account with no readable weekly reset keeps its registration order at the end of the list.
