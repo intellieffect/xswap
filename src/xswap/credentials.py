@@ -3,9 +3,7 @@ import json
 import os
 import stat
 
-
-class CredentialError(Exception):
-    pass
+from xswap.errors import CredentialError
 
 
 def read_auth(home):

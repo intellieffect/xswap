@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 import time
 
@@ -30,33 +29,20 @@ from xswap.upgrade import UpgradeError, upgrade
 from xswap.alert import AlertError
 from xswap.alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
 from xswap.path import absolute_which, relative_entry_message
-
-__version__ = "0.8.2"
-
-
-class SwapError(Exception):
-    pass
-
+from xswap import fsutil, locking
+from xswap._version import __version__
+from xswap.errors import SwapError
+from xswap.fsutil import atomic_json
+from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, profile_dir, settings_path
 
 def private_dir(path: Path):
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if path.is_symlink() or path.stat().st_uid != os.getuid():
-        raise SwapError(f"Unsafe storage directory: {path}")
-    path.chmod(0o700)
+    """fsutil.private_dir reporting through SwapError, this surface's error class.
 
-
-def atomic_json(path: Path, data):
-    fd, tmp = tempfile.mkstemp(prefix=".swap-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    Kept as a function defined here (rather than a re-exported name) so it stays
+    patchable on this module: `xswap.codex_cli` and `xswap.plugins` look it up
+    through `xswap.manager` at call time.
+    """
+    return fsutil.private_dir(path, SwapError)
 
 
 def validate_name(name):
@@ -349,17 +335,6 @@ def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
     return winner["name"], {"remaining": remaining, "candidates": summary}
 
 
-# The state root every shell reads unless it exports ROOT_VARIABLE: which accounts exist,
-# which one is selected, and the record that connects the `codex` command all live under it,
-# so the variable silently decides what plain `codex` does in that shell (2026-09-13).
-ROOT_VARIABLE = "CODEX_SWAP_HOME"
-
-
-def default_root():
-    """The state root a shell without CODEX_SWAP_HOME uses; a path, never a read of it."""
-    return (Path.home() / ".local/share/codex-swap").expanduser().resolve()
-
-
 # "no expected selection was pinned" for Manager._use. A sentinel rather than None, because
 # None is a real selection state (no account selected) a caller may legitimately pin against.
 _UNSET = object()
@@ -378,16 +353,9 @@ class Manager:
             private_dir(self.root)
         self.registry = self.root / "accounts.json"
 
-    @contextlib.contextmanager
     def locked(self):
-        fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            os.close(fd)
+        return locking.locked(self.root / ".lock")
 
-    @contextlib.contextmanager
     def try_locked(self):
         """locked(), but yields False instead of waiting when someone else holds the lock.
 
@@ -399,16 +367,7 @@ class Manager:
         `timeout 120` -- the job was SIGTERMed before it ever reported. The work is
         idempotent and already silent on every skip, so the next launch does it instead.
         """
-        fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                yield False
-                return
-            yield True
-        finally:
-            os.close(fd)
+        return locking.try_locked(self.root / ".lock")
 
     def read(self):
         if not self.registry.exists():
@@ -518,7 +477,7 @@ class Manager:
             data = self.read()
             if name in data["accounts"]:
                 return Path(data["accounts"][name]["home"])
-            home = self.root / "profiles" / name / "codex"
+            home = profile_dir(self.root, name) / "codex"
             private_dir(home.parent)
             private_dir(home)
             # Share tooling, but never credentials, sessions, databases or app cookies.
@@ -569,7 +528,7 @@ class Manager:
             settings = read_settings(self)
             if settings.get('enabled'):
                 settings['accounts'] = list(dict.fromkeys([name, *settings.get('accounts', [])]))
-                atomic_json(self.root / 'auto.json', settings)
+                atomic_json(settings_path(self.root), settings)
             data["active"] = name
             atomic_json(self.registry, data)
         return home
@@ -620,8 +579,8 @@ class Manager:
         against a profile directory that no longer exists. The pool is a claim on the
         account for as long as the session lives, exactly like the current selection.
         """
-        candidates = [self.root / "auto" / ".bridge.lock"]
-        cli_runs = self.root / "auto" / "cli-runs"
+        candidates = [auto_dir(self.root) / ".bridge.lock"]
+        cli_runs = cli_runs_dir(self.root)
         try:
             if cli_runs.is_dir():
                 candidates += [run_dir / ".bridge.lock" for run_dir in cli_runs.iterdir() if run_dir.is_dir()]
@@ -663,7 +622,7 @@ class Manager:
         whatever the convention path happened to hold instead. Only a human can say which of
         the two was meant, so name both and delete neither.
         """
-        target = self.root / "profiles" / name
+        target = profile_dir(self.root, name)
         recorded = Path(entry["home"])
         if recorded != target / "codex":
             raise SwapError(f"{name}'s recorded home is {recorded}, but --purge deletes the managed profile at "
@@ -1207,7 +1166,7 @@ class Manager:
         bundle = next((path for path in candidates if path.is_dir()), None)
         if not bundle:
             raise SwapError("Desktop app not found; use --app /path/to/ChatGPT.app")
-        root = self.root / "auto"
+        root = auto_dir(self.root)
         home, desktop = root / "codex", root / "desktop"
         env_values = {"CODEX_HOME": str(home), "CODEX_ELECTRON_USER_DATA_PATH": str(desktop),
                       "CODEX_CLI_PATH": str(Path(bridge).resolve()), "CODEX_APP_SERVER_FORCE_CLI": "1",
@@ -1253,7 +1212,7 @@ class Manager:
         bundle = next((p for p in candidates if p.is_dir()), None)
         if not bundle:
             raise SwapError("Desktop app not found; specify --app /path/to/ChatGPT.app")
-        desktop = self.root / "profiles" / name / "desktop"
+        desktop = profile_dir(self.root, name) / "desktop"
         command = ["/usr/bin/open", "-n", "--env", f"CODEX_HOME={home}", "--env", f"CODEX_ELECTRON_USER_DATA_PATH={desktop}", str(bundle), "--args", f"--user-data-dir={desktop}"]
         if dry:
             print(json.dumps({"account": name, "argv": command}, indent=2))

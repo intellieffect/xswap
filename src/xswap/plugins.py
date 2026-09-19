@@ -9,6 +9,8 @@ import shutil
 import sys
 import tempfile
 
+from xswap.paths import auto_dir
+
 
 def exchange_paths(left, right):
     """Atomically exchange a legacy symlink and a complete directory (no path gap)."""
@@ -56,6 +58,7 @@ def _ensure_plugins(home, source, dry=False):
     responsibility of that home's normal plugin manager, not cross-home syncing.
     No app-server state, credentials, staging, or user sessions are copied.
     """
+    # private_dir through manager, not xswap.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import SwapError, atomic_json, private_dir
     home, source = Path(home), Path(source)
     target = home / 'plugins'
@@ -106,6 +109,7 @@ def _ensure_plugins(home, source, dry=False):
 
 
 def ensure_plugins(home, source, dry=False):
+    # Through manager, not xswap.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import private_dir
     home, source = Path(home), Path(source)
     if dry or home.resolve() == source.resolve():
@@ -122,7 +126,7 @@ def ensure_plugins(home, source, dry=False):
 def repair(manager, dry=False):
     import json
     from xswap.manager import SwapError
-    homes = [manager.root / 'auto' / 'codex', manager.root / 'auto' / 'cli-codex']
+    homes = [auto_dir(manager.root) / 'codex', auto_dir(manager.root) / 'cli-codex']
     homes += [Path(value['home']) for value in manager.read()['accounts'].values()]
     sources = [manager.source, *homes]
     results = []

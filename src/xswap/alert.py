@@ -12,13 +12,11 @@ import shutil
 import subprocess
 import sys
 
+from xswap.errors import AlertError
 from xswap.path import RelativeEntryError, absolute_which
+from xswap.paths import settings_path
 
 LABEL = "com.intellieffect.xswap.alert"
-
-
-class AlertError(Exception):
-    pass
 
 
 # The run.sh template below is filled in with str.replace() rather than str.format()
@@ -135,7 +133,7 @@ def has_auto_switch(root):
 def _auto_enabled(root):
     """Read-only peek at auto.json for the --auto-switch install note; no codex_swap import."""
     try:
-        value = json.loads((Path(root) / "auto.json").read_text())
+        value = json.loads(settings_path(root).read_text())
     except (OSError, ValueError):
         return False
     return isinstance(value, dict) and value.get("enabled") is True

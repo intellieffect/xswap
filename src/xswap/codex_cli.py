@@ -16,6 +16,9 @@ import time
 import uuid
 
 from xswap.live import BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError, validate_threshold
+from xswap.errors import BusyThreadError
+from xswap.fsutil import atomic_json
+from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, settings_path
 
 
 # `upgrade` is Codex's own name for the standalone updater and was in neither set, so
@@ -92,10 +95,6 @@ def server_overrides(args):
         elif arg in VALUE_FLAGS:
             next(iterator, None)
     return result
-
-
-class BusyThreadError(LiveError):
-    pass
 
 
 def writer_busy(home, thread_id):
@@ -435,27 +434,29 @@ def new_run_dir(manager):
     then treated the control directory as unsafe and signalled nothing, silently:
     `xswap use` never reached running sessions on such a machine (INT-5085).
     """
+    # Through manager, not xswap.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import private_dir
-    auto = manager.root / 'auto'
+    auto = auto_dir(manager.root)
     private_dir(auto)
-    private_dir(auto / 'cli-runs')
+    private_dir(cli_runs_dir(manager.root))
     # A new session is the natural sweep point: records nobody will read again
     # go before this run's own record exists. scan_runs never reads auto.json,
     # so an unreadable settings file cannot block a launch here.
     scan_runs(manager)
-    run_dir = auto / 'cli-runs' / uuid.uuid4().hex
+    run_dir = cli_runs_dir(manager.root) / uuid.uuid4().hex
     private_dir(run_dir)
     return run_dir
 
 
 def launch_cli(manager, accounts, args, dry=False):
+    # Through manager, not xswap.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import private_dir
     names = [value.strip() for value in accounts.split(',') if value.strip()]
     if not interactive_args(args):
         raise LiveError('auto CLI supports interactive Codex, resume, fork, and agents; ordinary utility/exec commands use normal authentication')
     real = manager.codex()
     pool = AccountPool(manager, names, real)
-    runtime = manager.root / 'auto' / 'cli-codex'
+    runtime = auto_dir(manager.root) / 'cli-codex'
     home = resume_home(manager, args, runtime)
     for value in args:
         try:
@@ -510,7 +511,7 @@ def launch_cli(manager, accounts, args, dry=False):
 
 
 def read_settings(manager):
-    path = manager.root / 'auto.json'
+    path = settings_path(manager.root)
     if not path.exists():
         return {}
     try:
@@ -991,9 +992,8 @@ def _relink(manager, settings, path, proxy, problem):
     False after one stderr line when the link cannot be replaced; the record
     already names the release, so the next call retries.
     """
-    from xswap.manager import atomic_json
     try:
-        atomic_json(manager.root / 'auto.json', settings)
+        atomic_json(settings_path(manager.root), settings)
         swap_symlink(path, proxy)
     except OSError as error:
         print(f'xswap: {problem} but it could not be reconnected ({error.strerror or error}); '
@@ -1064,7 +1064,6 @@ def reconnect_wrapper(manager):
 
 
 def enable(manager, accounts, wrap=False):
-    from xswap.manager import atomic_json
     names = [value.strip() for value in accounts.split(',') if value.strip()]
     AccountPool(manager, names, manager.codex())
     with manager.locked():
@@ -1118,17 +1117,16 @@ def enable(manager, accounts, wrap=False):
                     print(f'xswap: the real Codex ({real}) is inside the xswap state directory; run: xswap relocate-codex',
                           file=sys.stderr)
                 # Persist rollback information before the atomic symlink swap.
-                atomic_json(manager.root / 'auto.json', settings)
+                atomic_json(settings_path(manager.root), settings)
                 swap_symlink(target, proxy)
             elif not settings.get('wrapper'):
                 raise LiveError('existing codex wrapper has no recovery information')
-        atomic_json(manager.root / 'auto.json', settings)
+        atomic_json(settings_path(manager.root), settings)
     print('Auto switching enabled: ' + ' -> '.join(names) + '. New xswap CLI/app sessions use the pool.' +
           (' The codex command is also connected.' if settings.get('wrapper') else ''))
     # The record that decides what plain `codex` does went into the root this shell named, and
     # every other shell, launchd job and desktop app reads its own. Said here because this is
     # where the choice is made; doctor's state root row repeats it afterwards.
-    from xswap.manager import ROOT_VARIABLE, default_root
     chosen = os.environ.get(ROOT_VARIABLE)
     # Only when the variable is what put the record here: a caller that passed its own root
     # (a test, an embedding) never read the variable, so naming it would be a false alarm --
@@ -1141,19 +1139,17 @@ def enable(manager, accounts, wrap=False):
 
 
 def set_policy(manager, weekly_remaining):
-    from xswap.manager import atomic_json
     threshold = validate_threshold(weekly_remaining)
     with manager.locked():
         settings = read_settings(manager)
         settings['weeklyRemainingThreshold'] = threshold
-        atomic_json(manager.root / 'auto.json', settings)
+        atomic_json(settings_path(manager.root), settings)
     print(f'Weekly reserve: {threshold:g}% remaining ({100-threshold:g}% used). '
           'Compatible running bridges apply changes before the next idle turn. '
           'Bridges older than 0.3.2 need a new auto session once; none were stopped.')
 
 
 def disable(manager):
-    from xswap.manager import atomic_json
     from xswap.relocate import inside_root
     with manager.locked():
         settings = read_settings(manager)
@@ -1201,7 +1197,7 @@ def disable(manager):
         else:
             settings.pop('wrappers', None)
         settings['enabled'] = False
-        atomic_json(manager.root / 'auto.json', settings)
+        atomic_json(settings_path(manager.root), settings)
     print('Auto switching disabled for new sessions. Running auto sessions remain active.')
 
 
@@ -1288,7 +1284,6 @@ def missing_codex_message(real, settings, root=None):
 
 def state_root_source(env=None):
     """How this environment chose its state root, in the words every surface uses."""
-    from xswap.manager import ROOT_VARIABLE
     value = (os.environ if env is None else env).get(ROOT_VARIABLE)
     return f'selected by {ROOT_VARIABLE}' if value else f'the default; {ROOT_VARIABLE} is not set in this shell'
 
@@ -1400,8 +1395,8 @@ def scan_runs(manager, prune=False, cleanup=True):
     a launch sweeps through here, and an unreadable settings file must not stop
     a session from starting.
     """
-    run_root = manager.root / 'auto' / 'cli-runs'
-    entries = [(manager.root / 'auto' / 'status.json', None)]
+    run_root = cli_runs_dir(manager.root)
+    entries = [(auto_dir(manager.root) / 'status.json', None)]
     if run_root.is_dir():
         entries += [(run_dir / 'status.json', run_dir) for run_dir in sorted(run_root.iterdir())
                     if run_dir.is_dir() and not run_dir.is_symlink()]
@@ -1550,7 +1545,7 @@ def reopen_command(session, state, manager):
         thread = str(uuid.UUID(session.get('conversationId')))
     except (ValueError, TypeError, AttributeError):
         return None
-    home = session.get('codexHome') or str(manager.root / 'auto' / 'cli-codex')
+    home = session.get('codexHome') or str(auto_dir(manager.root) / 'cli-codex')
     if not saved_thread(home, thread):
         return None
     if state.get('codexWrapped'):

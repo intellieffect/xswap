@@ -32,6 +32,8 @@ from pathlib import Path
 import shutil
 import uuid
 
+from xswap.paths import auto_dir, settings_path
+
 RUNTIME_HOME_NAMES = ('cli-codex', 'codex')  # auto CLI runtime, auto desktop runtime
 STANDALONE_ENTRIES = {'current', 'install.lock', 'releases'}  # what install.sh leaves after a completed install
 
@@ -57,7 +59,7 @@ def codex_homes_inside_root(manager, accounts=None):
     """Homes xswap owns and passes to Codex as CODEX_HOME: the auto runtime homes and
     every managed profile home. Registered external homes are the user's own and are
     never listed here."""
-    homes = [manager.root / 'auto' / name for name in RUNTIME_HOME_NAMES]
+    homes = [auto_dir(manager.root) / name for name in RUNTIME_HOME_NAMES]
     for value in _accounts(manager, accounts).values():
         if not isinstance(value, dict) or not value.get('managed') or not isinstance(value.get('home'), str):
             continue
@@ -399,7 +401,7 @@ def relocate(manager, dry=False):
                         and path.is_symlink() and os.readlink(path) == old_original):
                     repoints.append((path, new_original))
             settings['wrapper'] = wrapper
-            atomic_json(manager.root / 'auto.json', settings)
+            atomic_json(settings_path(manager.root), settings)
             for path, new_original in repoints:
                 swap_symlink(path, new_original)
                 lines.append(f'{path} -> {new_original}')
