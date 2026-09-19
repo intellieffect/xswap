@@ -1,39 +1,71 @@
 #!/usr/bin/env python3
-"""Account-scoped launchers for Codex CLI and the Codex/ChatGPT desktop app."""
+"""Account-scoped launchers for Codex CLI and the Codex/ChatGPT desktop app.
+
+`Manager` is a facade. The state it owns is split across collaborators, one
+module per concern -- `registry`, `mappings`, `usage_cache`, `auth_state`,
+`openclaw_sync`, `launcher` -- plus the pure helpers in `ranking`, `identity`
+and `reports`. None of them imports this module, and every one of them calls
+back through the `Manager` it was given, so a patched `Manager` method still
+takes effect wherever the work now lives.
+
+Two rules hold the split together:
+
+* Locking. There is exactly one lock file (`<root>/.lock`) and exactly one
+  acquisition per read-modify-write, taken by whichever collaborator method the
+  facade delegates to. Collaborators never take a lock of their own, and the
+  helpers a sequence spanning two stores needs (`_forget_usage`,
+  `_forget_auth_failure`, `_still_registered`) stay lock-free so `remove` and
+  `after_login` keep one hold across both.
+* Patchability. This module's globals (`read_limits`, `identity`,
+  `check_file_store`, `private_dir`, ...) are what the test suite replaces.
+  Collaborators reach them through `_Hooks`, whose methods resolve them here at
+  call time, so `patch("xswap.manager.read_limits")` still bites. Names patched
+  as *module attributes* (`xswap.manager.subprocess.run`, `.shutil.which`,
+  `.sys.platform`, `.os.getcwd`) need no indirection -- those are the same
+  module objects everywhere -- but the imports below must stay for the patch
+  target to resolve.
+"""
 from __future__ import annotations
 
 import argparse
-import base64
-import contextlib
-from concurrent.futures import ThreadPoolExecutor
-import fcntl
 import json
 import math
 import os
 from pathlib import Path
-import re
-import shutil
-import subprocess
+import shutil  # noqa: F401  patch target: xswap.manager.shutil.which
+import subprocess  # noqa: F401  patch target: xswap.manager.subprocess.{run,call}
 import sys
-import tomllib
-import time
+import time  # noqa: F401  patch target: xswap.manager.time
 
-from xswap.usage import AUTH_FAILED_STATUS, UsageError, is_ok, is_sign_in_failure, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label
+from xswap.usage import AUTH_FAILED_STATUS, UsageError, is_ok, is_sign_in_failure, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label  # noqa: F401
 from xswap.usage import warnings as usage_warnings
 from xswap.display import resolve_lang
-from xswap.live import LiveError, buckets_available, jwt_claims
-from xswap.plugins import ensure_plugins
-from xswap.relocate import link_packages
-from xswap.credentials import CredentialError, read_auth
+from xswap.live import LiveError, buckets_available, jwt_claims  # noqa: F401
+from xswap.plugins import ensure_plugins  # noqa: F401
+from xswap.relocate import link_packages  # noqa: F401
+from xswap.credentials import CredentialError, read_auth  # noqa: F401
 from xswap.upgrade import UpgradeError, upgrade
 from xswap.alert import AlertError
 from xswap.alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
-from xswap.path import absolute_which, relative_entry_message
+from xswap.path import absolute_which, relative_entry_message  # noqa: F401
 from xswap import fsutil, locking
 from xswap._version import __version__
 from xswap.errors import SwapError
-from xswap.fsutil import atomic_json
-from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, profile_dir, settings_path
+from xswap.fsutil import atomic_json  # noqa: F401  re-exported: tests and siblings import it from here
+from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, profile_dir, settings_path  # noqa: F401
+
+# Re-exported so `doctor`, `init`, `tick`, the `codex_swap` shim and the tests keep
+# importing these from `xswap.manager`, which is where they have always lived.
+from xswap.auth_state import AuthState
+from xswap.identity import chatgpt_org_id, check_file_store, identity
+from xswap.launcher import Launcher
+from xswap.mappings import Mappings
+from xswap.openclaw_sync import OpenClawSync, parse_pool, resolve_openclaw_package_root
+from xswap.ranking import codex_windows, rank_candidates, window_percent  # noqa: F401
+from xswap.registry import UNSET as _UNSET, Registry, validate_name  # noqa: F401
+from xswap.reports import describe_login_report, describe_switch_report, failure_reasons_text  # noqa: F401
+from xswap.usage_cache import UsageCache
+
 
 def private_dir(path: Path):
     """fsutil.private_dir reporting through SwapError, this surface's error class.
@@ -43,12 +75,6 @@ def private_dir(path: Path):
     through `xswap.manager` at call time.
     """
     return fsutil.private_dir(path, SwapError)
-
-
-def validate_name(name):
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}", name):
-        raise SwapError("Name must be 1–40 letters, digits, underscores or hyphens.")
-    return name
 
 
 def validate_warn_threshold(value):
@@ -74,95 +100,6 @@ def parse_cache_seconds(value):
     if not math.isfinite(seconds) or seconds <= 0:
         raise SwapError(f"--cached SECONDS must be a positive number, got {value!r}.")
     return seconds
-
-
-def check_file_store(home):
-    config = home / "config.toml"
-    try:
-        data = tomllib.loads(config.read_text()) if config.exists() else {}
-    except (ValueError, OSError):
-        raise SwapError(f"Cannot read valid config.toml at {home}") from None
-    store = data.get("cli_auth_credentials_store", "file")
-    if store != "file":
-        raise SwapError(f"{home}: credential storage is {store!r}; this version supports file storage only. No credentials changed.")
-
-
-def resolve_openclaw_package_root(executable):
-    """Walk up from the openclaw executable to its package.json (name: "openclaw")."""
-    for directory in Path(executable).resolve().parents:
-        package = directory / "package.json"
-        if package.is_file():
-            try:
-                if json.loads(package.read_text()).get("name") == "openclaw":
-                    return directory
-            except (OSError, ValueError):
-                pass
-    return None
-
-
-def parse_pool(value):
-    """Split "a, b,a" (or dedupe an already-split list) into >=2 distinct, ordered names."""
-    parts = value.split(",") if isinstance(value, str) else value
-    seen = []
-    for part in parts:
-        part = part.strip() if isinstance(part, str) else part
-        if part and part not in seen:
-            seen.append(part)
-    if len(seen) < 2:
-        raise SwapError("--pool needs at least two distinct registered account names.")
-    return seen
-
-
-def chatgpt_org_id(home, name):
-    """Unverified org id from a local credential, for the same-organization pool guard.
-
-    Checks access_token first, matching xswap_live.load_credentials' claim source; the
-    id_token fallback is this guard's own extension (load_credentials has none), covering
-    a credential whose access_token lacks the claim but whose id_token still carries it.
-    Fails closed: raises SwapError instead of returning None/unknown, because an
-    undeterminable organization must never be treated as matching another account's
-    organization (that would silently let mismatched orgs share one pool).
-    """
-    try:
-        data = read_auth(home)
-        tokens = data.get("tokens")
-        if isinstance(tokens, dict):
-            for key in ("access_token", "id_token"):
-                token = tokens.get(key)
-                if isinstance(token, str) and token:
-                    auth = jwt_claims(token).get("https://api.openai.com/auth")
-                    if isinstance(auth, dict) and auth.get("chatgpt_account_id"):
-                        return auth["chatgpt_account_id"]
-    except CredentialError:
-        pass
-    raise SwapError(f"cannot verify the ChatGPT organization for account {name}; run xswap login {name} or pass --allow-mixed.")
-
-
-def identity(home):
-    path = home / "auth.json"
-    if not path.exists():
-        return "not signed in"
-    try:
-        data = read_auth(home)
-        if not isinstance(data, dict):
-            return "unreadable auth cache"
-        if data.get("auth_mode") == "apikey" or data.get("OPENAI_API_KEY"):
-            return "API key"
-        tokens = data.get("tokens") or {}
-        if not isinstance(tokens, dict):
-            return "unreadable auth cache"
-        token = tokens.get("id_token", "")
-        if not isinstance(token, str):
-            return "unreadable auth cache"
-        parts = token.split(".")
-        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))) if len(parts) == 3 else {}
-        # These are unverified local labels, not evidence that the login is valid.
-        label = (claims.get("email") or "ChatGPT") if isinstance(claims, dict) else "ChatGPT"
-        return "".join(c for c in str(label) if c.isprintable()) if tokens.get("access_token") else "not signed in"
-    except CredentialError as exc:
-        raise SwapError(str(exc)) from None
-    except (ValueError, OSError, IndexError, TypeError):
-        return "unreadable auth cache"
 
 
 def is_auth_failed(manager, name):
@@ -246,101 +183,48 @@ def plain_codex_notice(manager, selected_home):
             f"Connect it: {connect}")
 
 
-def describe_switch_report(report, name):
-    """One line for `use`/`switch`: which live bridges took the selection, without a zero-filled dump."""
-    unsafe = report.get("unsafe")
-    if unsafe:
-        return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
-                f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
-    counts = {key: value for key, value in report.items() if value and key != "reasons"}
-    if not counts:
-        return f"No running bridged sessions; new sessions start as {name}."
-    text = "Running bridged sessions: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
-    if counts.get("pending"):
-        text += " Pending requests apply when the current turn finishes."
-    if counts.get("unsupported"):
-        text += " Bridges older than 0.7.2 need reopening once."
-    text += failure_reasons_text(report)
-    if counts.get("failed") or counts.get("unconfirmed"):
-        text += " Check xswap auto-status for the sessions that did not confirm."
-    return text
+class _Hooks:
+    """Late-bound lookups of this module's globals, for the collaborator modules.
 
-
-def failure_reasons_text(report):
-    """` Failed: reason; reason.` from the bridges' own classified reasons, deduplicated, or empty."""
-    reasons = list(dict.fromkeys(r for r in report.get("reasons") or [] if isinstance(r, str) and r))
-    return " Failed: " + "; ".join(reasons) + "." if reasons else ""
-
-
-def describe_login_report(report, name):
-    """One line for `login`: which live bridges on NAME re-authenticated."""
-    unsafe = report.get("unsafe")
-    if unsafe:
-        return (f"Running sessions were not signalled: {unsafe} is not private (expected mode 700). "
-                f"Fix: chmod 700 {unsafe} — the next xswap or codex launch repairs it as well.")
-    counts = {key: value for key, value in report.items() if value and key != "reasons"}
-    if not counts:
-        return f"No running bridged session is on {name}; sessions on other accounts re-read it when needed."
-    text = f"Running bridged sessions on {name}: " + ", ".join(f"{key} {value}" for key, value in counts.items()) + "."
-    if counts.get("pending"):
-        text += " Pending requests re-authenticate when the current turn finishes."
-    if counts.get("unsupported"):
-        text += " Bridges older than 0.7.2 need reopening once."
-    text += failure_reasons_text(report)
-    if counts.get("failed") or counts.get("unconfirmed"):
-        text += " Check xswap auto-status for the sessions that did not confirm."
-    return text
-
-
-def codex_windows(buckets):
-    return [window for bucket in buckets if bucket["id"] == "codex" for window in bucket["windows"]]
-
-
-def window_percent(buckets, minutes):
-    return next((w["remainingPercent"] for w in codex_windows(buckets) if w["windowMinutes"] == minutes), None)
-
-
-def rank_candidates(rows, model=None, exclude=(), weekly_remaining=0):
-    """Pick the row with the most codex headroom: (name or None, {"remaining", "candidates"}).
-
-    Shared by Manager.best_account (exhaustion only, weekly_remaining=0) and
-    `xswap auto-tick` (the configured weekly reserve). Disabled and excluded rows are
-    dropped; only rows with a successful fetch whose buckets_available(...) is True
-    (every applicable window known and above the reserve) are ranked, by the tightest
-    window's remaining percent and then by its earliest reset. `candidates` lists every
-    considered row with its 5h/7d remaining and short status; never tokens.
+    A collaborator that imported `read_limits` (or `identity`, `check_file_store`,
+    `private_dir`, `parse_pool`, ...) directly would bind its own module's copy, and
+    `patch("xswap.manager.read_limits")` -- which the suite uses 63 times -- would
+    then patch a name nothing reads. Each method below resolves the name in *this*
+    module's namespace at call time instead, so the patch still bites.
     """
-    excluded = set(exclude)
-    candidates = [row for row in rows if not row["disabled"] and row["name"] not in excluded]
-    if not candidates:
-        return None, {"remaining": {}, "candidates": []}
-    summary, ranked = [], []
-    for row in candidates:
-        summary.append({"name": row["name"], "remaining5h": window_percent(row["buckets"], 300),
-                        "remaining7d": window_percent(row["buckets"], 10080), "status": row["status"]})
-        if is_ok(row["status"]) and buckets_available(row["buckets"], model, weekly_remaining) is True:
-            ranked.append(row)
-    if not ranked:
-        return None, {"remaining": {}, "candidates": summary}
 
-    def rank_key(row):
-        known = [w for w in codex_windows(row["buckets"]) if w["remainingPercent"] is not None]
-        if not known:
-            return (0, float("inf"))  # defensive: buckets_available(...) is True already guarantees this
-        tightest = min(known, key=lambda w: w["remainingPercent"])
-        return (-tightest["remainingPercent"], tightest["resetsAt"] if tightest["resetsAt"] is not None else float("inf"))
+    @staticmethod
+    def identity(home):
+        return identity(home)
 
-    winner = min(ranked, key=rank_key)
-    remaining = {window_label(w): w["remainingPercent"] for w in codex_windows(winner["buckets"])}
-    return winner["name"], {"remaining": remaining, "candidates": summary}
+    @staticmethod
+    def check_file_store(home):
+        return check_file_store(home)
 
+    @staticmethod
+    def private_dir(path):
+        return private_dir(path)
 
-# "no expected selection was pinned" for Manager._use. A sentinel rather than None, because
-# None is a real selection state (no account selected) a caller may legitimately pin against.
-_UNSET = object()
+    @staticmethod
+    def read_limits(*args, **kwargs):
+        return read_limits(*args, **kwargs)
+
+    @staticmethod
+    def chatgpt_org_id(home, name):
+        return chatgpt_org_id(home, name)
+
+    @staticmethod
+    def parse_pool(value):
+        return parse_pool(value)
+
+    @staticmethod
+    def resolve_openclaw_package_root(executable):
+        return resolve_openclaw_package_root(executable)
 
 
 class Manager:
+    """Facade over the collaborators; every method here delegates and adds nothing."""
+
     def __init__(self, root=None, source=None, create=True):
         self.root = Path(root or os.environ.get(ROOT_VARIABLE, default_root())).expanduser().resolve()
         self.source = Path(source or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
@@ -352,6 +236,18 @@ class Manager:
         if create or self.root.is_dir():
             private_dir(self.root)
         self.registry = self.root / "accounts.json"
+        hooks = _Hooks()
+        self._registry = Registry(self, hooks)
+        self._mappings = Mappings(self, hooks)
+        self._usage = UsageCache(self, hooks)
+        self._auth = AuthState(self, hooks)
+        self._openclaw = OpenClawSync(self, hooks)
+        self._launcher = Launcher(self, hooks)
+
+    # -- locking ---------------------------------------------------------------
+    # The one lock of this root. Collaborators take it through these two methods and
+    # never open a second descriptor on the same file: flock from the same process
+    # would either self-deadlock or split a sequence that must stay atomic.
 
     def locked(self):
         return locking.locked(self.root / ".lock")
@@ -369,127 +265,22 @@ class Manager:
         """
         return locking.try_locked(self.root / ".lock")
 
+    # -- registry and selection ------------------------------------------------
+
     def read(self):
-        if not self.registry.exists():
-            return {"version": 1, "active": None, "accounts": {}}
-        try:
-            data = json.loads(self.registry.read_text())
-            if (data.get("version") != 1 or not isinstance(data.get("accounts"), dict) or
-                    ("mappings" in data and not isinstance(data["mappings"], dict))):
-                raise ValueError()
-            return data
-        except (ValueError, OSError):
-            raise SwapError("Invalid account registry; refusing to overwrite it.") from None
+        return self._registry.read()
 
     def switch_target(self, target):
-        """Resolve a 1-based list position; use NAME remains literal for numeric names."""
-        if re.fullmatch(r"[0-9]+", target):
-            names = list(self.read()["accounts"])
-            slot = int(target) if len(target) <= 40 else 0
-            if not 1 <= slot <= len(names):
-                raise SwapError("Invalid account slot. Run: xswap list")
-            return names[slot - 1]
-        return target
+        return self._registry.switch_target(target)
 
     def account(self, name=None, mapped=True):
-        data = self.read()
-        name = name or (self.default_account() if mapped else data["active"])
-        if name not in data["accounts"]:
-            # ASCII-only hint text: some terminals/log pipelines mangle non-ASCII dashes.
-            hint = " -- no accounts yet -- run xswap init" if not data["accounts"] else ""
-            raise SwapError(f"No matching account. Run: xswap register main, or xswap add NAME{hint}")
-        return name, Path(data["accounts"][name]["home"])
-
-    def _best_mapping(self, data, cwd=None):
-        target_parts = Path(cwd or os.getcwd()).resolve().parts
-        best = None  # (depth, path, name)
-        for raw_path, name in data.get("mappings", {}).items():
-            parts = Path(raw_path).parts
-            if len(parts) <= len(target_parts) and tuple(parts) == target_parts[:len(parts)]:
-                if best is None or len(parts) > best[0]:
-                    best = (len(parts), raw_path, name)
-        return best
-
-    def resolve_default(self, cwd=None):
-        """Return (name, mapping_path) for the implicit-selection account, computing the
-        directory-mapping lookup exactly once. mapping_path is None when the active
-        account (not a mapping) decided the result."""
-        data = self.read()
-        best = self._best_mapping(data, cwd)
-        if best and best[2] in data["accounts"]:
-            return best[2], best[1]
-        return data["active"], None
-
-    def default_account(self, cwd=None):
-        return self.resolve_default(cwd)[0]
-
-    def mapped_source(self, cwd=None):
-        """Return the mapping path that decided default_account(cwd), or None."""
-        return self.resolve_default(cwd)[1]
-
-    def map_dir(self, name, path=None):
-        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
-        with self.locked():
-            name, _ = self.account(name)
-            data = self.read()
-            data.setdefault("mappings", {})[resolved] = name
-            atomic_json(self.registry, data)
-        return resolved, name
-
-    def unmap_dir(self, path=None):
-        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
-        with self.locked():
-            data = self.read()
-            mappings = data.get("mappings", {})
-            if resolved not in mappings:
-                raise SwapError(f"No mapping for {resolved}.")
-            del mappings[resolved]
-            data["mappings"] = mappings
-            atomic_json(self.registry, data)
-        return resolved
-
-    def list_mappings(self):
-        return dict(self.read().get("mappings", {}))
+        return self._registry.account(name, mapped)
 
     def register(self, name, home=None):
-        validate_name(name)
-        home = Path(home or self.source).expanduser().resolve()
-        check_file_store(home)
-        if identity(home) in ("not signed in", "unreadable auth cache"):
-            raise SwapError(f"No readable login at {home}. Use xswap add {name} to sign in.")
-        with self.locked():
-            data = self.read()
-            if name in data["accounts"]:
-                if data["accounts"][name]["home"] == str(home):
-                    return home
-                raise SwapError(f"Account {name!r} already exists.")
-            if any(a["home"] == str(home) for a in data["accounts"].values()):
-                raise SwapError("This Codex home is already registered under another name.")
-            data["accounts"][name] = {"home": str(home), "managed": False}
-            data["active"] = data["active"] or name
-            atomic_json(self.registry, data)
-        return home
+        return self._registry.register(name, home)
 
     def prepare(self, name):
-        validate_name(name)
-        check_file_store(self.source)
-        with self.locked():
-            data = self.read()
-            if name in data["accounts"]:
-                return Path(data["accounts"][name]["home"])
-            home = profile_dir(self.root, name) / "codex"
-            private_dir(home.parent)
-            private_dir(home)
-            # Share tooling, but never credentials, sessions, databases or app cookies.
-            for entry in ("config.toml", "AGENTS.md", "skills", "rules"):
-                src, dst = self.source / entry, home / entry
-                if src.exists() and not dst.exists() and not dst.is_symlink():
-                    dst.symlink_to(src, target_is_directory=src.is_dir())
-            ensure_plugins(home, self.source)
-            link_packages(self, home, data["accounts"])
-            data["accounts"][name] = {"home": str(home), "managed": True}
-            atomic_json(self.registry, data)
-        return home
+        return self._registry.prepare(name)
 
     def use(self, name):
         return self._use(name)
@@ -507,726 +298,134 @@ class Manager:
         return self._use(name, expected=expected)
 
     def _use(self, name, expected=_UNSET):
-        with self.locked():
-            # First thing inside the lock: a caller pinning the selection must not raise on the
-            # new account's state (disabled, signed out) when the answer is "someone else chose".
-            if expected is not _UNSET and self.read()["active"] != expected:
-                return False
-            name, home = self.account(name)
-            self.require_enabled(name)
-            check_file_store(home)
-            label = identity(home)
-            if label in ("not signed in", "unreadable auth cache"):
-                raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
-            if self.auth_failure(name, label) is not None:
-                raise SwapError(f"Account {name} needs a new login: the usage service rejected it. "
-                                f"Run: xswap login {name} (a live xswap usage {name} re-checks it)")
-            data = self.read()
-            # New automatic CLI/app sessions must follow the same selection as
-            # the live-switch broadcast, even when it was outside the old pool.
-            from xswap.codex_cli import read_settings
-            settings = read_settings(self)
-            if settings.get('enabled'):
-                settings['accounts'] = list(dict.fromkeys([name, *settings.get('accounts', [])]))
-                atomic_json(settings_path(self.root), settings)
-            data["active"] = name
-            atomic_json(self.registry, data)
-        return home
+        return self._registry.use(name, expected=expected)
 
     def select_if_unset(self, name):
-        # Mirrors use(): the None check, the signed-in check, and the write share one lock
-        # so a concurrent add/use cannot race between "no active account" and setting one.
-        with self.locked():
-            name, home = self.account(name)
-            self.require_enabled(name)
-            check_file_store(home)
-            if identity(home) in ("not signed in", "unreadable auth cache"):
-                raise SwapError(f"Account {name} is not signed in. Run: xswap add {name}")
-            data = self.read()
-            if data["active"] is not None:
-                return False
-            data["active"] = name
-            atomic_json(self.registry, data)
-        return True
+        return self._registry.select_if_unset(name)
 
     def require_enabled(self, name):
-        data = self.read()
-        if data["accounts"][name].get("disabled"):
-            raise SwapError(f"Account {name} is disabled. Run: xswap enable {name}")
+        return self._registry.require_enabled(name)
 
     def enabled_accounts(self):
-        data = self.read()
-        return [(name, Path(value["home"])) for name, value in data["accounts"].items() if not value.get("disabled")]
+        return self._registry.enabled_accounts()
 
     def set_disabled(self, name, disabled):
-        with self.locked():
-            name, _ = self.account(name)
-            data = self.read()
-            if disabled:
-                data["accounts"][name]["disabled"] = True
-            else:
-                data["accounts"][name].pop("disabled", None)
-            atomic_json(self.registry, data)
+        return self._registry.set_disabled(name, disabled)
 
     def _auto_session_running(self, name):
-        """Best effort: report whether a live auto bridge (desktop or CLI) holds this account.
-
-        Both the account the bridge runs on right now (`account`) and the pool it may
-        switch to (`accounts`, recorded since 0.8.0) count. Reading only `account` let
-        `remove --purge` delete the login a running bridge would have moved to when its
-        current account hits the weekly limit: the bridge keeps running, and the switch
-        it was set up to make then fails with "selected account is disabled or removed"
-        against a profile directory that no longer exists. The pool is a claim on the
-        account for as long as the session lives, exactly like the current selection.
-        """
-        candidates = [auto_dir(self.root) / ".bridge.lock"]
-        cli_runs = cli_runs_dir(self.root)
-        try:
-            if cli_runs.is_dir():
-                candidates += [run_dir / ".bridge.lock" for run_dir in cli_runs.iterdir() if run_dir.is_dir()]
-        except OSError:
-            return False
-        for lock_path in candidates:
-            try:
-                if not lock_path.exists():
-                    continue
-                fd = os.open(lock_path, os.O_RDONLY)
-            except OSError:
-                continue
-            try:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    try:
-                        state = json.loads((lock_path.parent / "status.json").read_text())
-                    except (OSError, ValueError):
-                        state = None
-                    if isinstance(state, dict):
-                        pool = state.get("accounts")
-                        if state.get("account") == name or (isinstance(pool, list) and name in pool):
-                            return True
-                else:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
-        return False
+        return self._registry.auto_session_running(name)
 
     def purge_target(self, name, entry):
-        """The directory `--purge` deletes for a managed account: the profile its record names.
-
-        `remove --purge` deleted `<root>/profiles/<name>` and never compared it with the
-        recorded `home`. The two agree only for a profile this root created and nothing has
-        moved since; when they differ -- a registry restored or copied under another
-        CODEX_SWAP_HOME, a hand-edited `home` -- the purge reported "Deleted the managed
-        profile at ..." while the login it had just dropped stayed on disk, and it deleted
-        whatever the convention path happened to hold instead. Only a human can say which of
-        the two was meant, so name both and delete neither.
-        """
-        target = profile_dir(self.root, name)
-        recorded = Path(entry["home"])
-        if recorded != target / "codex":
-            raise SwapError(f"{name}'s recorded home is {recorded}, but --purge deletes the managed profile at "
-                            f"{target}, which is not where that login lives. Refusing to delete a directory this "
-                            f"registry does not name: run xswap remove {name} without --purge, then delete "
-                            f"{recorded} yourself if you no longer want it.")
-        return target
+        return self._registry.purge_target(name, entry)
 
     def remove(self, name, purge=False):
-        from xswap.codex_cli import read_settings
-        with self.locked():
-            name, home = self.account(name)
-            settings = read_settings(self)
-            if settings.get("enabled") and name in settings.get("accounts", []):
-                raise SwapError(f"{name} is in the automatic switching pool. Run xswap auto-disable or auto-enable with a new pool first.")
-            if self._auto_session_running(name):
-                raise SwapError(f"{name} is used by a running auto session.")
-            data = self.read()
-            # Before anything is dropped: a purge that cannot name its directory must leave the
-            # registry entry in place, so the account can still be removed without --purge.
-            target = self.purge_target(name, data["accounts"][name]) if purge and data["accounts"][name].get("managed") else None
-            entry = data["accounts"].pop(name)
-            if data["active"] == name:
-                data["active"] = None
-            atomic_json(self.registry, data)
-            self._forget_usage(name)
-            self._forget_auth_failure(name)
-            purged = False
-            kept = entry["home"]
-            if target is not None:
-                resolved = target.resolve()
-                if (resolved != target or resolved.is_symlink() or not resolved.is_dir()
-                        or resolved.stat().st_uid != os.getuid()):
-                    raise SwapError(f"{name} was already removed from the registry. Refusing to purge an unexpected "
-                                     f"profile directory: its files were left untouched at {target}.")
-                shutil.rmtree(resolved)
-                purged = True
-                kept = None
-        return {"removed": name, "purged": purged, "kept": kept}
+        return self._registry.remove(name, purge)
 
-    def env(self, home):
-        env = os.environ.copy()
-        # A caller's API key or workload identity must not silently select another account.
-        # XSWAP_BYPASS with them: exported in the shell that started this launch, it followed the
-        # pool account's home into every nested `codex` and turned the wrapper off inside the one
-        # session xswap had just set up -- with this home already on CODEX_HOME, that is a session
-        # whose selection nothing can change. One command's own bypass stays that command's.
-        # The endpoint and trust variables below are the ones the Codex CLI itself reads: left in
-        # place, a value exported in the calling shell decided where the account xswap had just
-        # selected sent its refresh token (CODEX_REFRESH_TOKEN_URL_OVERRIDE,
-        # CODEX_REVOKE_TOKEN_URL_OVERRIDE), which backend answered for its usage and plan
-        # (CODEX_APP_SERVER_CHATGPT_BASE_URL, OPENAI_BASE_URL), which CA chain that traffic was
-        # checked against (CODEX_CA_CERTIFICATE), and where its conversation database lived
-        # (CODEX_SQLITE_HOME, the one home-shaped variable CODEX_HOME does not cover). The
-        # federation set is the OPENAI_ spelling of the workload identity already stripped here:
-        # an exchanged token authenticates a session as something other than the login in this
-        # home, which is the selection silently not applying.
-        for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_ELECTRON_USER_DATA_PATH",
-                    "XSWAP_BYPASS", "CODEX_APP_SERVER_CHATGPT_BASE_URL", "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
-                    "CODEX_REVOKE_TOKEN_URL_OVERRIDE", "CODEX_CA_CERTIFICATE", "CODEX_SQLITE_HOME",
-                    "OPENAI_BASE_URL", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_FEDERATION_RULE_ID"):
-            env.pop(key, None)
-        for key in list(env):
-            if key.startswith(("CODEX_WORKLOAD_IDENTITY_", "OPENAI_WORKLOAD_IDENTITY_")):
-                env.pop(key)
-        env["CODEX_HOME"] = str(home)
-        return env
+    # -- directory mappings ----------------------------------------------------
 
-    def codex(self):
-        executable = shutil.which("codex")
-        if not executable:
-            raise SwapError("codex is not installed or not in PATH.")
-        from xswap.codex_cli import dependency_entry, read_settings, reconnect_wrapper, recorded_real_codex, wrapped_target
-        reconnect_wrapper(self)
-        settings = read_settings(self)
-        wrapper = settings.get("wrapper")
-        # Any xswap-codex, not only the recorded proxy: a second install ahead on PATH (a project
-        # venv, pipx beside uv) was returned as the real Codex, so every launch exec'd xswap-codex,
-        # which exec'd itself. Same widening for the recorded realCodex, which is how a record
-        # written before this fix spells that loop.
-        if wrapper and (Path(executable).resolve() == Path(wrapper["proxy"]).resolve()
-                        or wrapped_target(executable, settings)):
-            recorded = wrapper["realCodex"]
-            # recorded_real_codex refuses a value that is not absolute: 0.7.8 wrote one whenever
-            # the entry it wrapped was relative, and resolving it here execs whatever `codex` the
-            # working directory holds -- with a pool account's CODEX_HOME.
-            real = recorded_real_codex(settings)
-            if not real or not Path(real).is_file() or wrapped_target(real, settings):
-                names = ",".join(name for name, _ in self.enabled_accounts()) or "NAME,NAME"
-                where = (f"{recorded} is not an absolute path" if real is None and recorded
-                         else f"{recorded} is missing or is xswap-codex itself" if recorded
-                         else "auto.json records no realCodex")
-                raise SwapError(f"Original Codex binary is unavailable ({where}). "
-                                f"Recover: xswap auto-disable, reinstall Codex, then xswap auto-enable --accounts {names} --wrap-codex")
-            return real
-        # shutil.which joins the raw PATH element, so a relative one (a project's `bin`, the empty
-        # element POSIX reads as the working directory) returns a relative path: the `codex` of
-        # whatever directory xswap happens to run in. Every caller execs this with a pool account's
-        # CODEX_HOME, which would hand a project-controlled file that account's auth.json, and the
-        # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
-        # refuses and doctor reports as bypassed, so run the recorded release instead of it.
-        if not os.path.isabs(executable):
-            real = recorded_real_codex(settings)
-            if real and Path(real).is_file():
-                return real
-            raise SwapError(relative_entry_message("codex", executable))
-        # The same one step out: npm writes `node_modules/.bin/codex` for a project that depends
-        # on @openai/codex, and that directory reaches PATH absolutely (direnv, a Makefile, an IDE
-        # task). Exec'ing it hands a project-controlled file a pool account's CODEX_HOME. xswap
-        # never adopts such an entry (DEPENDENCY_REASON), so run the recorded release instead.
-        if dependency_entry(executable, os.path.realpath(executable)):
-            real = recorded_real_codex(settings)
-            if real and Path(real).is_file():
-                return real
-        return executable
+    def _best_mapping(self, data, cwd=None):
+        return self._mappings.best_mapping(data, cwd)
+
+    def resolve_default(self, cwd=None):
+        return self._mappings.resolve_default(cwd)
+
+    def default_account(self, cwd=None):
+        return self._mappings.default_account(cwd)
+
+    def mapped_source(self, cwd=None):
+        return self._mappings.mapped_source(cwd)
+
+    def map_dir(self, name, path=None):
+        return self._mappings.map_dir(name, path)
+
+    def unmap_dir(self, path=None):
+        return self._mappings.unmap_dir(path)
+
+    def list_mappings(self):
+        return self._mappings.list_mappings()
+
+    # -- usage cache and quota rows -------------------------------------------
 
     def usage_cache_path(self):
-        return self.root / "usage-cache.json"
+        return self._usage.path()
 
     def cached_usage(self, name, label, max_age):
-        """Return {"buckets", "fetchedAt"} from a still-fresh cache entry, or None.
-
-        A saved entry whose identity label no longer matches the account's current
-        login (a re-login under the same name) is treated as a miss, not reused.
-        """
-        if not max_age or max_age <= 0:
-            return None
-        try:
-            data = json.loads(self.usage_cache_path().read_text())
-        except (OSError, ValueError):
-            return None
-        entry = data.get(name) if isinstance(data, dict) else None
-        if not isinstance(entry, dict) or entry.get("identity") != label:
-            return None
-        fetched_at, buckets = entry.get("fetchedAt"), entry.get("buckets")
-        if not isinstance(fetched_at, (int, float)) or isinstance(fetched_at, bool) or not isinstance(buckets, list):
-            return None
-        if time.time() - fetched_at > max_age:
-            return None
-        return {"buckets": buckets, "fetchedAt": fetched_at, "resetCredits": entry.get("resetCredits")}
+        return self._usage.cached(name, label, max_age)
 
     def _forget_usage(self, name):
-        """Drop a removed account's cache entry (label may be an email). Caller holds the lock."""
-        try:
-            data = json.loads(self.usage_cache_path().read_text())
-        except (OSError, ValueError):
-            return
-        if isinstance(data, dict) and data.pop(name, None) is not None:
-            atomic_json(self.usage_cache_path(), data)
+        """Caller holds the lock (see `remove` and `after_login`)."""
+        return self._usage.forget(name)
 
     def _still_registered(self, name):
-        """Whether NAME is still in the registry. Caller holds the lock.
-
-        A usage fetch takes seconds, and `remove` drops the account's cache and auth-state
-        entries under the same lock; a fetch already in flight then wrote them back after the
-        removal, so `usage-cache.json` and `auth-state.json` kept naming an account that no
-        longer exists -- with its identity label, which is an email -- and a later `xswap add`
-        under the same name inherited the removed login's rejection. An unreadable registry is
-        someone else's error to report: keep the write rather than drop data over it.
-        """
-        try:
-            return name in self.read()["accounts"]
-        except SwapError:
-            return True
+        """Caller holds the lock."""
+        return self._usage.still_registered(name)
 
     def remember_usage(self, name, buckets, fetched_at, label, reset_credits=None):
-        """Whitelisted normalized fields only; never raw responses or tokens. Always 0600."""
-        with self.locked():
-            if not self._still_registered(name):
-                return
-            try:
-                data = json.loads(self.usage_cache_path().read_text())
-                if not isinstance(data, dict):
-                    data = {}
-            except (OSError, ValueError):
-                data = {}
-            data[name] = {"buckets": buckets, "fetchedAt": fetched_at, "identity": label, "resetCredits": reset_credits}
-            atomic_json(self.usage_cache_path(), data)
-
-    def auth_state_path(self):
-        return self.root / "auth-state.json"
-
-    def _read_auth_state(self):
-        """{name: {"failedAt", "reason", "identity"}} or {} when absent/unreadable/not an object."""
-        try:
-            data = json.loads(self.auth_state_path().read_text())
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def auth_failure(self, name, label):
-        """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
-        nothing has cleared it since, else None. Like cached_usage, an entry recorded under
-        another login label (a re-login under the same name) is a miss, not reused.
-        Read-only: doctor and offline views call this without taking the lock.
-        """
-        entry = self._read_auth_state().get(name)
-        if not isinstance(entry, dict) or entry.get("identity") != label:
-            return None
-        failed_at = entry.get("failedAt")
-        if not isinstance(failed_at, (int, float)) or isinstance(failed_at, bool):
-            return None
-        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
-
-    def remember_auth_failure(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
-        """Record a service-rejected login for NAME's current label. Keeps the first failedAt
-        while the same login keeps failing, so doctor's "since" is the first rejection and a
-        30-minute alert job does not rewrite the file. Labels only (may be an email); never
-        tokens. Always 0600 through atomic_json.
-        """
-        with self.locked():
-            if not self._still_registered(name):
-                return
-            data = self._read_auth_state()
-            current = data.get(name)
-            if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
-                    and isinstance(current.get("failedAt"), (int, float)) and not isinstance(current.get("failedAt"), bool)):
-                return
-            data[name] = {"failedAt": time.time() if failed_at is None else failed_at, "reason": reason, "identity": label}
-            atomic_json(self.auth_state_path(), data)
-
-    def _forget_auth_failure(self, name):
-        """Drop NAME's entry whatever its label. Caller holds the lock (mirrors _forget_usage)."""
-        data = self._read_auth_state()
-        if data.pop(name, None) is not None:
-            atomic_json(self.auth_state_path(), data)
-
-    def clear_auth_failure(self, name):
-        """A successful fetch clears the record; no lock and no write when there is none."""
-        if name not in self._read_auth_state():
-            return
-        with self.locked():
-            self._forget_auth_failure(name)
+        return self._usage.remember(name, buckets, fetched_at, label, reset_credits)
 
     def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
-        label = identity(home)
-        row = {"name": name, "identity": label, "status": "offline", "buckets": [], "resetCredits": None, "fetchedAt": None, "disabled": disabled, "cached": False}
-        if disabled:
-            row["status"] = "disabled"
-        elif label in ("not signed in", "unreadable auth cache"):
-            row["status"] = label
-        elif label == "API key":
-            row["status"] = "API key: subscription quota not available"
-        elif (offline or max_age) and self.auth_failure(name, label) is not None:
-            # The usage service rejected this login and nothing has cleared it: cached and
-            # offline views say so without spawning Codex and without reusing an older cache
-            # entry. A live read (no --cached) still tries again; a success clears the record.
-            row["status"] = AUTH_FAILED_STATUS
-        elif not offline:
-            cached = self.cached_usage(name, label, max_age)
-            if cached is not None:
-                row.update(status="ok (cached)", buckets=cached["buckets"], fetchedAt=cached["fetchedAt"], resetCredits=cached["resetCredits"], cached=True)
-            else:
-                try:
-                    check_file_store(home)
-                    response = read_limits(self.codex(), self.env(home))
-                    buckets, fetched_at = normalize_limits(response), time.time()
-                    row.update(status="ok", buckets=buckets, fetchedAt=fetched_at,
-                               resetCredits=normalize_reset_credits(response))
-                    self.remember_usage(name, buckets, fetched_at, label, row["resetCredits"])
-                    self.clear_auth_failure(name)
-                except (UsageError, SwapError) as error:
-                    row["status"] = f"usage unavailable: {error}"
-                    if is_sign_in_failure(error):
-                        self.remember_auth_failure(name, label)
-                except OSError:
-                    row["status"] = "usage unavailable: cannot start Codex CLI"
-        return row
+        return self._usage.account_usage(name, home, offline=offline, disabled=disabled, max_age=max_age)
 
     def account_rows(self, name=None, offline=False, max_age=None):
-        data = self.read()
-        enabled_names = {n for n, _ in self.enabled_accounts()}
-        if name is not None:
-            selected, home = self.account(name)
-            accounts = [(selected, home, selected not in enabled_names)]
-        else:
-            accounts = [(key, Path(value["home"]), key not in enabled_names) for key, value in data["accounts"].items()]
-        # Every server has its own account home; no global authentication switch is needed.
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(accounts)))) as pool:
-            rows = list(pool.map(lambda item: self.account_usage(item[0], item[1], offline=offline, disabled=item[2], max_age=max_age), accounts))
-        slots = {key: index for index, key in enumerate(data["accounts"], 1)}
-        for row in rows:
-            row["slot"] = slots[row["name"]]
-            row["active"] = row["name"] == data["active"]
-        return rows
+        return self._usage.account_rows(name, offline, max_age)
 
     def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None, lang="en"):
-        if short and json_output:
-            raise SwapError("--short and --json are mutually exclusive.")
-        rows = self.account_rows(name, offline, max_age)
-        if short:
-            # An explicit `usage NAME --short` always shows that one account, even if
-            # disabled; the aggregate `list --short` omits disabled accounts instead.
-            print(short_line(rows if name is not None else [r for r in rows if not r.get("disabled")]))
-            return rows
-        if json_output:
-            print(json.dumps(rows, ensure_ascii=False, indent=2))
-            return rows
-        from xswap.display import render
-        from xswap.codex_cli import bridge_hints, status_data
-        # The text dashboard is a sweep point; --json/--short above stay read-only.
-        state = status_data(self)
-        print(render(rows, state, include_spark, details, lang=lang, sessions=state["sessions"],
-                     hints=bridge_hints(self, state, __version__)))
-        return rows
+        return self._usage.show_accounts(name, offline, json_output, include_spark, details, short, max_age, lang)
 
     def best_account(self, model=None, exclude=(), max_age=None):
-        """Pick the signed-in account with the most codex headroom right now.
+        return self._usage.best_account(model, exclude, max_age)
 
-        A one-shot choice for launchers (like `codex exec`) that have no
-        `--remote` hook and so cannot be protected by the live auto bridge.
-        """
-        # Reuse the single parallel-fetch implementation; rank_candidates drops disabled/excluded rows.
-        return rank_candidates(self.account_rows(max_age=max_age), model, exclude)
+    # -- auth-failure record ---------------------------------------------------
+
+    def auth_state_path(self):
+        return self._auth.path()
+
+    def _read_auth_state(self):
+        return self._auth.read()
+
+    def auth_failure(self, name, label):
+        return self._auth.failure(name, label)
+
+    def remember_auth_failure(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
+        return self._auth.remember(name, label, reason, failed_at)
+
+    def _forget_auth_failure(self, name):
+        """Caller holds the lock (see `remove` and `after_login`)."""
+        return self._auth.forget(name)
+
+    def clear_auth_failure(self, name):
+        return self._auth.clear(name)
+
+    # -- OpenClaw --------------------------------------------------------------
 
     def sync_openclaw(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
-        # Directory mappings scope a single launched session; OpenClaw sync mutates
-        # shared agent state, so an omitted/pooled name must resolve through the
-        # active account only, never a directory mapping.
-        pool = parse_pool(names) if isinstance(names, list) else [names]
-        resolved = []
-        for entry in pool:
-            entry_name, entry_home = self.account(entry, mapped=False)
-            self.require_enabled(entry_name)
-            check_file_store(entry_home)
-            resolved.append((entry_name, entry_home))
-        if len(resolved) > 1 and not allow_mixed:
-            groups = {}
-            for entry_name, entry_home in resolved:
-                org = chatgpt_org_id(entry_home, entry_name)
-                groups.setdefault(org, []).append(entry_name)
-            if len(groups) > 1:
-                pretty = ", ".join("[" + ", ".join(names_in_group) + "]" for names_in_group in groups.values())
-                raise SwapError(f"Pooled accounts belong to different ChatGPT organizations: {pretty}. OpenClaw shares one agent's conversation context across whatever it selects from the pool, so mixing organizations mixes their context across accounts. Pass --allow-mixed to override.")
-        name, home = resolved[0]
-        # absolute_which refuses a relative answer instead of returning it: from a repository
-        # whose PATH starts with `bin`, shutil.which handed back `bin/node`, and the two
-        # subprocesses below ran that project's own file with the account's CODEX_HOME -- and
-        # with every pooled account's codexHome on its stdin -- while `openclaw secrets reload`
-        # went to the same directory's `bin/openclaw`.
-        executable = absolute_which("openclaw", error=SwapError)
-        node = absolute_which("node", error=SwapError)
-        if not executable or not node:
-            raise SwapError("OpenClaw sync requires openclaw and node in PATH.")
-        package_root = resolve_openclaw_package_root(executable)
-        if package_root is None:
-            raise SwapError("Cannot locate OpenClaw's installed package through its executable. Use the standard npm installation.")
-        helper = Path(__file__).resolve().parent / "bridge" / "openclaw.mjs"
-        # Keep the single-account "account"/"codexHome" keys byte-compatible; "accounts" carries the full pool.
-        request = {"account": name, "codexHome": str(home),
-                   "accounts": [{"name": entry_name, "codexHome": str(entry_home)} for entry_name, entry_home in resolved],
-                   "packageRoot": str(package_root), "agents": agents or [], "dryRun": dry,
-                   "backupRoot": str(Path(backup_dir).expanduser().resolve() if backup_dir else self.root / "backups" / "openclaw")}
-        # Serialize xswap mutations across the bridge + Gateway reload. OpenClaw also locks its own stores.
-        with self.locked():
-            result = subprocess.run([node, str(helper)], input=json.dumps(request), text=True,
-                                    capture_output=True, env=self.env(home), timeout=90)
-            try:
-                output = json.loads(result.stdout.strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                raise SwapError("OpenClaw SDK bridge failed. Check the installed OpenClaw version (tested: 2026.8.1).") from None
-            if result.returncode or output.get("error"):
-                raise SwapError(output.get("error", "OpenClaw credential update failed."))
-            if dry:
-                print(json.dumps(output, indent=2))
-                return output
-            reload_result = subprocess.run([executable, "secrets", "reload", "--json"],
-                                           capture_output=True, text=True, env=self.env(home), timeout=45)
-            try:
-                reload_json = json.loads(reload_result.stdout)
-            except ValueError:
-                reload_json = {}
-            if reload_result.returncode or reload_json.get("ok") is not True:
-                raise SwapError(f"OpenClaw auth was saved for {len(output['completed'])} agents, but Gateway reload failed. Start/check the local Gateway, then run: openclaw secrets reload. Backup: {output['backup']}")
-            if reload_json.get("warningCount", 0):
-                raise SwapError("OpenClaw auth was saved and reloaded with warnings. Run openclaw secrets reload --json and inspect them before continuing.")
-            if select:
-                data = self.read()
-                data["active"] = name
-                atomic_json(self.registry, data)
-        label = ", ".join(entry_name for entry_name, _ in resolved)
-        rotates = " to rotate on its own cooldowns" if len(resolved) > 1 else ""
-        print(f"OpenClaw now selects {label} for {len(output['completed'])} agents{rotates}; Gateway auth reloaded.\nBackup: {output['backup']}")
-        return output
+        return self._openclaw.sync(names, agents, dry, backup_dir, select, allow_mixed)
 
     def clear_openclaw_cooldown(self, names=None, dry=False, yes=False, backup_dir=None):
-        """Clear a stale OpenClaw auth-profile cooldown (one 429 lasts until its reset
-        time even after the real limit is gone) for the given account(s), or every
-        registered account when none are named. Stops the local Gateway before writing
-        and restarts it after; a failed stop aborts before the database is touched.
-        """
-        from xswap.openclaw_state import OpenClawStateError, clear_cooldown, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+        return self._openclaw.clear_cooldown(names, dry, yes, backup_dir)
 
-        data = self.read()
-        if names:
-            pool = names if isinstance(names, list) else [names]
-            entries = []
-            for entry in pool:
-                entry_name, entry_home = self.account(entry, mapped=False)
-                entries.append((entry_name, entry_home))
-        else:
-            entries = [(name, Path(value["home"])) for name, value in data["accounts"].items()]
-        if not entries:
-            raise SwapError("No registered accounts to check.")
+    # -- launching -------------------------------------------------------------
 
-        sqlite_path = default_sqlite_path()
-        if not sqlite_path.exists():
-            raise SwapError(f"OpenClaw state database not found: {sqlite_path}")
-        try:
-            cooldowns = read_cooldowns(sqlite_path)
-        except OpenClawStateError as exc:
-            raise SwapError(str(exc)) from None
+    def env(self, home):
+        return self._launcher.env(home)
 
-        targets = []  # [(name, profile_id)]
-        for entry_name, entry_home in entries:
-            profile_id = profile_id_for_home(entry_home)
-            if profile_id and profile_id in cooldowns:
-                targets.append((entry_name, profile_id))
-
-        if not targets:
-            print("No stale OpenClaw cooldowns found.")
-            return {"cleared": []}
-
-        for entry_name, profile_id in targets:
-            info = cooldowns[profile_id]
-            reason = info.get("blockedReason") or "unknown"
-            print(f"{entry_name} ({profile_id}): blocked {format_until(info['blockedUntil'])} ({reason})")
-
-        if dry:
-            print("Dry run: no changes made; the Gateway was not stopped.")
-            return {"cleared": [], "dryRun": True}
-
-        # The same lookup, and the same stop/start of the user's Gateway through whatever the
-        # working directory holds if it is allowed to be relative.
-        executable = absolute_which("openclaw", error=SwapError)
-        if not executable:
-            raise SwapError("OpenClaw sync requires openclaw in PATH.")
-
-        if not yes:
-            if not sys.stdin.isatty():
-                raise SwapError("Confirm with --yes.")
-            prompt = f"Stop the Gateway and clear {len(targets)} OpenClaw cooldown(s)? [y/N] "
-            if input(prompt).strip().lower() != "y":
-                print("Aborted.")
-                return {"cleared": [], "aborted": True}
-        backup_root = Path(backup_dir).expanduser().resolve() if backup_dir else self.root / "backups" / "openclaw-cooldown"
-
-        with self.locked():
-            stop = subprocess.run([executable, "gateway", "stop", "--force"],
-                                  capture_output=True, text=True, env=self.env(self.source), timeout=45)
-            if stop.returncode:
-                raise SwapError("OpenClaw Gateway stop failed; the database was not touched. "
-                                 f"{(stop.stderr or stop.stdout).strip() or 'unknown error'}")
-            try:
-                backup_path = clear_cooldown(sqlite_path, [pid for _, pid in targets], backup_root)
-            except OpenClawStateError as exc:
-                raise SwapError(f"Cooldown clear failed after the Gateway was stopped; restart it manually: "
-                                 f"openclaw gateway start. {exc}") from None
-            start = subprocess.run([executable, "gateway", "start"],
-                                   capture_output=True, text=True, env=self.env(self.source), timeout=45)
-            if start.returncode:
-                raise SwapError(f"Cleared the cooldown (backup: {backup_path}), but OpenClaw Gateway start failed; "
-                                 f"run: openclaw gateway start. {(start.stderr or start.stdout).strip() or 'unknown error'}")
-
-        cleared = [entry_name for entry_name, _ in targets]
-        print(f"Cleared {len(targets)} OpenClaw cooldown(s): {', '.join(cleared)}.\nBackup: {backup_path}")
-        return {"cleared": cleared, "backup": str(backup_path)}
+    def codex(self):
+        return self._launcher.codex()
 
     def login(self, name, device_auth=False, lang="en"):
-        name, home = self.account(name)
-        check_file_store(home)
-        command = [self.codex(), "login"] + (["--device-auth"] if device_auth else [])
-        result = subprocess.call(command, env=self.env(home))
-        if not result:
-            print(f"Signed in {name}: {identity(home)}")
-            self.after_login(name, home, lang=lang)
-        return result
+        return self._launcher.login(name, device_auth, lang)
 
     def after_login(self, name, home, lang="en"):
-        """A (re-)login changes what the usage service says and what running
-        bridges hold. Drop the cached quota entry and read it live once, then
-        ask bridges already on this account to re-authenticate in place.
-        Sessions on other accounts are untouched: they read the home again the
-        next time they consider it. Bridges before 0.7.2 need reopening once."""
-        from xswap.display import summary
-        from xswap.switch import switch_running
-        with self.locked():
-            self._forget_usage(name)
-            self._forget_auth_failure(name)
-        row = self.account_usage(name, home)
-        if row["status"] == "ok":
-            item = summary(row, lang=lang)
-            print(f"{name} weekly: {item['summary']}" + (f" · {item['reset']}" if item['reset'] else ""))
-        else:
-            print(f"{name} usage: {row['status']}")
-        report = switch_running(self, name, only_current=True)
-        print(describe_login_report(report, name))
+        return self._launcher.after_login(name, home, lang)
 
     def launch_cli(self, name, args, dry=False):
-        from xswap.codex_cli import read_settings, interactive_args, launch_cli
-        settings = read_settings(self)
-        if name is None and settings.get("enabled") and interactive_args(args):
-            return launch_cli(self, ','.join(settings["accounts"]), args, dry)
-        name, home = self.account(name)
-        check_file_store(home)
-        command = [self.codex(), *args]
-        if dry:
-            print(json.dumps({"account": name, "CODEX_HOME": str(home), "argv": command}, indent=2))
-            return 0
-        ensure_plugins(home, self.source)
-        link_packages(self, home)  # no-op for a registered external home
-        try:
-            return subprocess.call(command, env=self.env(home))
-        finally:
-            # `upgrade`/`update` reach this branch (they are non-interactive), and Codex's
-            # standalone updater re-points the wrapped `codex` entry on its way out. xswap
-            # still holds this process, so repair the entry here the way launch_cli's own
-            # exit path does; without it `xswap run -- upgrade` left plain `codex` running
-            # against the caller's home -- the 2026-09-10 bypass, re-created by xswap.
-            with contextlib.suppress(LiveError, OSError, SwapError):
-                from xswap.codex_cli import reconnect_wrapper
-                reconnect_wrapper(self)
+        return self._launcher.launch_cli(name, args, dry)
 
     def launch_auto_app(self, accounts, app=None, dry=False):
-        from xswap.live import AccountPool, LiveError
-        names = [value.strip() for value in (accounts or '').split(',') if value.strip()]
-        real = self.codex()
-        try:
-            AccountPool(self, names, real)
-        except LiveError as exc:
-            raise SwapError(str(exc)) from None
-        if sys.platform != "darwin":
-            raise SwapError("Auto desktop mode is macOS only.")
-        # A relative hit was absolutised against the working directory by Path(bridge).resolve()
-        # below and handed to the desktop app as CODEX_CLI_PATH: the app then ran a file the
-        # current project controls as its Codex CLI, for the whole life of that window.
-        bridge = absolute_which("xswap-proxy", error=SwapError)
-        if not bridge:
-            raise SwapError("Install xswap 0.3.0 to provide xswap-proxy.")
-        candidates = [Path(app)] if app else [Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app")]
-        bundle = next((path for path in candidates if path.is_dir()), None)
-        if not bundle:
-            raise SwapError("Desktop app not found; use --app /path/to/ChatGPT.app")
-        root = auto_dir(self.root)
-        home, desktop = root / "codex", root / "desktop"
-        env_values = {"CODEX_HOME": str(home), "CODEX_ELECTRON_USER_DATA_PATH": str(desktop),
-                      "CODEX_CLI_PATH": str(Path(bridge).resolve()), "CODEX_APP_SERVER_FORCE_CLI": "1",
-                      "XSWAP_REAL_CODEX": str(Path(real).resolve()), "XSWAP_ACCOUNTS": ','.join(names),
-                      "CODEX_SWAP_HOME": str(self.root)}
-        command = ["/usr/bin/open", "-n"]
-        for key, value in env_values.items():
-            command.extend(["--env", f"{key}={value}"])
-        command.extend([str(bundle), "--args", f"--user-data-dir={desktop}"])
-        if dry:
-            print(json.dumps({"mode": "auto", "accounts": names, "argv": command}, indent=2))
-            return 0
-        for path in (root, home, desktop):
-            private_dir(path)
-        _, source = self.account(names[0])
-        # Shared tooling; the auto window owns its own conversation store. Auth stays in source homes.
-        for entry in ("config.toml", "AGENTS.md", "skills", "rules"):
-            src, dst = source / entry, home / entry
-            if src.exists() and not dst.exists() and not dst.is_symlink():
-                # Two launches share this runtime home and neither holds the registry lock here,
-                # so the other one can create the same link between the test and the call. The
-                # link it created is the link this one was about to create, so the loser has
-                # nothing to do -- but the FileExistsError reached codex_main, which reports
-                # every OSError as "could not start automatic Codex CLI" and advises
-                # `xswap auto-disable`, i.e. tearing the wrapper down over a won race.
-                with contextlib.suppress(FileExistsError):
-                    dst.symlink_to(src, target_is_directory=src.is_dir())
-        ensure_plugins(home, source)
-        link_packages(self, home)
-        result = subprocess.run(command, env=self.env(home), capture_output=True)
-        if result.returncode:
-            raise SwapError("Auto desktop launch failed.")
-        print("Opened auto-mode desktop: " + " -> ".join(names) +
-              ". This window keeps its threads across account changes. Existing windows are unchanged.")
-        return 0
+        return self._launcher.launch_auto_app(accounts, app, dry)
 
     def launch_app(self, name, app=None, dry=False):
-        name, home = self.account(name)
-        check_file_store(home)
-        if sys.platform != "darwin":
-            raise SwapError("Desktop launcher currently supports macOS only.")
-        candidates = [Path(app)] if app else [Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app")]
-        bundle = next((p for p in candidates if p.is_dir()), None)
-        if not bundle:
-            raise SwapError("Desktop app not found; specify --app /path/to/ChatGPT.app")
-        desktop = profile_dir(self.root, name) / "desktop"
-        command = ["/usr/bin/open", "-n", "--env", f"CODEX_HOME={home}", "--env", f"CODEX_ELECTRON_USER_DATA_PATH={desktop}", str(bundle), "--args", f"--user-data-dir={desktop}"]
-        if dry:
-            print(json.dumps({"account": name, "argv": command}, indent=2))
-            return 0
-        private_dir(desktop.parent)
-        private_dir(desktop)
-        ensure_plugins(home, self.source)
-        link_packages(self, home)  # no-op for a registered external home
-        result = subprocess.run(command, env=self.env(home), capture_output=True)
-        if result.returncode:
-            raise SwapError("Desktop launch failed. Confirm that the app path exists and macOS permits launching it.")
-        print(f"Opened {name}. Existing windows keep their own account; verify this window's profile menu.")
-        return 0
-
+        return self._launcher.launch_app(name, app, dry)
 
 def parser():
     p = argparse.ArgumentParser(description="Codex account switcher for CLI + macOS desktop. Bare xswap opens the selected CLI account.")
