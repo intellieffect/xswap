@@ -36,5 +36,29 @@ class LeafModules(unittest.TestCase):
         self.assertLessEqual(imported_by("xswap.locking"), PACKAGE | {"xswap.locking", "xswap.errors"})
 
 
+class CollaboratorModules(unittest.TestCase):
+    """`Manager`'s collaborators must not import their own facade.
+
+    `manager` imports every one of them at module level, so a top-level
+    `import xswap.manager` back would be a cycle -- and a lazy one inside a
+    function would quietly re-create the god object this split removed.
+    `codex_cli` is listed with it because it imports `manager`, so reaching it
+    at import time is the same cycle one step out. Both are still allowed
+    *inside* a function body, which is how `registry` and `launcher` reach
+    `read_settings`; only the import-time graph is checked here.
+    """
+
+    MODULES = ("xswap.ranking", "xswap.identity", "xswap.reports", "xswap.registry",
+               "xswap.mappings", "xswap.usage_cache", "xswap.auth_state",
+               "xswap.openclaw_sync", "xswap.launcher")
+
+    def test_collaborators_do_not_import_the_facade(self):
+        for module in self.MODULES:
+            with self.subTest(module=module):
+                imported = imported_by(module)
+                self.assertNotIn("xswap.manager", imported)
+                self.assertNotIn("xswap.codex_cli", imported)
+
+
 if __name__ == "__main__":
     unittest.main()
