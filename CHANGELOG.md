@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-09-19
+
+Structural release: no user-visible behavior change beyond `schemaVersion` on the object-shaped `--json` payloads and one message losing the words "or codex". The old flat module names (`codex_swap`, `xswap_cli`, `xswap.usage`, ...) still import for this release and are removed in the next.
 
 - Annotated the public surface of `src/xswap` -- every non-underscore function and method now carries parameter and return types, in dependency order from the `core` leaves through `providers/base`, `providers/codex` and `manager` to `cli` -- and added `pyright` (basic mode, pinned in the `dev` group) as a CI gate alongside a broader `ruff` rule set (`F, E9, B, UP, I, SIM, RUF, PTH, S`) (INT-5612). Persisted dict shapes (the account record, usage-cache entries and rows, auth-state entries, the registry file, the JSON payloads) are now `TypedDict`s in `xswap.core.types`, matching what is already written to disk byte-for-byte. `src/xswap/py.typed` marks the package as typed. `tests/test_annotations.py` asserts the coverage stays complete. Behavior-neutral, with one real fix found by the checker: `CodexProvider.launch`'s unused `auto_pool` branch built a `list` where `launch_cli` expects a comma-joined string. (`AccountPool.__init__` now imports `validate_name` from `xswap.core.registry` directly; the old import through `xswap.manager` still resolved to the same object.)
 - Filled in project metadata (INT-5613): `keywords`, `Issues`/`Changelog` project URLs, and Python 3.11-3.14 classifiers. PyPI publishing itself is deferred.
