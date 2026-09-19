@@ -6,7 +6,7 @@ import AppKit
 // environment usually carries no XSWAP_LANG/LANG at all (only PATH is
 // patched below for the subprocess call). It must not rely on the `xswap`
 // subprocess's own locale guess — it resolves language itself, the same
-// way `resolve_lang()` in xswap_display.py does, and passes `--lang`
+// way `resolve_lang()` in src/xswap/display.py does, and passes `--lang`
 // explicitly to the subprocess so the JSON text always matches the chrome.
 //
 // Every Hangul-bearing string in this file lives in the STRINGS table
@@ -55,7 +55,7 @@ let STRINGS: [String: [String: String]] = [
 // L10N_TABLE_END
 
 /// "en" unless XSWAP_LANG starts with "ko", or (XSWAP_LANG unset) LC_ALL/LANG
-/// starts with "ko". Mirrors `resolve_lang()` in xswap_display.py exactly,
+/// starts with "ko". Mirrors `resolve_lang()` in src/xswap/display.py exactly,
 /// since this process's own environment (not the subprocess's) is what a
 /// Finder/Dock/login-item launch actually carries.
 func resolveMenuLang(_ environment: [String: String]) -> String {
