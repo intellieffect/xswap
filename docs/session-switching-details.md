@@ -1,0 +1,43 @@
+# Session switching and resume protocol details
+
+This is the deep-dive companion to [Weekly dashboard and macOS menu bar](../README.md#weekly-dashboard-and-macos-menu-bar) in the README. It covers the manual `xswap switch`/`use` broadcast protocol, resume/fork behavior, and the run-record bookkeeping (pruning, `bridge.log`) that back it — none of which you need to read to just use xswap.
+
+## `xswap switch` / `use` broadcast
+
+`xswap switch NAME` (alias: `xswap use NAME`) now selects the default and sends a manual account change to **all running compatible auto-mode CLI/desktop bridges**. Idle bridges apply it immediately; busy bridges wait for all active turns to finish. The server process and conversation stay alive. The chosen registered account can be outside the automatic pool; the configured fallback pool and quota policy remain in effect for later turns.
+
+```sh
+```sh
+xswap switch work
+xswap auto-status                    # manualState: pending / applying / applied / failed
+xswap switch work --default-only      # Only change the default for future launches
+```
+```
+
+The command reports `applied`, `pending`, `unsupported`, `failed`, and `unconfirmed` counts. Only an acknowledged successful login counts as applied. Pending requests may take longer than the command's two-second acknowledgement window; check `auto-status`. Failure or unconfirmed delivery returns exit code 1; the saved default remains changed. Repeated requests to a busy bridge replace its pending selection with the latest one.
+
+**Existing older bridges and ordinary account-specific CLI/app sessions cannot receive this update.** Open an auto-mode session once with the updated installation. Compatibility is advertised as `manualSwitchVersion: 1`; installing files does not modify running Python processes. No processes are killed, no conversation is restarted, and account credential files are not copied. Requests contain account names and per-process IDs only, in private local files. Authentication uses the existing [OpenAI App Server external-token login](https://learn.chatgpt.com/docs/app-server#3c-log-in-with-externally-managed-chatgpt-tokens-chatgptauthtokens).
+
+Explicit `codex resume UUID` / `fork UUID` in automatic mode now locates that conversation in the current runtime, the original Codex home, or a registered account home. It reuses the owning home without copying the conversation and keeps the authentication bridge. The picker, named sessions, and `--last` remain scoped to the automatic runtime. Ambiguous duplicate UUIDs outside that runtime require choosing the original home explicitly.
+
+When an auto-mode CLI exits, use the final xswap resume command printed below Codex’s temporary remote reconnect address. It starts a new bridge and preserves the account pool, current account, and original session home; the old Unix socket is closed.
+
+With `--details`, earned resets appear separately as `codex reset credits: N available`, with expiry dates for available credits when provided. Missing availability is shown as `unknown`, not zero. `usage --json` includes `resetCredits`. Reading usage does not consume a reset.
+
+The in-session `/resume` picker shares the running app server through a separate browsing connection. Closing the picker keeps the main conversation and account switching alive. After `xswap upgrade`, sessions that were already open keep running the previous bridge until they are reopened. `xswap list` marks each one under Running sessions (`⚠ bridge 0.7.8 · reopen with codex resume UUID to load 0.8.0`; `xswap run -- resume UUID` when the `codex` command is not connected), `xswap doctor` reports them as WARN on the `auto cli-runs` row, and `xswap upgrade` prints the same lines after a successful install. A conversation is named only once it has been saved (at least one turn) by a 0.8.0 or newer bridge; older records and sessions without a saved conversation read `exit and reopen it`, desktop sessions `quit and reopen it with xswap app`. Exit the old session before resuming: it still holds the conversation's writer lock.
+
+Automatic CLI session pickers omit conversations locked by another writer. Explicit UUID resumes stop before starting the TUI if that conversation is still open elsewhere. Return to its existing window or close that session before resuming. Writer locks are never deleted. Reconnect hints use only conversation IDs with saved rollouts.
+
+CLI bridge status events are recorded for `xswap auto-status` without writing into the active TUI. Every failed event (`manual-switch-failed`, `candidate-unavailable`, `no-available-account`, `continuation-failed`, `refresh-failed`, `quota-check-failed`) carries a short classified `reason` (for example `usage service unavailable`), and the newest one stays in `lastFailure` until the bridge exits; a `stopped` record carries its own `reason` (for example `app-server exited`) but never replaces `lastFailure`, so a bridge that dies after a failed switch still names the switch. The run's `bridge.log` keeps one line per event in order, and the message printed after the TUI exits names that log when the session failed or recorded a failure; raw errors are never stored. If the usage service is unreachable while a session starts, the session still opens with `quotaKnown: false` and quota is re-read before the first turn.
+
+Each record also carries `verifiedAccount`, `verifiedIdentity`, `verifiedAt` (what the session's app server answered to `account/read` after its last login) and `verifyReason`; `account` alone is what the bridge sent. `xswap doctor` lists running sessions whose login was never confirmed, or whose account has since been signed in as someone else, in its `auto sessions` row.
+
+`xswap switch NAME` / `use NAME` also puts NAME first in the enabled automatic-mode pool, so new automatic CLI/app sessions follow the selection. Existing compatible bridges apply it when idle; active turns defer it. `--default-only` updates future launches without broadcasting.
+
+`xswap switch 1` / `xswap switch 2` selects the numbered account in `xswap list`; names such as `xswap switch main` still work. Disabled accounts keep their positions but cannot be selected. Removing an account renumbers subsequent positions. Use `xswap use NAME` for a numeric account name.
+
+## Run-record pruning and `bridge.log`
+
+Each auto CLI run leaves a small record under `auto/cli-runs/`. Records nobody will read again are removed as a side effect of `xswap auto-status`, the text output of `xswap list`/`usage` (so the `alert` job sweeps on its schedule), the menu bar's `dashboard` refresh, and every new bridged CLI launch: a record whose bridge ended cleanly (`stopped` without a `reason`) goes after 24 hours; a `stopped` record carrying a failure `reason`, or one whose bridge is gone without a `stopped` write (killed, crashed, rebooted), stays a week so the abnormal end remains visible; a directory holding nothing but a free lock file (the TUI exited before its bridge connected) goes after a minute. `auto-status --prune` removes every non-running record immediately. In every case a running bridge (its lock is held) and a record younger than 60 seconds are never removed, since a fresh record may still be between creation and its bridge taking its lock. `auto-status` lists what it removed under `prunedRuns` (run id, rule, age, account, last event, bridge version, stop reason); `list --json`/`--short`, `doctor`, and `upgrade` never remove anything.
+
+Each run directory also holds a `bridge.log`: one line per bridge event (local timestamp, event, account, the requested account or candidate, a short reason, and the exception type when something failed), created with mode 0600 and kept under 1 MiB by dropping its oldest lines. Failures are classified into short reasons -- for example `usage service unavailable`, `ChatGPT access token needs refresh or sign-in`, `selected account is disabled or removed`, `Codex rejected account/login/start`, `app-server request timed out` -- and never contain tokens, prompts, or raw errors. `xswap auto-status` shows the same reason as `manualReason` (why a manual switch is pending or failed, kept until the next request), `lastFailure` (the most recent failed event of the session), and each session's `log` path; `xswap use`/`switch`/`login` print it as `Failed: ...`, and a CLI session names the log when it exits after a failure.
