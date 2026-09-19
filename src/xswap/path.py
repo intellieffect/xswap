@@ -14,8 +14,10 @@ from __future__ import annotations
 import os
 import shutil
 
+from xswap.errors import XswapError
 
-class RelativeEntryError(Exception):
+
+class RelativeEntryError(XswapError):
     """`name` is on PATH only through a relative element."""
 
 

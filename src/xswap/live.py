@@ -23,10 +23,8 @@ import uuid
 
 from xswap.usage import UsageError, clean, is_sign_in_failure, normalize_limits, read_limits
 from xswap.credentials import CredentialError, read_auth
-
-
-class LiveError(Exception):
-    pass
+from xswap.errors import LiveError
+from xswap.paths import auto_dir
 
 
 class SignInRequired(LiveError):
@@ -816,7 +814,7 @@ def proxy_main():
         names = os.environ.get('XSWAP_ACCOUNTS', '').split(',')
         pool = AccountPool(manager, names, real)
         runtime = Path(os.environ['CODEX_HOME'])
-        if runtime != manager.root / 'auto' / 'codex':
+        if runtime != auto_dir(manager.root) / 'codex':
             raise LiveError('auto mode needs its dedicated runtime home')
         lock = os.open(runtime.parent / '.bridge.lock', os.O_CREAT | os.O_RDWR, 0o600)
         try:

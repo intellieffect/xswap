@@ -11,9 +11,7 @@ import subprocess
 import time
 
 
-class UsageError(Exception):
-    pass
-
+from xswap.errors import UsageError
 
 # read_limits' curated text for a 401-class answer (wording unchanged since 0.7.6). A fetch
 # classified this way is recorded per account in auth-state.json (codex_swap.Manager): before

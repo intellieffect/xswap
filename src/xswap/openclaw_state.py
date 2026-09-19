@@ -25,15 +25,12 @@ import stat
 import time
 
 from xswap.credentials import CredentialError, read_auth
+from xswap.errors import OpenClawStateError
 from xswap.live import jwt_claims
 
 # The single machine-wide key OpenClaw's shared auth-profile store persists
 # cooldown/order/lastGood state under (state_db table config_machine_state).
 STATE_KEY = "authProfiles.state"
-
-
-class OpenClawStateError(Exception):
-    pass
 
 
 def default_sqlite_path():

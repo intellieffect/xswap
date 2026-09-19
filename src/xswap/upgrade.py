@@ -4,14 +4,11 @@ from __future__ import annotations
 import re
 import subprocess
 
+from xswap.errors import UpgradeError
 from xswap.path import absolute_which
 
 REPO = "https://github.com/intellieffect/xswap.git"
 TAG_RE = re.compile(r"^refs/tags/v(\d+)\.(\d+)\.(\d+)$")
-
-
-class UpgradeError(Exception):
-    pass
 
 
 def list_tags(run=None):

@@ -19,6 +19,7 @@ from xswap.live import LiveError, jwt_claims
 from xswap.codex_cli import BYPASS_REASON, BYPASS_VARIABLE, DRIFT_FIXES, RELATIVE_RECORD_REASON, bridge_hints, bypass_set, codex_path_entries, describe_bridge_hint, describe_drift, entry_drift, link_target_path, path_state, read_settings, recorded_real_codex, status_data, wrapper_drift
 from xswap.openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
 from xswap.path import RelativeEntryError, absolute_which
+from xswap.paths import auto_dir, cli_runs_dir
 from xswap.relocate import codex_homes_inside_root, inside_root
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
@@ -364,7 +365,7 @@ def check_auto_pool(settings, accounts):
 
 def check_auto_dir(manager):
     """The manual-switch control directory must be 0700 or `xswap use` skips running sessions."""
-    auto = manager.root / "auto"
+    auto = auto_dir(manager.root)
     try:
         info = auto.lstat()
     except FileNotFoundError:
@@ -386,7 +387,7 @@ def check_auto_runs(manager):
     Read-only: status_data(cleanup=False) prunes nothing, and the conversation lookup
     only globs the session store. A corrupted auto.json is reported by its own row.
     """
-    run_root = manager.root / "auto" / "cli-runs"
+    run_root = cli_runs_dir(manager.root)
     total = running = 0
     if run_root.is_dir():
         for run_dir in sorted(run_root.iterdir()):
@@ -654,7 +655,7 @@ def check_packages_links(manager, accounts):
     rows = []
     for home in codex_homes_inside_root(manager, accounts):
         packages = home / "packages"
-        is_runtime = home.parent == manager.root / "auto"
+        is_runtime = home.parent == auto_dir(manager.root)
         if not home.is_dir() or not (is_runtime or packages.is_symlink() or packages.exists()):
             continue
         label = f"packages link: {home.relative_to(manager.root)}"

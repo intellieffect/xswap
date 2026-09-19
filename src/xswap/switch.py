@@ -8,6 +8,9 @@ import stat
 import time
 import uuid
 
+from xswap.fsutil import atomic_json
+from xswap.paths import auto_dir, cli_runs_dir
+
 
 def read_private_json(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -40,9 +43,8 @@ def switch_running(manager, name, timeout=2, only_current=False):
     alone (a re-login re-authenticates the sessions already on that account;
     the others re-read the home when they next consider it).
     """
-    from xswap.manager import atomic_json
     report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
-    auto = manager.root / 'auto'
+    auto = auto_dir(manager.root)
     if not auto.exists():
         return report
     if not private_directory(auto):
@@ -50,7 +52,7 @@ def switch_running(manager, name, timeout=2, only_current=False):
         report['unsafe'] = str(auto)
         return report
     paths = [auto]
-    runs = auto / 'cli-runs'
+    runs = cli_runs_dir(manager.root)
     if runs.exists() and private_directory(runs):
         paths.extend(sorted(runs.iterdir()))
     waiting = []
