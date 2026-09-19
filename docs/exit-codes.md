@@ -27,3 +27,5 @@ Every other xswap subcommand follows the plain convention: `0` on success, `1` o
 raised `SwapError`/unexpected exception (caught at the CLI entry point in
 `src/xswap/cli/__init__.py`), with the error message printed to stderr. Nothing else
 currently returns `2` or `3`.
+
+Outside this contract: argparse itself exits with `2` on an unknown subcommand or bad usage (before `main()` runs), and a `KeyboardInterrupt` exits with `130`.

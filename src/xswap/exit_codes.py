@@ -1,15 +1,13 @@
-"""Documented process exit codes shared by `auto-tick` and other CLI commands.
+"""Compatibility alias: `xswap.exit_codes` is now `xswap.core.exit_codes` (it is platform-neutral).
 
-These numbers are a contract with launchd/cron wrappers and scripts that grep xswap's
-exit status (see docs/exit-codes.md); do not renumber an existing member.
+This is not a re-export. The module object below *is* `xswap.core.exit_codes`, installed under
+the old name, so the two are the same object: whatever the suite or an embedder
+imports, patches or monkey-patches through either path reaches the other. That
+is what keeps `patch("xswap.exit_codes.<anything>")` biting after the move. Kept
+for one release (INT-5614).
 """
-from __future__ import annotations
+import sys
 
-from enum import IntEnum
+from xswap.core import exit_codes as _module
 
-
-class ExitCode(IntEnum):
-    OK = 0
-    ERROR = 1
-    NO_ACTION = 2
-    BLOCKED = 3
+sys.modules[__name__] = _module

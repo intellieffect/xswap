@@ -1,74 +1,13 @@
-"""auth-state.json: the usage service's standing rejection of an account's login.
+"""Compatibility alias: `xswap.auth_state` is now `xswap.core.auth_state` (it is platform-neutral).
 
-`forget` assumes the caller already holds `Manager.locked()` -- `Registry.remove`
-and `Launcher.after_login` call it inside their own single lock hold, so the
-sequences that span concerns keep taking one lock exactly once.
+This is not a re-export. The module object below *is* `xswap.core.auth_state`, installed under
+the old name, so the two are the same object: whatever the suite or an embedder
+imports, patches or monkey-patches through either path reaches the other. That
+is what keeps `patch("xswap.auth_state.<anything>")` biting after the move. Kept
+for one release (INT-5614).
 """
-from __future__ import annotations
+import sys
 
-import json
-import time
+from xswap.core import auth_state as _module
 
-from xswap.fsutil import atomic_json
-from xswap.usage import AUTH_FAILED_STATUS
-
-
-class AuthState:
-    def __init__(self, manager, hooks):
-        self.manager = manager
-        self.hooks = hooks
-
-    def path(self):
-        return self.manager.root / "auth-state.json"
-
-    def read(self):
-        """{name: {"failedAt", "reason", "identity"}} or {} when absent/unreadable/not an object."""
-        try:
-            data = json.loads(self.manager.auth_state_path().read_text())
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def failure(self, name, label):
-        """{"failedAt", "reason"} when the usage service rejected NAME's *current* login and
-        nothing has cleared it since, else None. Like cached_usage, an entry recorded under
-        another login label (a re-login under the same name) is a miss, not reused.
-        Read-only: doctor and offline views call this without taking the lock.
-        """
-        entry = self.manager._read_auth_state().get(name)
-        if not isinstance(entry, dict) or entry.get("identity") != label:
-            return None
-        failed_at = entry.get("failedAt")
-        if not isinstance(failed_at, (int, float)) or isinstance(failed_at, bool):
-            return None
-        return {"failedAt": failed_at, "reason": str(entry.get("reason") or AUTH_FAILED_STATUS)}
-
-    def remember(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
-        """Record a service-rejected login for NAME's current label. Keeps the first failedAt
-        while the same login keeps failing, so doctor's "since" is the first rejection and a
-        30-minute alert job does not rewrite the file. Labels only (may be an email); never
-        tokens. Always 0600 through atomic_json.
-        """
-        with self.manager.locked():
-            if not self.manager._still_registered(name):
-                return
-            data = self.manager._read_auth_state()
-            current = data.get(name)
-            if (isinstance(current, dict) and current.get("identity") == label and current.get("reason") == reason
-                    and isinstance(current.get("failedAt"), (int, float)) and not isinstance(current.get("failedAt"), bool)):
-                return
-            data[name] = {"failedAt": time.time() if failed_at is None else failed_at, "reason": reason, "identity": label}
-            atomic_json(self.manager.auth_state_path(), data)
-
-    def forget(self, name):
-        """Drop NAME's entry whatever its label. Caller holds the lock (mirrors UsageCache.forget)."""
-        data = self.manager._read_auth_state()
-        if data.pop(name, None) is not None:
-            atomic_json(self.manager.auth_state_path(), data)
-
-    def clear(self, name):
-        """A successful fetch clears the record; no lock and no write when there is none."""
-        if name not in self.manager._read_auth_state():
-            return
-        with self.manager.locked():
-            self.manager._forget_auth_failure(name)
+sys.modules[__name__] = _module
