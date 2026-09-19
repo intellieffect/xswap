@@ -765,7 +765,8 @@ def format_report(results):
 
 def print_report(results, json_output=False):
     if json_output:
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        from xswap.json_output import doctor_payload
+        print(json.dumps(doctor_payload(results), ensure_ascii=False, indent=2))
     else:
         print(format_report(results))
     return 1 if any(r["status"] == FAIL for r in results) else 0

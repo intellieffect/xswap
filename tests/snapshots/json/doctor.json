@@ -1,0 +1,12 @@
+[
+  {
+    "name": "codex binary",
+    "status": "OK",
+    "detail": "/usr/local/bin/codex"
+  },
+  {
+    "name": "accounts",
+    "status": "WARN",
+    "detail": "no accounts registered; run: xswap register main"
+  }
+]

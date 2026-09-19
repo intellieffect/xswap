@@ -19,6 +19,7 @@ from xswap._version import __version__
 from xswap.errors import SwapError
 from xswap.fsutil import atomic_json
 from xswap.ranking import rank_candidates
+from xswap.json_output import accounts_payload
 from xswap.usage import AUTH_FAILED_STATUS, UsageError, is_sign_in_failure, normalize_limits, normalize_reset_credits, short_line
 
 
@@ -152,7 +153,7 @@ class UsageCache:
             print(short_line(rows if name is not None else [r for r in rows if not r.get("disabled")]))
             return rows
         if json_output:
-            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            print(json.dumps(accounts_payload(rows), ensure_ascii=False, indent=2))
             return rows
         from xswap.display import render
         from xswap.codex_cli import bridge_hints, status_data

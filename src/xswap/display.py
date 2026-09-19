@@ -278,7 +278,8 @@ def dashboard(manager, lang="en"):
     # The menu bar polls this every five minutes: a natural background sweep.
     state = status_data(manager)
     rows = manager.account_rows()
-    return {'accounts': [summary(row, lang=lang) for row in sorted(rows, key=lambda r: not r['active'])],
+    from xswap.json_output import dashboard_payload
+    return dashboard_payload({'accounts': [summary(row, lang=lang) for row in sorted(rows, key=lambda r: not r['active'])],
             'policy': policy_label(state, lang),
             'sessions': [{'account': s['account'], 'surface': s['surface']} for s in state['sessions'] if s['running']],
-            'updatedAt': time.time()}
+            'updatedAt': time.time()})

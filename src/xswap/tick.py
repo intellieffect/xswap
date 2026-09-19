@@ -20,8 +20,11 @@ from xswap.manager import describe_switch_report, is_auth_failed, rank_candidate
 from xswap.settings import read_settings
 from xswap.live import buckets_available, validate_threshold
 from xswap.usage import AUTH_FAILED_STATUS, SIGN_IN_REQUIRED, is_ok
+from xswap.exit_codes import ExitCode
 
-EXIT_SWITCHED, EXIT_ERROR, EXIT_NO_ACTION, EXIT_BLOCKED = 0, 1, 2, 3
+# Kept as plain ints for existing importers (xswap.manager re-exports these names);
+# values are ExitCode's, so they can never drift from the documented contract.
+EXIT_SWITCHED, EXIT_ERROR, EXIT_NO_ACTION, EXIT_BLOCKED = ExitCode.OK, ExitCode.ERROR, ExitCode.NO_ACTION, ExitCode.BLOCKED
 
 # Row statuses that mean this login cannot serve a new session at all, as opposed to a
 # transient usage-service failure. identity(), read_limits() and the auth-state record
@@ -141,7 +144,8 @@ def run_tick(manager, dry_run=False, max_age=None, json_output=False):
         payload = {"decision": decision, "reason": outcome["reason"], "exitCode": code, "selected": current,
                    "target": outcome["target"], "reserve": reserve, "dryRun": dry_run,
                    "remaining": outcome["remaining"], "candidates": outcome["candidates"], "report": report, "lines": lines}
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        from xswap.json_output import auto_tick_payload
+        print(json.dumps(auto_tick_payload(payload), ensure_ascii=False, indent=2))
     else:
         print("\n".join(lines))
     return code

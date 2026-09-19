@@ -298,7 +298,7 @@ class AutoTickCommandTests(unittest.TestCase):
         code, out, _, _, _ = self.tick({"main": dual_window_raw(remaining7d=50), "second": dual_window_raw(remaining7d=90)}, argv=["--json"])
         self.assertEqual(code, 2)
         payload = json.loads(out)
-        self.assertEqual(set(payload), {"decision", "reason", "exitCode", "selected", "target", "reserve", "dryRun", "remaining", "candidates", "report", "lines"})
+        self.assertEqual(set(payload), {"schemaVersion", "decision", "reason", "exitCode", "selected", "target", "reserve", "dryRun", "remaining", "candidates", "report", "lines"})
         self.assertEqual((payload["decision"], payload["reason"], payload["exitCode"], payload["selected"], payload["target"], payload["reserve"]),
                          ("no-action", "above-reserve", 2, "main", None, 10.0))
         self.assertEqual(payload["remaining"], {"main": 50, "second": 90})
