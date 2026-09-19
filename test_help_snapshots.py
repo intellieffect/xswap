@@ -143,7 +143,10 @@ def _build_parser():
 
 
 def _format_help(p):
-    with patch.dict(os.environ, {"COLUMNS": "80"}):
+    # 3.13+ argparse colorizes help when stdout is a TTY or FORCE_COLOR is set.
+    # PYTHON_COLORS=0 outranks both, so a run from a terminal (and a snapshot
+    # regeneration from one) yields the same bytes as a captured CI run.
+    with patch.dict(os.environ, {"COLUMNS": "80", "PYTHON_COLORS": "0", "NO_COLOR": "1"}):
         return p.format_help()
 
 
