@@ -6,7 +6,7 @@ import sys
 
 from xswap._version import __version__
 from xswap.alert import install as alert_install, status as alert_status, uninstall as alert_uninstall
-from xswap.manager import SwapError, upgrade
+from xswap.manager import SwapError, upgrade  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_init_parser(sub):

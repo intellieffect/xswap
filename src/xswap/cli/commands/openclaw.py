@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from xswap.manager import SwapError
+from xswap.manager import SwapError  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_openclaw_parser(sub):

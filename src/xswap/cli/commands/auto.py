@@ -1,7 +1,7 @@
 """Automatic switching: `auto-status`, `auto-tick`, `auto-enable`, `auto-policy`, `auto-disable`."""
 from __future__ import annotations
 
-from xswap.manager import parse_cache_seconds
+from xswap.manager import parse_cache_seconds  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_auto_status_parser(sub):

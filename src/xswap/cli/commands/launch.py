@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 
-from xswap.manager import SwapError, parse_cache_seconds
+from xswap.manager import SwapError, parse_cache_seconds  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_run_parser(sub):

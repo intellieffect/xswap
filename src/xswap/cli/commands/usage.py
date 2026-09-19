@@ -6,7 +6,7 @@ import os
 import sys
 
 from xswap.display import resolve_lang
-from xswap.manager import SwapError, identity, parse_cache_seconds, usage_warnings, validate_warn_threshold
+from xswap.manager import SwapError, identity, parse_cache_seconds, usage_warnings, validate_warn_threshold  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_list_parser(sub):

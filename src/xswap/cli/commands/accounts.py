@@ -9,7 +9,7 @@ import sys
 from xswap.display import resolve_lang
 # Through `manager`, which is where these have always lived and where the suite
 # reaches them; `SwapError` and `describe_switch_report` are its re-exports.
-from xswap.manager import SwapError, describe_switch_report, identity, parse_cache_seconds, plain_codex_notice
+from xswap.manager import SwapError, describe_switch_report, identity, parse_cache_seconds, plain_codex_notice  # import-time copies: not patch targets today (see cli/__init__ docstring)
 
 
 def add_register_parser(sub):

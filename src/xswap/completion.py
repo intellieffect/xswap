@@ -1,7 +1,7 @@
 """Zsh/bash completion script generator for xswap.
 
 `generate(parser, shell)` walks the argparse tree built by
-`codex_swap.parser()` (stdlib argparse internals only, no third-party
+`xswap.cli.build_parser()` (stdlib argparse internals only, no third-party
 dependencies) and renders a completion script for `shell` ("zsh" or
 "bash"). The generated scripts call `xswap list --offline --json` at
 *completion time* (not at generation time) to read live account names
@@ -14,7 +14,7 @@ Account-name convention
 ------------------------
 argparse has no built-in way to say "this position expects an existing
 account name" versus "an unrelated string or path". Rather than touch
-`codex_swap.parser()` to add one (out of scope for a completion script
+`xswap.cli.build_parser()` to add one (out of scope for a completion script
 and it would risk changing real `--help` output), this module infers
 it from the argparse `dest` alone: a positional or optional argument
 whose `dest` is exactly "name" or "account" is treated as an existing-

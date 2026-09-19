@@ -13,6 +13,13 @@ Patchability: `Manager` is resolved through `xswap.manager` at call time below,
 because the suite patches `xswap.manager.Manager` 31 times to hand `main()` a
 manager on a temporary root. Everything else `main()` touches is either a
 module attribute (`subprocess.TimeoutExpired`) or an exception class.
+
+The command modules under `cli.commands` import helpers such as `identity`,
+`upgrade`, `plain_codex_notice` and `validate_warn_threshold` from
+`xswap.manager` at import time. Those used to be read from `manager`'s globals
+inside `main()`, so `patch("xswap.manager.identity")` would have reached them;
+it no longer does. No test patches them today. To make one patchable, resolve
+it through `xswap.manager` at call time the way `Manager` is.
 """
 from __future__ import annotations
 

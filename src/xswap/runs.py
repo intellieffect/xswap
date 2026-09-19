@@ -300,4 +300,8 @@ def describe_bridge_hint(hint):
 
 
 def show_status(manager, prune=False):
-    print(json.dumps(status_data(manager, prune=prune), indent=2))
+    # Looked up through `codex_cli` at call time, like `display` does: the suite
+    # patches `xswap.codex_cli.status_data`, and `show_status` used to read that
+    # global. Drop once the re-export goes away.
+    from xswap import codex_cli
+    print(json.dumps(codex_cli.status_data(manager, prune=prune), indent=2))
