@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement or new capability for xswap
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem you're facing
+      description: What are you trying to do, and where does xswap currently fall short?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: The behavior you want
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface
+      options:
+        - CLI
+        - automatic switching
+        - macOS desktop app
+        - menu bar
+        - OpenClaw sync
+        - docs
+        - other
+    validations:
+      required: true
