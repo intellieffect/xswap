@@ -11,6 +11,16 @@ body:
       description: xswap, Codex, OS, and Python versions
     validations:
       required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - uv tool install
+        - pipx
+        - from source
+    validations:
+      required: true
   - type: textarea
     id: reproduce
     attributes:
@@ -19,7 +29,22 @@ body:
     validations:
       required: true
   - type: textarea
+    id: doctor
+    attributes:
+      label: xswap doctor output (redacted)
+      description: Run `xswap doctor` and paste the output. Replace account labels, emails, org names, and home paths with placeholders like `main`/`work` before pasting.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
     id: evidence
     attributes:
       label: Redacted evidence
       description: Review output for credentials, emails, local paths, and account IDs before submitting.
+  - type: checkboxes
+    id: redaction-confirmation
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I removed credentials, tokens, emails and account labels from everything above
+          required: true
