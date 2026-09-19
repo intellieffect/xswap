@@ -19,6 +19,18 @@ from dataclasses import dataclass, field
 # stand-in for a provider's real window lengths.
 DAY_MINUTES = 1440
 
+# The surfaces a provider may implement. Core consults these by name; a
+# capability is present only when the provider can actually do it on this
+# machine's install. `xswap.providers.base` re-exports them.
+LIVE_SWITCH = "live_switch"          # can move a *running* session to another account
+DESKTOP_APP = "desktop_app"          # has a desktop application xswap can launch per account
+PATH_WRAPPER = "path_wrapper"        # owns a command on PATH that xswap can wrap
+PER_ACCOUNT_HOME = "per_account_home"  # each account is a directory xswap creates and owns
+OPENCLAW_SYNC = "openclaw_sync"      # its logins can be pushed into a local OpenClaw install
+
+CAPABILITIES = frozenset({LIVE_SWITCH, DESKTOP_APP, PATH_WRAPPER, PER_ACCOUNT_HOME, OPENCLAW_SYNC})
+
+
 
 @dataclass(frozen=True)
 class QuotaShape:

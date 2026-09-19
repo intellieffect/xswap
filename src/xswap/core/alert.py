@@ -16,7 +16,7 @@ from xswap.core.errors import AlertError
 from xswap.core.path import RelativeEntryError, absolute_which
 from xswap.core.paths import settings_path
 
-LABEL = "com.intellieffect.xswap.core.alert"
+LABEL = "com.intellieffect.xswap.alert"
 
 
 # The run.sh template below is filled in with str.replace() rather than str.format()

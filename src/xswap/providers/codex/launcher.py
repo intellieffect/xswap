@@ -135,7 +135,7 @@ class Launcher:
             self.manager._forget_auth_failure(name)
         row = self.manager.account_usage(name, home)
         if row["status"] == "ok":
-            item = summary(row, lang=lang)
+            item = summary(row, lang=lang, shape=self.manager.provider.quota_shape)
             print(f"{name} weekly: {item['summary']}" + (f" · {item['reset']}" if item['reset'] else ""))
         else:
             print(f"{name} usage: {row['status']}")

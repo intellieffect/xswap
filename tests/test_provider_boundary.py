@@ -199,3 +199,47 @@ class TheCodexProviderIsReachableThroughTheRegistry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_tick_does_not_ask_a_provider_without_live_switch_to_move_sessions(capsys):
+    """A provider that cannot move a running session must not be asked to.
+
+    The selection still moves (the next launch picks it up); only the bridge
+    signalling is skipped. A fake lacking the method would otherwise crash tick.
+    """
+    from unittest.mock import patch
+
+    from xswap.core import tick
+    from xswap.core.types import LIVE_SWITCH
+
+    class Stuck(FakeProvider):
+        capabilities = frozenset(FakeProvider.capabilities) - {LIVE_SWITCH}
+
+        def switch_running(self, manager, name):
+            raise AssertionError("switch_running called without the live_switch capability")
+
+    provider = Stuck()
+    assert LIVE_SWITCH not in provider.capabilities
+
+    class Manager:
+        def read(self):
+            return {"active": "a"}
+
+        def enabled_accounts(self):
+            return [("a", None), ("b", None)]
+
+        def account_rows(self, max_age=None):
+            return [row("a", weekly=0, active=True), row("b", weekly=90)]
+
+        def use_if_active(self, current, target):
+            self.moved = (current, target)
+            return True
+
+    manager = Manager()
+    manager.provider = provider
+    with patch.object(tick, "read_settings", return_value={"enabled": True, "accounts": ["a", "b"], "weeklyRemainingThreshold": 10}), \
+            patch.object(tick, "is_auth_failed", return_value=False):
+        code = tick.run_tick(manager)
+    assert code == tick.EXIT_SWITCHED
+    assert manager.moved == ("a", "b")
+    assert "switched:" in capsys.readouterr().out

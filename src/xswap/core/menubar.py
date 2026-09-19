@@ -27,7 +27,7 @@ def launch():
     if app.exists():
         try:
             metadata = plistlib.loads(info.read_bytes())
-            if app.is_symlink() or metadata.get('CFBundleIdentifier') != 'com.intellieffect.xswap.core.menubar':
+            if app.is_symlink() or metadata.get('CFBundleIdentifier') != 'com.intellieffect.xswap.menubar':
                 raise ValueError()
             if metadata.get('CFBundleShortVersionString') == __version__ and metadata.get('XswapSourceSHA256') == digest:
                 return subprocess.call(['/usr/bin/open', str(app), '--args', executable])
@@ -46,7 +46,7 @@ def launch():
         staging = target.with_suffix('.new')
         shutil.copy2(binary, staging)
         os.replace(staging, target)
-        info.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.intellieffect.xswap.core.menubar',
+        info.write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.intellieffect.xswap.menubar',
             'CFBundleExecutable': 'XswapMenu', 'CFBundleName': 'Xswap',
             'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': __version__,
             'XswapSourceSHA256': digest, 'LSUIElement': True, 'NSHighResolutionCapable': True}))

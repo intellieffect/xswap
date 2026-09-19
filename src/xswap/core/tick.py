@@ -21,6 +21,7 @@ from xswap.core.quota import buckets_available, validate_threshold, weekly_perce
 from xswap.core.ranking import rank_candidates
 from xswap.core.reports import describe_switch_report
 from xswap.core.settings import read_settings
+from xswap.core.types import LIVE_SWITCH
 from xswap.core.usage import AUTH_FAILED_STATUS, SIGN_IN_REQUIRED, is_ok
 from xswap.core.exit_codes import ExitCode
 from xswap.core import quota
@@ -138,9 +139,13 @@ def run_tick(manager, dry_run=False, max_age=None, json_output=False):
                            message=f"no-action: the selection changed from {current} while quota was being read; nothing changed")
             lines.append(outcome["message"])
         else:
-            report = manager.provider.switch_running(manager, target)
             lines.append("switched: " + outcome["message"])
-            lines.append(describe_switch_report(report, target))
+            # The selection is already moved; only a platform that can move a
+            # *running* session gets asked to. A provider without the capability
+            # is done here -- the next launch picks the new selection up.
+            if LIVE_SWITCH in manager.provider.capabilities:
+                report = manager.provider.switch_running(manager, target)
+                lines.append(describe_switch_report(report, target))
     else:
         lines.append(outcome["message"])
     code = {"switch": EXIT_SWITCHED, "no-action": EXIT_NO_ACTION, "blocked": EXIT_BLOCKED}[outcome["decision"]]

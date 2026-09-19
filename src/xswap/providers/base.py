@@ -20,17 +20,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
-from xswap.core.types import Check, CredentialState, Identity, QuotaShape, UsageSnapshot  # noqa: F401  re-exported
+from xswap.core.types import (  # noqa: F401  re-exported
+    CAPABILITIES, DESKTOP_APP, LIVE_SWITCH, OPENCLAW_SYNC, PATH_WRAPPER, PER_ACCOUNT_HOME,
+    Check, CredentialState, Identity, QuotaShape, UsageSnapshot,
+)
 
-# The surfaces a provider may implement. A capability is present only when the
-# provider can actually do it on this machine's install.
-LIVE_SWITCH = "live_switch"          # can move a *running* session to another account
-DESKTOP_APP = "desktop_app"          # has a desktop application xswap can launch per account
-PATH_WRAPPER = "path_wrapper"        # owns a command on PATH that xswap can wrap
-PER_ACCOUNT_HOME = "per_account_home"  # each account is a directory xswap creates and owns
-OPENCLAW_SYNC = "openclaw_sync"      # its logins can be pushed into a local OpenClaw install
-
-CAPABILITIES = frozenset({LIVE_SWITCH, DESKTOP_APP, PATH_WRAPPER, PER_ACCOUNT_HOME, OPENCLAW_SYNC})
 
 
 @runtime_checkable

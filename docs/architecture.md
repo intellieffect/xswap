@@ -22,10 +22,17 @@ flowchart TD
     P --> PC
     M --> C
     PC --> C
+    PC -. name lookup .-> M
     CLI --> C
 ```
 
-Imports point **down only**: `core <- providers <- manager <- cli`. `core`
+Imports point **down** from `cli` and `manager` into `providers` and `core`, and
+from `providers` into `core`. One edge points the other way and is deliberate:
+`providers/codex/{doctor,init}.py` import `SwapError`, `identity`,
+`check_file_store` and friends *through* `xswap.manager`, because that module is
+where the test suite patches them (`manager._Hooks` explains the mechanism). It
+is a name-resolution edge, not a dependency of the Codex provider on the facade's
+behavior, and it goes away once those names are patched at their new home. `core`
 never imports `xswap.providers`, `xswap.manager` or `xswap.cli` at import time,
 and it never contains a platform's vocabulary. Both rules are tests, not
 conventions — see `tests/test_import_graph.py::ProviderBoundary`.
