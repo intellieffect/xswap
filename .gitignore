@@ -26,3 +26,9 @@ auto.json
 .xswap-plugins-migration.json
 .audit/
 .gitleaks-report*
+
+# Test tooling output
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/

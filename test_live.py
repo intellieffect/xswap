@@ -296,7 +296,7 @@ class InitializeTests(unittest.IsolatedAsyncioTestCase):
     """A usage-service outage at startup must not kill the session (2026-09-08 incident)."""
 
     async def asyncSetUp(self):
-        await test_setup(self)
+        await bridge_setup(self)
         self.bridge.booting, self.bridge.initialized = True, False
         self.bridge.current_id, self.bridge.last_quota = None, None
         self.events = []
@@ -524,7 +524,7 @@ class FailureReasonTests(unittest.TestCase):
 
 
 def recording_setup(case):
-    """After test_setup: a real run dir, so status.json and bridge.log are written; stderr stays quiet."""
+    """After bridge_setup: a real run dir, so status.json and bridge.log are written; stderr stays quiet."""
     case.temporary = tempfile.TemporaryDirectory()
     case.addCleanup(case.temporary.cleanup)
     case.run_dir = Path(case.temporary.name)
@@ -542,7 +542,7 @@ class BridgeLogTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = BridgeTests.asyncTearDown
 
     async def asyncSetUp(self):
-        await test_setup(self)
+        await bridge_setup(self)
         recording_setup(self)
 
     def state(self):
@@ -812,7 +812,7 @@ class IdentityVerificationTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = BridgeTests.asyncTearDown
 
     async def asyncSetUp(self):
-        await test_setup(self)
+        await bridge_setup(self)
         recording_setup(self)
         self.events = []
         original = self.bridge.status
@@ -992,5 +992,5 @@ class StatusRecordTests(unittest.TestCase):
         self.assertNotIn('must-not-leak', text)
 
 
-async def test_setup(case):
+async def bridge_setup(case):
     await BridgeTests.asyncSetUp(case)
