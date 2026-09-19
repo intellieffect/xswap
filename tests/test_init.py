@@ -2,14 +2,14 @@ import argparse
 import contextlib
 import io
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from xswap.manager import Manager, atomic_json, main
 import xswap.codex_cli as xswap_cli
 from xswap.init import run_init
+from xswap.manager import Manager, atomic_json, main
 
 
 def scripted(*answers):

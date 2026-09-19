@@ -28,14 +28,30 @@ from unittest.mock import ANY, patch
 
 import test_cli
 import test_codex_swap
+
 import xswap.doctor as doctor
+from xswap.codex_cli import (
+    RELATIVE_ENTRY_REASON,
+    RELATIVE_RECORD_REASON,
+    STALE_RUN_SECONDS,
+    codex_main,
+    codex_path_entries,
+    dependency_entry,
+    disable,
+    enable,
+    launch_cli,
+    link_target_path,
+    read_settings,
+    reconnect_wrapper,
+    shadowing_entry,
+    show_status,
+    status_data,
+    wrapper_drift,
+    wrapper_state,
+)
+from xswap.live import LiveError
 from xswap.manager import Manager, SwapError, __version__, atomic_json
 from xswap.manager import main as codex_swap_main
-from xswap.codex_cli import (RELATIVE_ENTRY_REASON, RELATIVE_RECORD_REASON, STALE_RUN_SECONDS, codex_main,
-                       codex_path_entries, dependency_entry, disable, enable,
-                       launch_cli, link_target_path, read_settings, reconnect_wrapper, shadowing_entry, show_status,
-                       status_data, wrapper_drift, wrapper_state)
-from xswap.live import LiveError
 
 
 class WrapperFixture(unittest.TestCase):

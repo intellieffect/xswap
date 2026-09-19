@@ -3,8 +3,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from xswap.codex_cli import WebSocketBridge, reconnect_command
+
 from test_live import Pool
+
+from xswap.codex_cli import WebSocketBridge, reconnect_command
 
 
 class ReconnectTests(unittest.IsolatedAsyncioTestCase):
@@ -70,7 +72,8 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         # list/doctor/upgrade read conversationId from status.json; a session that moves
         # to another thread through the picker must not keep advertising the old one,
         # and an unchanged thread must not rewrite the record on every turn.
-        import json, tempfile
+        import json
+        import tempfile
         from pathlib import Path
         other = '00000000-0000-4000-8000-000000000002'
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,16 +15,20 @@ names, percentages and short status reasons only, never tokens.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Any, cast
 
+from xswap.core import quota
 from xswap.core.auth_state import is_auth_failed
+from xswap.core.exit_codes import ExitCode
 from xswap.core.quota import buckets_available, validate_threshold, weekly_percent
 from xswap.core.ranking import rank_candidates
 from xswap.core.reports import describe_switch_report
 from xswap.core.settings import read_settings
-from xswap.core.types import LIVE_SWITCH
+from xswap.core.types import LIVE_SWITCH, AccountUsageRow, QuotaShape, TickDecision
 from xswap.core.usage import AUTH_FAILED_STATUS, SIGN_IN_REQUIRED, is_ok
-from xswap.core.exit_codes import ExitCode
-from xswap.core import quota
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 # Kept as plain ints for existing importers (xswap.manager re-exports these names);
 # values are ExitCode's, so they can never drift from the documented contract.
@@ -38,15 +42,15 @@ SIGN_IN_STATUSES = ("not signed in", "unreadable auth cache", AUTH_FAILED_STATUS
                     "usage unavailable: " + SIGN_IN_REQUIRED)
 
 
-def percent(value):
+def percent(value: float | None) -> str:
     return f"{value:g}%" if isinstance(value, (int, float)) and not isinstance(value, bool) else "unknown"
 
 
-def weekly_left(row, shape=None):
+def weekly_left(row: AccountUsageRow, shape: QuotaShape | None = None) -> float | None:
     return weekly_percent(row["buckets"], shape) if is_ok(row["status"]) else None
 
 
-def describe_shortfall(row, reserve, shape=None):
+def describe_shortfall(row: AccountUsageRow, reserve: float, shape: QuotaShape | None = None) -> str:
     """Why the selected account no longer qualifies; mirrors buckets_available's False cases."""
     if row["status"] in SIGN_IN_STATUSES:
         return f"{row['name']} sign-in required"
@@ -62,7 +66,14 @@ def describe_shortfall(row, reserve, shape=None):
     return f"{row['name']} has an exhausted {buckets[0]['id'] if buckets else 'quota'} window"
 
 
-def decide(rows, current, pool, reserve, failed=frozenset(), shape=None):
+def decide(
+    rows: list[AccountUsageRow],
+    current: str | None,
+    pool: list[str],
+    reserve: float,
+    failed: frozenset[str] = frozenset(),
+    shape: QuotaShape | None = None,
+) -> TickDecision:
     """Pure decision over already-fetched Manager.account_rows() output.
 
     Returns {"decision": "switch"|"no-action"|"blocked", "reason": <short code>,
@@ -77,11 +88,11 @@ def decide(rows, current, pool, reserve, failed=frozenset(), shape=None):
     """
     by_name = {row["name"]: row for row in rows}
     remaining = {name: weekly_left(by_name[name], shape) for name in dict.fromkeys([current, *pool]) if name in by_name}
-    result = {"decision": "no-action", "reason": "", "target": None, "message": "", "remaining": remaining, "candidates": []}
-    row = by_name.get(current)
+    result: TickDecision = {"decision": "no-action", "reason": "", "target": None, "message": "", "remaining": remaining, "candidates": []}
+    row = by_name.get(current) if current is not None else None
     if row is None:
-        return dict(result, decision="blocked", reason="no-selection",
-                    message="blocked: no account is selected; run: xswap use NAME")
+        return cast(TickDecision, dict(result, decision="blocked", reason="no-selection",
+                    message="blocked: no account is selected; run: xswap use NAME"))
     if current in failed or row["status"] in SIGN_IN_STATUSES:
         state = False
     elif is_ok(row["status"]):
@@ -89,30 +100,33 @@ def decide(rows, current, pool, reserve, failed=frozenset(), shape=None):
     else:
         state = None
     if state is True:
-        return dict(result, reason="above-reserve",
-                    message=f"no-action: {current} weekly {percent(weekly_left(row, shape))} left is above the {reserve:g}% reserve")
+        return cast(TickDecision, dict(result, reason="above-reserve",
+                    message=f"no-action: {current} weekly {percent(weekly_left(row, shape))} left is above the {reserve:g}% reserve"))
     if state is None:
         why = row["status"] if not is_ok(row["status"]) else "weekly window not reported"
-        return dict(result, reason="quota-unknown",
-                    message=f"no-action: {current} quota unknown ({why}); not switching on unknown quota")
+        return cast(TickDecision, dict(result, reason="quota-unknown",
+                    message=f"no-action: {current} quota unknown ({why}); not switching on unknown quota"))
     candidates = [by_name[name] for name in pool if name in by_name and name != current and name not in failed]
     target, detail = rank_candidates(candidates, weekly_remaining=reserve, shape=shape)
     result["candidates"] = detail["candidates"]
     shortfall = describe_shortfall(row, reserve, shape)
     if target is None:
         listed = ", ".join(f"{c['name']} {percent(c['remaining7d'])}" for c in detail["candidates"]) or "none"
-        return dict(result, decision="blocked", reason="no-candidate",
-                    message=f"blocked: {shortfall}, but no pool account is above the {reserve:g}% reserve ({listed})")
-    return dict(result, decision="switch", reason="switched", target=target,
-                message=f"{current} -> {target} ({shortfall}; {target} weekly {percent(remaining.get(target))} left)")
+        return cast(TickDecision, dict(result, decision="blocked", reason="no-candidate",
+                    message=f"blocked: {shortfall}, but no pool account is above the {reserve:g}% reserve ({listed})"))
+    return cast(TickDecision, dict(result, decision="switch", reason="switched", target=target,
+                message=f"{current} -> {target} ({shortfall}; {target} weekly {percent(remaining.get(target))} left)"))
 
 
-def run_tick(manager, dry_run=False, max_age=None, json_output=False):
+def run_tick(
+    manager: Manager, dry_run: bool = False, max_age: float | None = None, json_output: bool = False
+) -> int:
     """`xswap auto-tick`: fetch, decide, and apply through the `xswap use NAME` path."""
     settings = read_settings(manager)
     reserve = validate_threshold(settings.get("weeklyRemainingThreshold", 0))
     current = manager.read()["active"]
     pool = [name for name in settings.get("accounts", []) if isinstance(name, str)]
+    outcome: TickDecision
     if current is None:
         outcome = {"decision": "blocked", "reason": "no-selection", "target": None, "remaining": {}, "candidates": [],
                    "message": "blocked: no account is selected; run: xswap use NAME"}
@@ -124,9 +138,11 @@ def run_tick(manager, dry_run=False, max_age=None, json_output=False):
         rows = manager.account_rows(max_age=max_age)
         failed = frozenset(name for name in dict.fromkeys([current, *pool]) if is_auth_failed(manager, name))
         outcome = decide(rows, current, pool, reserve, failed, manager.provider.quota_shape)
-    lines, report = [], None
+    lines: list[str] = []
+    report: dict[str, Any] | None = None
     if outcome["decision"] == "switch":
         target = outcome["target"]
+        assert current is not None and target is not None  # decide() only returns "switch" with both set  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
         if dry_run:
             outcome["reason"] = "would-switch"
             lines.append("would-switch: " + outcome["message"])

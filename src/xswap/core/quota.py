@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 
 from xswap.core.errors import LiveError
-from xswap.core.types import QuotaShape
+from xswap.core.types import QuotaShape, UsageBucket, UsageWindowPayload
 
 # Extra buckets some plans carry alongside the subscription quota. They are
 # reported next to it, are never the bucket a switch is decided on, and are
@@ -21,12 +21,12 @@ from xswap.core.types import QuotaShape
 EXTRA_BUCKET_HINT = "spark"
 
 
-def is_extra(bucket):
+def is_extra(bucket: UsageBucket) -> bool:
     """True for a side bucket (Spark and friends), never for the quota bucket."""
     return EXTRA_BUCKET_HINT in (str(bucket.get("id") or "") + str(bucket.get("name") or "")).lower()
 
 
-def quota_buckets(buckets, shape=None):
+def quota_buckets(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> list[UsageBucket]:
     """The bucket(s) a switch is decided on: the shape's, or the first non-extra one."""
     shape = shape or QuotaShape()
     if shape.bucket_id is not None:
@@ -35,46 +35,51 @@ def quota_buckets(buckets, shape=None):
     return [primary] if primary is not None else []
 
 
-def quota_windows(buckets, shape=None):
+def quota_windows(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> list[UsageWindowPayload]:
     """Every window of the quota bucket, flattened."""
     return [window for bucket in quota_buckets(buckets, shape) for window in bucket["windows"]]
 
 
-def window_percent(buckets, minutes, shape=None):
+def window_percent(buckets: list[UsageBucket], minutes: int, shape: QuotaShape | None = None) -> float | None:
     """The quota bucket's `remainingPercent` for the window of exactly MINUTES."""
     return next((w["remainingPercent"] for w in quota_windows(buckets, shape) if w["windowMinutes"] == minutes), None)
 
 
-def weekly_window(buckets, shape=None):
+def weekly_window(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> UsageWindowPayload | None:
     """The quota bucket's long window, or None when it was not reported."""
     shape = shape or QuotaShape()
     return next((w for w in quota_windows(buckets, shape) if shape.is_weekly(w)), None)
 
 
-def weekly_percent(buckets, shape=None):
+def weekly_percent(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> float | None:
     window = weekly_window(buckets, shape)
     return window["remainingPercent"] if window else None
 
 
-def short_percent(buckets, shape=None):
+def short_percent(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> float | None:
     """The quota bucket's short window, i.e. the one that is not the weekly one."""
     shape = shape or QuotaShape()
     window = next((w for w in quota_windows(buckets, shape) if not shape.is_weekly(w)), None)
     return window["remainingPercent"] if window else None
 
 
-def reached(buckets, shape=None):
+def reached(buckets: list[UsageBucket], shape: QuotaShape | None = None) -> str | None:
     """The quota bucket's own "limit reached" marker, or None."""
     return next((b["reached"] for b in quota_buckets(buckets, shape) if b["reached"]), None)
 
 
-def validate_threshold(value):
+def validate_threshold(value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value < 100:
         raise LiveError('weekly remaining threshold must be a number from 0 to less than 100')
     return float(value)
 
 
-def buckets_available(buckets, model=None, weekly_remaining=0, shape=None):
+def buckets_available(
+    buckets: list[UsageBucket],
+    model: str | None = None,
+    weekly_remaining: float = 0,
+    shape: QuotaShape | None = None,
+) -> bool | None:
     """True/False/None (unknown) for "this account can still serve a turn".
 
     Unknown is never available. Every applicable known window must be above

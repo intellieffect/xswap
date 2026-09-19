@@ -30,13 +30,21 @@ import sys
 from xswap import manager as manager_module
 from xswap._version import __version__
 from xswap.alert import AlertError
+from xswap.cli.commands import (
+    accounts,
+    auto,
+    launch,
+    maintenance,
+    mapping,
+    openclaw,
+    usage,
+)
 from xswap.errors import SwapError
 from xswap.live import LiveError
 from xswap.upgrade import UpgradeError
-from xswap.cli.commands import accounts, auto, launch, maintenance, mapping, openclaw, usage
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Codex account switcher for CLI + macOS desktop. Bare xswap opens the selected CLI account.")
     p.add_argument("--version", action="version", version=f"xswap {__version__}")
     sub = p.add_subparsers(dest="command")
@@ -109,7 +117,7 @@ COMMANDS = {
 }
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         manager = manager_module.Manager()

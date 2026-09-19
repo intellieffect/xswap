@@ -22,7 +22,7 @@ authors = [{name = "IntelliEffect"}]
 dependencies = ["websockets>=15,<18"]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-xdist>=3.5", "pytest-cov>=5"]
+dev = ["pytest>=8", "pytest-xdist>=3.5", "pytest-cov>=5", "pyright==1.1.407"]
 
 [project.scripts]
 xswap = "xswap.cli:main"
@@ -62,7 +62,40 @@ include = [
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["F", "E9", "B", "UP"]
+select = ["F", "E9", "B", "UP", "I", "SIM", "RUF", "PTH", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally use assert, raw open()/os.path, and touch real-looking paths
+# under tmp fixtures; scoping the newer rules to src/ keeps the suite noise-free.
+# SIM/RUF (mostly RUF059 on multi-value fixture unpacking like
+# `settings, shim, cli, updated, path = self.relative_shim()`, where a name is kept
+# even when a given test does not read it, for readability/symmetry across the
+# suite) are pre-existing style, not something INT-5612 touches; isort (I001) was
+# applied to tests/ directly instead of ignored.
+"tests/**" = ["S", "PTH", "SIM", "RUF"]
+# The alias-shim type stubs (INT-5612) exist solely to tell pyright to treat
+# `from xswap.<name> import X` as `from <target> import X`; `import *` is the point.
+"src/xswap/*.pyi" = ["F403"]
+# These four modules compare os.readlink()'s str result directly against other str
+# values (dict fields, other readlink() calls) and thread it into str-typed helpers;
+# Path.readlink() returns a Path, which would silently break those comparisons (a
+# behavior change the checker itself must not force -- INT-5612).
+"src/xswap/providers/codex/wrapper.py" = ["PTH115"]
+"src/xswap/providers/codex/plugins.py" = ["PTH115"]
+"src/xswap/providers/codex/relocate.py" = ["PTH115"]
+"src/xswap/providers/codex/doctor.py" = ["PTH115"]
+
+[tool.pyright]
+include = ["src"]
+# The flat top-level alias shims (`sys.modules[__name__] = <moved module>`, e.g.
+# src/xswap/identity.py) are intentionally NOT excluded: excluding them made pyright
+# forget they re-export their target module's names, which then broke every real
+# module that does `from xswap.identity import identity` and similar (INT-5612).
+# They typecheck fine as-is -- each is a couple of imports plus one assignment --
+# so there is nothing for an exclude to protect here.
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "error"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

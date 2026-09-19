@@ -17,6 +17,9 @@ it can be imported from anywhere without a cycle.
 """
 from __future__ import annotations
 
+from typing import Any
+
+from xswap.core.types import AccountUsageRow, CheckPayload
 from xswap.core.usage import AUTH_FAILED_STATUS, SIGN_IN_REQUIRED
 
 SCHEMA_VERSION = 1
@@ -37,31 +40,31 @@ STATUS_AUTH_FAILED = AUTH_FAILED_STATUS  # "sign-in required"
 STATUS_SIGN_IN_REQUIRED = SIGN_IN_REQUIRED  # "sign in again to read usage" (raised, not a row status)
 
 
-def _versioned(payload):
+def _versioned(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a new dict with `schemaVersion` first, then every key of `payload` in order."""
     return {"schemaVersion": SCHEMA_VERSION, **payload}
 
 
-def accounts_payload(rows):
+def accounts_payload(rows: list[AccountUsageRow]) -> list[AccountUsageRow]:
     """`list --json` / `usage --json`: v1-list, unchanged bare list of account rows."""
     return rows
 
 
-def doctor_payload(results):
+def doctor_payload(results: list[CheckPayload]) -> list[CheckPayload]:
     """`doctor --json`: v1-list, unchanged bare list of check results."""
     return results
 
 
-def auto_status_payload(state):
+def auto_status_payload(state: dict[str, Any]) -> dict[str, Any]:
     """`auto-status`: JSON-only command (no --json flag). Object; schemaVersion first."""
     return _versioned(state)
 
 
-def auto_tick_payload(payload):
+def auto_tick_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """`auto-tick --json`: object; schemaVersion first."""
     return _versioned(payload)
 
 
-def dashboard_payload(data):
+def dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
     """`dashboard`: JSON-only command, read by MenuBar.swift. Object; schemaVersion first."""
     return _versioned(data)

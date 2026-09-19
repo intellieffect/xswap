@@ -3,19 +3,28 @@ import base64
 import copy
 import json
 import os
-from pathlib import Path
 import signal
 import stat
+import sys
 import tempfile
 import time
 import unittest
-
-import sys
+from pathlib import Path
 from unittest.mock import patch
 
+from xswap.live import (
+    BRIDGE_LOG_NAME,
+    AccountPool,
+    Bridge,
+    LiveError,
+    SignInRequired,
+    append_log_line,
+    failure_reason,
+    quota_available,
+    sign_in_required,
+    usage_failure,
+)
 from xswap.manager import Manager, atomic_json, identity
-from xswap.live import (BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError, SignInRequired, append_log_line,
-                        failure_reason, quota_available, sign_in_required, usage_failure)
 from xswap.usage import UsageError
 
 
@@ -946,7 +955,8 @@ class IdentityVerificationTests(unittest.IsolatedAsyncioTestCase):
 class StatusRecordTests(unittest.TestCase):
     def test_status_record_starts_with_an_unverified_login(self):
         # `account` is what the bridge sent; until account/read answers, nothing is confirmed.
-        import pathlib, tempfile
+        import pathlib
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / 'status.json'
             bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=path)
@@ -958,8 +968,11 @@ class StatusRecordTests(unittest.TestCase):
 
     def test_status_record_carries_installed_version_and_persists_quota_known(self):
         # 0.7.5 wrote a hard-coded bridgeVersion and dropped quotaKnown after 'ready' (INT-5085).
+        import json
+        import pathlib
+        import tempfile
+
         from xswap.manager import __version__
-        import json, pathlib, tempfile
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / 'status.json'
             bridge = Bridge(Pool(), [sys.executable, '-c', 'pass'], {}, status_path=path)
@@ -973,7 +986,9 @@ class StatusRecordTests(unittest.TestCase):
     def test_status_record_names_conversation_home_and_pool(self):
         # list/doctor/upgrade build the reopen hint from these three fields (item 6);
         # a plain (desktop) Bridge has no conversation to name, so it writes null.
-        import json, pathlib, tempfile
+        import json
+        import pathlib
+        import tempfile
         thread = '00000000-0000-4000-8000-000000000001'
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / 'status.json'

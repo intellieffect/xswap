@@ -1,20 +1,30 @@
 """Read Codex quota windows through the official app-server JSON-RPC API."""
 from __future__ import annotations
 
-from datetime import datetime
+import contextlib
 import json
 import os
 import selectors
 import signal
 import subprocess
 import time
+from datetime import datetime
+from typing import Any
 
-
-from xswap.core.errors import UsageError
-from xswap.core.types import QuotaShape
-from xswap.core.usage import (AUTH_FAILED_STATUS, SIGN_IN_REQUIRED, clean, is_ok, is_sign_in_failure,  # noqa: F401
-                              number, reset_label, usage_lines, window_label)
 from xswap.core import usage as _core_usage
+from xswap.core.errors import UsageError
+from xswap.core.types import AccountUsageRow, QuotaShape, UsageBucket
+from xswap.core.usage import (  # noqa: F401
+    AUTH_FAILED_STATUS,
+    SIGN_IN_REQUIRED,
+    clean,
+    is_ok,
+    is_sign_in_failure,
+    number,
+    reset_label,
+    usage_lines,
+    window_label,
+)
 
 # Where Codex's subscription quota sits in a normalized payload: the "codex" bucket,
 # a five-hour rolling window and a seven-day one. This is the one place those numbers
@@ -24,21 +34,23 @@ CODEX_QUOTA = QuotaShape(bucket_id="codex", short_minutes=300, weekly_minutes=10
 
 
 
-def read_limits(codex, env, timeout=12):
+def read_limits(codex: str, env: dict[str, str], timeout: float = 12) -> dict[str, Any]:
     """Start only our own server; never create a thread/turn or change accounts."""
-    process = subprocess.Popen([codex, "app-server", "--stdio"], stdin=subprocess.PIPE,
+    process = subprocess.Popen([codex, "app-server", "--stdio"], stdin=subprocess.PIPE,  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                env=env, bufsize=0, start_new_session=True)
+    # stdin/stdout are never None: both were opened above with subprocess.PIPE.
+    assert process.stdin is not None and process.stdout is not None  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     deadline = time.monotonic() + timeout
     buffer = b""
 
-    def send(message):
+    def send(message: dict[str, Any]) -> None:
         payload = (json.dumps(message) + "\n").encode()
-        process.stdin.write(payload)
+        process.stdin.write(payload)  # type: ignore[union-attr]  # narrowed non-None above; not visible across this closure
 
-    def receive(request_id):
+    def receive(request_id: int) -> dict[str, Any]:
         nonlocal buffer
         while True:
             while b"\n" in buffer:
@@ -67,7 +79,7 @@ def read_limits(codex, env, timeout=12):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not selector.select(remaining):
                 raise UsageError("usage request timed out")
-            chunk = os.read(process.stdout.fileno(), 65536)
+            chunk = os.read(process.stdout.fileno(), 65536)  # type: ignore[union-attr]  # narrowed non-None above; not visible across this closure
             if not chunk:
                 raise UsageError("Codex usage server exited")
             buffer += chunk
@@ -87,17 +99,13 @@ def read_limits(codex, env, timeout=12):
     finally:
         selector.close()
         # This process group belongs solely to the server created above.
-        try:
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             process.wait(timeout=1)
         process.stdin.close()
         process.stdout.close()
@@ -105,7 +113,7 @@ def read_limits(codex, env, timeout=12):
 
 
 
-def normalize_limits(response):
+def normalize_limits(response: dict[str, Any]) -> list[UsageBucket]:
     """Whitelist display fields; never serialize a raw authenticated response."""
     by_id = response.get("rateLimitsByLimitId")
     source = list(by_id.items()) if isinstance(by_id, dict) and by_id else []
@@ -123,15 +131,15 @@ def normalize_limits(response):
             if not isinstance(window, dict):
                 continue
             used = window.get("usedPercent")
-            if not number(used) or used < 0:
+            if used is None or not number(used) or used < 0:
                 used = None
             minutes = window.get("windowDurationMins")
             reset = window.get("resetsAt")
             windows.append({"position": position,
-                            "usedPercent": used if number(used) else None,
-                            "remainingPercent": max(0, min(100, 100 - used)) if number(used) else None,
-                            "windowMinutes": minutes if number(minutes) and minutes > 0 else None,
-                            "resetsAt": reset if number(reset) and reset > 0 else None})
+                            "usedPercent": used,
+                            "remainingPercent": max(0, min(100, 100 - used)) if used is not None else None,
+                            "windowMinutes": minutes if minutes is not None and number(minutes) and minutes > 0 else None,
+                            "resetsAt": reset if reset is not None and number(reset) and reset > 0 else None})
         credits = bucket.get("credits")
         buckets.append({"id": clean(bucket.get("limitId") or key),
                         "name": clean(bucket.get("limitName") or key),
@@ -144,7 +152,7 @@ def normalize_limits(response):
     return buckets
 
 
-def normalize_reset_credits(response):
+def normalize_reset_credits(response: dict[str, Any]) -> dict[str, Any] | None:
     """Keep reset availability separate from quota buckets and purchased credits."""
     source = response.get("rateLimitResetCredits")
     if not isinstance(source, dict):
@@ -160,11 +168,11 @@ def normalize_reset_credits(response):
                 continue
             expiry = row.get("expiresAt")
             credits.append({"status": clean(row["status"]) if row.get("status") else None,
-                            "expiresAt": expiry if number(expiry) and expiry > 0 else None})
+                            "expiresAt": expiry if expiry is not None and number(expiry) and expiry > 0 else None})
     return {"availableCount": count, "credits": credits}
 
 
-def reset_credit_lines(credits):
+def reset_credit_lines(credits: dict[str, Any] | None) -> list[str]:
     count = credits.get("availableCount") if credits else None
     lines = [f"codex reset credits: {count} available" if count is not None
              else "codex reset credits: unknown"]
@@ -179,11 +187,11 @@ def reset_credit_lines(credits):
     return lines
 
 
-def warnings(rows, threshold, now=None):
+def warnings(rows: list[AccountUsageRow], threshold: float, now: float | None = None) -> list[str]:
     """`xswap list --warn` over Codex's quota bucket."""
     return _core_usage.warnings(rows, threshold, now, shape=CODEX_QUOTA)
 
 
-def short_line(rows):
+def short_line(rows: list[AccountUsageRow]) -> str:
     """The prompt/status line over Codex's 5h and 7d windows."""
     return _core_usage.short_line(rows, shape=CODEX_QUOTA)

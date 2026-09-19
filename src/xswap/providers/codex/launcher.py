@@ -15,26 +15,30 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from xswap.core.errors import SwapError
-from xswap.providers.codex.live import LiveError
 from xswap.core.path import absolute_which, relative_entry_message
 from xswap.core.paths import auto_dir, profile_dir
+from xswap.core.reports import describe_login_report
+from xswap.providers.codex.live import LiveError
 from xswap.providers.codex.plugins import ensure_plugins
 from xswap.providers.codex.relocate import link_packages
-from xswap.core.reports import describe_login_report
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
 
 class Launcher:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
-    def env(self, home):
+    def env(self, home: Path) -> dict[str, str]:
         env = os.environ.copy()
         # A caller's API key or workload identity must not silently select another account.
         # XSWAP_BYPASS with them: exported in the shell that started this launch, it followed the
@@ -62,11 +66,17 @@ class Launcher:
         env["CODEX_HOME"] = str(home)
         return env
 
-    def codex(self):
+    def codex(self) -> str:
         executable = shutil.which("codex")
         if not executable:
             raise SwapError("codex is not installed or not in PATH.")
-        from xswap.providers.codex.codex_cli import dependency_entry, read_settings, reconnect_wrapper, recorded_real_codex, wrapped_target
+        from xswap.providers.codex.codex_cli import (
+            dependency_entry,
+            read_settings,
+            reconnect_wrapper,
+            recorded_real_codex,
+            wrapped_target,
+        )
         reconnect_wrapper(self.manager)
         settings = read_settings(self.manager)
         wrapper = settings.get("wrapper")
@@ -95,7 +105,7 @@ class Launcher:
         # CODEX_HOME, which would hand a project-controlled file that account's auth.json, and the
         # entry xswap actually wrapped would be ignored. It is the entry `auto-enable --wrap-codex`
         # refuses and doctor reports as bypassed, so run the recorded release instead of it.
-        if not os.path.isabs(executable):
+        if not Path(executable).is_absolute():
             real = recorded_real_codex(settings)
             if real and Path(real).is_file():
                 return real
@@ -110,17 +120,17 @@ class Launcher:
                 return real
         return executable
 
-    def login(self, name, device_auth=False, lang="en"):
+    def login(self, name: str | None, device_auth: bool = False, lang: str = "en") -> int:
         name, home = self.manager.account(name)
         self.hooks.check_file_store(home)
         command = [self.manager.codex(), "login"] + (["--device-auth"] if device_auth else [])
-        result = subprocess.call(command, env=self.manager.env(home))
+        result = subprocess.call(command, env=self.manager.env(home))  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         if not result:
             print(f"Signed in {name}: {self.hooks.identity(home)}")
             self.manager.after_login(name, home, lang=lang)
         return result
 
-    def after_login(self, name, home, lang="en"):
+    def after_login(self, name: str, home: Path, lang: str = "en") -> None:
         """A (re-)login changes what the usage service says and what running
         bridges hold. Drop the cached quota entry and read it live once, then
         ask bridges already on this account to re-authenticate in place.
@@ -142,8 +152,12 @@ class Launcher:
         report = switch_running(self.manager, name, only_current=True)
         print(describe_login_report(report, name))
 
-    def launch_cli(self, name, args, dry=False):
-        from xswap.providers.codex.codex_cli import read_settings, interactive_args, launch_cli
+    def launch_cli(self, name: str | None, args: list[str], dry: bool = False) -> int:
+        from xswap.providers.codex.codex_cli import (
+            interactive_args,
+            launch_cli,
+            read_settings,
+        )
         settings = read_settings(self.manager)
         if name is None and settings.get("enabled") and interactive_args(args):
             return launch_cli(self.manager, ','.join(settings["accounts"]), args, dry)
@@ -156,7 +170,7 @@ class Launcher:
         ensure_plugins(home, self.manager.source)
         link_packages(self.manager, home)  # no-op for a registered external home
         try:
-            return subprocess.call(command, env=self.manager.env(home))
+            return subprocess.call(command, env=self.manager.env(home))  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         finally:
             # `upgrade`/`update` reach this branch (they are non-interactive), and Codex's
             # standalone updater re-points the wrapped `codex` entry on its way out. xswap
@@ -167,7 +181,7 @@ class Launcher:
                 from xswap.providers.codex.codex_cli import reconnect_wrapper
                 reconnect_wrapper(self.manager)
 
-    def launch_auto_app(self, accounts, app=None, dry=False):
+    def launch_auto_app(self, accounts: str | None, app: str | None = None, dry: bool = False) -> int:
         from xswap.providers.codex.live import AccountPool, LiveError
         names = [value.strip() for value in (accounts or '').split(',') if value.strip()]
         real = self.manager.codex()
@@ -217,14 +231,14 @@ class Launcher:
                     dst.symlink_to(src, target_is_directory=src.is_dir())
         ensure_plugins(home, source)
         link_packages(self.manager, home)
-        result = subprocess.run(command, env=self.manager.env(home), capture_output=True)
+        result = subprocess.run(command, env=self.manager.env(home), capture_output=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         if result.returncode:
             raise SwapError("Auto desktop launch failed.")
         print("Opened auto-mode desktop: " + " -> ".join(names) +
               ". This window keeps its threads across account changes. Existing windows are unchanged.")
         return 0
 
-    def launch_app(self, name, app=None, dry=False):
+    def launch_app(self, name: str | None, app: str | None = None, dry: bool = False) -> int:
         name, home = self.manager.account(name)
         self.hooks.check_file_store(home)
         if sys.platform != "darwin":
@@ -242,7 +256,7 @@ class Launcher:
         self.hooks.private_dir(desktop)
         ensure_plugins(home, self.manager.source)
         link_packages(self.manager, home)  # no-op for a registered external home
-        result = subprocess.run(command, env=self.manager.env(home), capture_output=True)
+        result = subprocess.run(command, env=self.manager.env(home), capture_output=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         if result.returncode:
             raise SwapError("Desktop launch failed. Confirm that the app path exists and macOS permits launching it.")
         print(f"Opened {name}. Existing windows keep their own account; verify this window's profile menu.")

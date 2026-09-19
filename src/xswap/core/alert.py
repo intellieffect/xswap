@@ -5,12 +5,13 @@ import contextlib
 import json
 import math
 import os
-from pathlib import Path
 import plistlib
 import shlex
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 from xswap.core.errors import AlertError
 from xswap.core.path import RelativeEntryError, absolute_which
@@ -106,23 +107,23 @@ rm -f "$TICK_TMP"
 """
 
 
-def alert_dir(root):
+def alert_dir(root: str | Path) -> Path:
     return Path(root) / "alert"
 
 
-def run_script_path(root):
+def run_script_path(root: str | Path) -> Path:
     return alert_dir(root) / "run.sh"
 
 
-def log_path(root):
+def log_path(root: str | Path) -> Path:
     return alert_dir(root) / "last.log"
 
 
-def plist_path():
+def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
-def has_auto_switch(root):
+def has_auto_switch(root: str | Path) -> bool:
     """Whether the installed run.sh carries the auto-tick step (its marker line)."""
     try:
         return AUTO_SWITCH_MARKER in run_script_path(root).read_text()
@@ -130,7 +131,7 @@ def has_auto_switch(root):
         return False
 
 
-def _auto_enabled(root):
+def _auto_enabled(root: str | Path) -> bool:
     """Read-only peek at auto.json for the --auto-switch install note; no Manager import."""
     try:
         value = json.loads(settings_path(root).read_text())
@@ -139,7 +140,7 @@ def _auto_enabled(root):
     return isinstance(value, dict) and value.get("enabled") is True
 
 
-def resolve_xswap():
+def resolve_xswap() -> str:
     """Absolute path to the xswap executable at install time.
 
     launchd's PATH does not include /opt/homebrew/bin, so the wrapper must call an
@@ -169,11 +170,11 @@ def resolve_xswap():
     )
 
 
-def format_number(value):
+def format_number(value: float) -> str:
     return f"{float(value):g}"
 
 
-def validate_warn(value):
+def validate_warn(value: Any) -> float:
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -183,7 +184,7 @@ def validate_warn(value):
     return value
 
 
-def validate_every(value):
+def validate_every(value: Any) -> int:
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -195,7 +196,7 @@ def validate_every(value):
     return int(numeric)
 
 
-def validate_cached(value):
+def validate_cached(value: Any) -> float:
     # The same rule as Manager's parse_cache_seconds, which is what the installed job's
     # own `xswap auto-tick --cached N` and `xswap list --cached N` steps go through: it
     # rejects 0, so accepting 0 here baked `--cached 0` into run.sh and every step of the
@@ -209,7 +210,9 @@ def validate_cached(value):
     return value
 
 
-def render_run_script(xswap_path, warn, cached, log, auto_switch=False):
+def render_run_script(
+    xswap_path: str, warn: float, cached: float, log: str | Path, auto_switch: bool = False
+) -> str:
     # xswap_path and log are filesystem paths outside this function's control (the resolved
     # xswap binary, and a path derived from the state-root variable); shlex.quote() wraps each in
     # POSIX single quotes (escaping any embedded single quote as '\''), so `$(...)`,
@@ -226,7 +229,14 @@ def render_run_script(xswap_path, warn, cached, log, auto_switch=False):
     return script
 
 
-def build_plist(xswap_path, every, script_path, out_path, err_path, root):
+def build_plist(
+    xswap_path: str,
+    every: float,
+    script_path: str | Path,
+    out_path: str | Path,
+    err_path: str | Path,
+    root: str | Path,
+) -> dict[str, Any]:
     # The job carried only PATH, so at run time it resolved the state root the way any shell
     # without the state-root variable set does: the default one. Installed from a shell that exports the
     # variable, it therefore read another root's pool, reserve and selection, and with
@@ -247,7 +257,7 @@ def build_plist(xswap_path, every, script_path, out_path, err_path, root):
     }
 
 
-def _write_private(path, data, mode):
+def _write_private(path: Path, data: bytes | str, mode: int) -> None:
     """Render `data` into `path` at `mode`, replacing any running copy atomically.
 
     `alert --install` wrote run.sh in place, so a tick that launchd had already started read
@@ -261,24 +271,26 @@ def _write_private(path, data, mode):
     try:
         temporary.write_bytes(data if isinstance(data, bytes) else data.encode())
         temporary.chmod(mode)
-        os.replace(temporary, path)
+        Path(temporary).replace(path)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
 
 
-def _private_dir(path):
+def _private_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.is_symlink() or path.stat().st_uid != os.getuid():
         raise AlertError(f"Unsafe alert directory: {path}")
     path.chmod(0o700)
 
 
-def _bootstrap_target():
+def _bootstrap_target() -> str:
     return f"gui/{os.getuid()}/{LABEL}"
 
 
-def _print_cron_equivalent(root, warn, every, cached, auto_switch=False):
+def _print_cron_equivalent(
+    root: str | Path, warn: float, every: float, cached: float, auto_switch: bool = False
+) -> int:
     # `every` is already a validated whole number of minutes (validate_every), so this
     # matches the plist's StartInterval = every * 60 exactly, with no silent truncation.
     # One entry: `;` (not `&&`) because auto-tick exits 2/3 on no action/blocked.
@@ -296,7 +308,15 @@ def _print_cron_equivalent(root, warn, every, cached, auto_switch=False):
     return 2
 
 
-def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=False):
+def install(
+    root: str | Path,
+    *,
+    warn: float = 15,
+    every: float = 30,
+    cached: float = 600,
+    auto_switch: bool = False,
+    dry_run: bool = False,
+) -> int:
     warn = validate_warn(warn)
     every = validate_every(every)
     cached = validate_cached(cached)
@@ -330,15 +350,15 @@ def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=F
     _write_private(plist, plistlib.dumps(plist_data), 0o600)
 
     target = _bootstrap_target()
-    already_loaded = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+    already_loaded = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)  # noqa: S603,S607 -- argv list, no shell=True; command/args are program-constructed, not user strings
     if already_loaded.returncode == 0:
         bootout_cmd = ["launchctl", "bootout", target]
         print(" ".join(bootout_cmd))
-        subprocess.run(bootout_cmd, capture_output=True, text=True)
+        subprocess.run(bootout_cmd, capture_output=True, text=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
 
     bootstrap_cmd = ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)]
     print(" ".join(bootstrap_cmd))
-    result = subprocess.run(bootstrap_cmd, capture_output=True, text=True)
+    result = subprocess.run(bootstrap_cmd, capture_output=True, text=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise AlertError(f"launchctl bootstrap failed: {detail}" if detail else "launchctl bootstrap failed.")
@@ -350,7 +370,7 @@ def install(root, *, warn=15, every=30, cached=600, auto_switch=False, dry_run=F
     return 0
 
 
-def uninstall(root, *, dry_run=False):
+def uninstall(root: str | Path, *, dry_run: bool = False) -> int:
     if sys.platform != "darwin":
         print("xswap alert manages launchd, which is macOS-only; nothing was installed here. Remove your crontab entry manually.")
         return 2
@@ -368,7 +388,7 @@ def uninstall(root, *, dry_run=False):
 
     bootout_cmd = ["launchctl", "bootout", target]
     print(" ".join(bootout_cmd))
-    subprocess.run(bootout_cmd, capture_output=True, text=True)  # "not loaded" and similar failures are expected and ignored
+    subprocess.run(bootout_cmd, capture_output=True, text=True)  # "not loaded" and similar failures are expected and ignored  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
 
     if plist.exists():
         plist.unlink()
@@ -380,7 +400,7 @@ def uninstall(root, *, dry_run=False):
     return 0
 
 
-def status(root):
+def status(root: str | Path) -> int:
     if sys.platform != "darwin":
         print("xswap alert manages launchd, which is macOS-only; nothing is installed here.")
         return 2
@@ -390,7 +410,7 @@ def status(root):
     target = _bootstrap_target()
     loaded = False
     if exists:
-        result = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+        result = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)  # noqa: S603,S607 -- argv list, no shell=True; command/args are program-constructed, not user strings
         loaded = result.returncode == 0
 
     print(f"plist: {'present' if exists else 'absent'} ({plist})")

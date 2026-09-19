@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
+from typing import Any
 
 from xswap.core.errors import UpgradeError
 from xswap.core.path import absolute_which
@@ -10,8 +12,10 @@ from xswap.core.path import absolute_which
 REPO = "https://github.com/intellieffect/xswap.git"
 TAG_RE = re.compile(r"^refs/tags/v(\d+)\.(\d+)\.(\d+)$")
 
+Tag = tuple[tuple[int, int, int], str]
 
-def list_tags(run=None):
+
+def list_tags(run: Callable[..., Any] | None = None) -> list[Tag]:
     run = run or subprocess.run
     # A relative `git` raises rather than being run: `xswap upgrade` is the command that
     # replaces the installed tool, and a project's own `bin/git` would choose which repository
@@ -36,7 +40,7 @@ def list_tags(run=None):
     return sorted(tags)
 
 
-def choose(tags, requested=None):
+def choose(tags: list[Tag], requested: str | None = None) -> Tag:
     if requested:
         for version, tag in tags:
             if tag == requested:
@@ -45,11 +49,11 @@ def choose(tags, requested=None):
     return max(tags)
 
 
-def install_command(tag, uv=None):
+def install_command(tag: str, uv: str | None = None) -> list[str]:
     return [uv or "uv", "tool", "install", "--force", f"git+{REPO}@{tag}"]
 
 
-def running_session_hints(target_version):
+def running_session_hints(target_version: str) -> list[str]:
     """One reopen line per live session that keeps running the previous code after
     a reinstall (`CLI · ai · bridge 0.7.8 · reopen with ... to load 0.8.0`); [] when the
     state cannot be read. Never contains tokens: only account labels, a UUID, paths.
@@ -62,7 +66,7 @@ def running_session_hints(target_version):
         return []
 
 
-def upgrade(current_version, tag=None, dry=False):
+def upgrade(current_version: str, tag: str | None = None, dry: bool = False) -> int:
     version, chosen = choose(list_tags(), tag)
     if version == tuple(int(part) for part in current_version.split(".")):
         print(f"already up to date (v{current_version})")
@@ -80,7 +84,7 @@ def upgrade(current_version, tag=None, dry=False):
     # Read the session records before the reinstall: afterwards this process still runs
     # the previous code and uv may already have replaced the tool environment under it.
     hints = running_session_hints(chosen[1:])
-    result = subprocess.run(install_command(chosen, uv))
+    result = subprocess.run(install_command(chosen, uv))  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
     if result.returncode == 0 and hints:
         print(f"{len(hints)} running xswap session(s) still use the previous bridge; reopen them to load {chosen}:")
         for line in hints:
@@ -94,6 +98,6 @@ def upgrade(current_version, tag=None, dry=False):
         print(str(exc))
         executable = None
     if executable:
-        check = subprocess.run([executable, "--version"], capture_output=True, text=True)
+        check = subprocess.run([executable, "--version"], capture_output=True, text=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
         print((check.stdout or check.stderr).strip())
     return result.returncode

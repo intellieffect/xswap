@@ -13,6 +13,8 @@ uv sync --group dev
 uv run pytest -q
 node --test tests/*.test.mjs
 uv build
+uvx ruff@0.16.6 check .
+uv run pyright
 ```
 
 Do not run mutating launcher commands against your usual account home just to test a change. Use temporary homes or `CODEX_SWAP_HOME`; preserve unrelated processes and user data.

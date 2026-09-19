@@ -10,18 +10,18 @@ is reachable through the registry and still declares every surface it has.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+from fakes.provider import FAKE_QUOTA, FakeProvider, bucket, row
 
 from xswap import providers
 from xswap.core import tick
 from xswap.core.doctor import collect, format_report
 from xswap.core.ranking import rank_candidates
 from xswap.core.types import Check, CredentialState, UsageSnapshot
-
-from fakes.provider import FAKE_QUOTA, FakeProvider, bucket, row
 
 
 class RankingOverASecondPlatform(unittest.TestCase):

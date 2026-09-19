@@ -69,8 +69,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import xswap.manager as codex_swap
 import xswap.completion as xswap_completion
+import xswap.manager as codex_swap
 
 SNAPSHOT_ROOT = Path(__file__).parent / "snapshots"
 HELP_DIR = SNAPSHOT_ROOT / "help"

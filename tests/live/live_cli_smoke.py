@@ -1,8 +1,24 @@
 """Actual Codex TUI + server, fixture-only auth/HTTP, PTY integration."""
-import asyncio, fcntl, json, os, pty, select, signal, struct, subprocess, sys, tempfile, threading, time, termios
+import asyncio
+import fcntl
+import json
+import os
+import pty
+import select
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import threading
+import time
 from pathlib import Path
-from live_codex_smoke import HTTP, Pool, calls, ThreadingHTTPServer, limits
-from xswap.codex_cli import serve_cli, WebSocketBridge
+
+from live_codex_smoke import HTTP, Pool, ThreadingHTTPServer, calls, limits
+
+from xswap.codex_cli import WebSocketBridge, serve_cli
+
 
 class ObservedBridge(WebSocketBridge):
  async def on_server(self,message):
@@ -32,7 +48,7 @@ def main():
   home.joinpath('config.toml').write_text('model="mock-model"\nmodel_provider="fixture"\nchatgpt_base_url='+json.dumps(url)+'\n[model_providers.fixture]\nname="fixture"\nbase_url='+json.dumps(url+'/v1')+'\nwire_api="responses"\nrequires_openai_auth=true\nsupports_websockets=false\n[analytics]\nenabled=false\n[projects.'+json.dumps(tmp)+']\ntrust_level="trusted"\n')
   browser_fixture=None
   if os.environ.get('XSWAP_TEST_BROWSER')=='1':
-   from plugin_runtime_smoke import plugin_fixture,assert_browser_setup
+   from plugin_runtime_smoke import assert_browser_setup, plugin_fixture
    browser_fixture=plugin_fixture(home)
    asyncio.run(assert_browser_setup(home,browser_fixture))
   master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))

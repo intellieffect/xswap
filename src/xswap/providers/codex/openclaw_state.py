@@ -15,17 +15,19 @@ symlinked, non-owner, or group/other-accessible database file.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import contextlib
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import stat
 import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
-from xswap.providers.codex.credentials import CredentialError, read_auth
 from xswap.core.errors import OpenClawStateError
+from xswap.providers.codex.credentials import CredentialError, read_auth
 from xswap.providers.codex.live import jwt_claims
 
 # The single machine-wide key OpenClaw's shared auth-profile store persists
@@ -33,14 +35,14 @@ from xswap.providers.codex.live import jwt_claims
 STATE_KEY = "authProfiles.state"
 
 
-def default_sqlite_path():
+def default_sqlite_path() -> Path:
     """``$OPENCLAW_STATE_DIR/openclaw.sqlite`` or ``~/.openclaw/state/openclaw.sqlite``."""
     state_dir = os.environ.get("OPENCLAW_STATE_DIR")
     base = Path(state_dir).expanduser() if state_dir else Path.home() / ".openclaw" / "state"
     return (base / "openclaw.sqlite").resolve()
 
 
-def profile_id_for_home(home):
+def profile_id_for_home(home: str | Path) -> str | None:
     """The OpenClaw auth profile id xswap's bridge would use for this account
     ('openai:xswap-<hash>'), computed the same way xswap_bridge/openclaw.mjs's
     sourceCredential() does so both sides agree on the id. Returns None for an
@@ -71,7 +73,7 @@ def profile_id_for_home(home):
     return f"openai:xswap-{digest}"
 
 
-def human_delta(seconds):
+def human_delta(seconds: float) -> str:
     seconds = abs(seconds)
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -80,7 +82,7 @@ def human_delta(seconds):
     return f"{seconds / 86400:.1f}d"
 
 
-def format_until(blocked_until_ms, now=None):
+def format_until(blocked_until_ms: float, now: float | None = None) -> str:
     """'<local clock> (in 6.0d)' / '... (6.0d ago)' for a millisecond timestamp."""
     now = time.time() if now is None else now
     remaining = blocked_until_ms / 1000 - now
@@ -91,7 +93,7 @@ def format_until(blocked_until_ms, now=None):
     return f"{clock} (in {human_delta(remaining)})" if remaining > 0 else f"{clock} ({human_delta(remaining)} ago)"
 
 
-def _check_safe_file(path: Path):
+def _check_safe_file(path: Path) -> None:
     """Refuse a symlinked, non-regular, non-owner, or group/other-accessible file."""
     try:
         info = path.lstat()
@@ -107,7 +109,7 @@ def _check_safe_file(path: Path):
         raise OpenClawStateError(f"Unsafe OpenClaw state database permissions at {path}: require mode 0600 (0400 also accepted).")
 
 
-def _read_state(sqlite_path: Path):
+def _read_state(sqlite_path: Path) -> dict[str, Any]:
     """Return the parsed authProfiles.state JSON object, or {} if the row/table is absent."""
     conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     try:
@@ -127,7 +129,7 @@ def _read_state(sqlite_path: Path):
     return value if isinstance(value, dict) else {}
 
 
-def read_cooldowns(sqlite_path, now=None):
+def read_cooldowns(sqlite_path: str | Path, now: float | None = None) -> dict[str, dict[str, Any]]:
     """{profileId: {blockedUntil, blockedReason, blockedSource, errorCount}} for every
     usageStats entry whose blockedUntil (epoch milliseconds) is still in the future.
 
@@ -160,13 +162,13 @@ def read_cooldowns(sqlite_path, now=None):
     return result
 
 
-def _make_backup(sqlite_path: Path, backup_dir: Path):
+def _make_backup(sqlite_path: Path, backup_dir: Path) -> Path:
     backup_dir = Path(backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     info = backup_dir.lstat()
     if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
         raise OpenClawStateError(f"Unsafe backup directory: {backup_dir}")
-    os.chmod(backup_dir, 0o700)
+    Path(backup_dir).chmod(0o700)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     backup_path = backup_dir / f"openclaw-{stamp}-{os.getpid()}.sqlite"
     fd = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -183,17 +185,15 @@ def _make_backup(sqlite_path: Path, backup_dir: Path):
                 dst.close()
         finally:
             src.close()
-        os.chmod(backup_path, 0o600)
+        Path(backup_path).chmod(0o600)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             backup_path.unlink()
-        except OSError:
-            pass
         raise
     return backup_path
 
 
-def clear_cooldown(sqlite_path, profile_ids, backup_dir):
+def clear_cooldown(sqlite_path: str | Path, profile_ids: list[str], backup_dir: str | Path) -> Path:
     """Back up the database, then remove blockedUntil/blockedReason/blockedSource and
     zero errorCount for exactly the given profile ids; every other key (including other
     profiles' usageStats, order, lastGood) is left untouched. Returns the backup path.
@@ -211,7 +211,7 @@ def clear_cooldown(sqlite_path, profile_ids, backup_dir):
     if not profile_ids:
         raise OpenClawStateError("No profile ids to clear.")
 
-    backup_path = _make_backup(sqlite_path, backup_dir)
+    backup_path = _make_backup(sqlite_path, Path(backup_dir))
 
     conn = sqlite3.connect(str(sqlite_path))
     try:
@@ -246,10 +246,8 @@ def clear_cooldown(sqlite_path, profile_ids, backup_dir):
         )
         conn.execute("COMMIT")
     except BaseException:
-        try:
+        with contextlib.suppress(sqlite3.Error):
             conn.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
         raise
     finally:
         conn.close()

@@ -8,13 +8,14 @@ from __future__ import annotations
 import base64
 import json
 import tomllib
+from pathlib import Path
 
-from xswap.providers.codex.credentials import CredentialError, read_auth
 from xswap.core.errors import SwapError
+from xswap.providers.codex.credentials import CredentialError, read_auth
 from xswap.providers.codex.live import jwt_claims
 
 
-def check_file_store(home):
+def check_file_store(home: Path) -> None:
     config = home / "config.toml"
     try:
         data = tomllib.loads(config.read_text()) if config.exists() else {}
@@ -25,7 +26,7 @@ def check_file_store(home):
         raise SwapError(f"{home}: credential storage is {store!r}; this version supports file storage only. No credentials changed.")
 
 
-def chatgpt_org_id(home, name):
+def chatgpt_org_id(home: Path, name: str) -> str:
     """Unverified org id from a local credential, for the same-organization pool guard.
 
     Checks access_token first, matching xswap_live.load_credentials' claim source; the
@@ -50,7 +51,7 @@ def chatgpt_org_id(home, name):
     raise SwapError(f"cannot verify the ChatGPT organization for account {name}; run xswap login {name} or pass --allow-mixed.")
 
 
-def identity(home):
+def identity(home: Path) -> str:
     path = home / "auth.json"
     if not path.exists():
         return "not signed in"

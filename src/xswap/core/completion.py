@@ -25,6 +25,9 @@ it is excluded. See `_is_account_hook` below. This is a plain `dest`
 allow/deny-list, so it needs no changes to the CLI's own argument
 definitions and cannot change `xswap`'s existing behavior.
 """
+from __future__ import annotations
+
+import argparse
 
 SUPPORTED_SHELLS = ("zsh", "bash")
 
@@ -35,18 +38,23 @@ _NEW_NAME_SUBCOMMANDS = frozenset({"register", "add"})
 _ACCOUNT_NAME_DESTS = frozenset({"name", "account"})
 
 
-def generate(parser, shell):
+Group = tuple[list[str], argparse.ArgumentParser]
+
+
+def generate(parser: argparse.ArgumentParser, shell: str) -> str:
     """Render a completion script for `shell` from an xswap argparse `parser`."""
     if shell not in SUPPORTED_SHELLS:
         raise ValueError(f"Unsupported shell {shell!r}; choose one of {', '.join(SUPPORTED_SHELLS)}.")
-    sub_action = parser._subparsers._group_actions[0]
+    # _subparsers/_group_actions are argparse internals with no public equivalent for
+    # "the _SubParsersAction this parser registered"; pyright cannot type them.
+    sub_action: argparse._SubParsersAction = parser._subparsers._group_actions[0]  # type: ignore[union-attr]
     groups = _canonical_groups(sub_action)
     if shell == "zsh":
         return _generate_zsh(sub_action, groups)
     return _generate_bash(groups)
 
 
-def _canonical_groups(sub_action):
+def _canonical_groups(sub_action: argparse._SubParsersAction) -> list[Group]:
     """[(names, subparser), ...] with alias names grouped under their subparser.
 
     `sub_action.choices` maps every name *and* every alias to the same
@@ -65,27 +73,27 @@ def _canonical_groups(sub_action):
     return groups
 
 
-def _is_account_hook(dest, subcommand_name):
+def _is_account_hook(dest: str, subcommand_name: str) -> bool:
     return dest in _ACCOUNT_NAME_DESTS and subcommand_name not in _NEW_NAME_SUBCOMMANDS
 
 
-def _positionals_and_options(subparser):
+def _positionals_and_options(subparser: argparse.ArgumentParser) -> tuple[list[argparse.Action], list[argparse.Action]]:
     positionals, options = [], []
     for action in subparser._actions:
         (options if action.option_strings else positionals).append(action)
     return positionals, options
 
 
-def _is_path_type(action):
+def _is_path_type(action: argparse.Action) -> bool:
     return getattr(action.type, "__name__", "") == "Path"
 
 
-def _sq(text):
+def _sq(text: str) -> str:
     """Single-quote `text` for safe embedding in a generated shell script."""
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-def _bracket_escape(text):
+def _bracket_escape(text: str) -> str:
     """Escape characters that would break a zsh `_arguments` `[...]` span."""
     return text.replace("\\", "\\\\").replace("]", "\\]").replace("[", "\\[")
 
@@ -104,8 +112,8 @@ _ACCOUNT_NAMES_PIPELINE = (
 )
 
 
-def _generate_zsh(sub_action, groups):
-    choice_help = {a.dest: (a.help or "") for a in sub_action._choices_actions}
+def _generate_zsh(sub_action: argparse._SubParsersAction, groups: list[Group]) -> str:
+    choice_help = {a.dest: (a.help or "") for a in sub_action._choices_actions}  # type: ignore[attr-defined]  # argparse internal: no public "per-subcommand help" accessor
     lines = [
         "#compdef xswap",
         '# Install: xswap completion zsh > "${fpath[1]}/_xswap"  (new shells pick it up)',
@@ -195,7 +203,7 @@ def _generate_zsh(sub_action, groups):
     return "\n".join(lines) + "\n"
 
 
-def _generate_bash(groups):
+def _generate_bash(groups: list[Group]) -> str:
     all_names = [name for names, _ in groups for name in names]
     lines = [
         "# xswap bash completion",

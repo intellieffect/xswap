@@ -14,23 +14,62 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from pathlib import Path
 import stat
 import subprocess
 import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from xswap.manager import ROOT_VARIABLE, SwapError, __version__, check_file_store, default_root, identity, resolve_openclaw_package_root
-from xswap.providers.codex.credentials import CredentialError, read_auth
-from xswap.providers.codex.live import LiveError, jwt_claims
-from xswap.providers.codex.runs import bridge_hints, describe_bridge_hint, status_data
-from xswap.core.settings import read_settings
-from xswap.providers.codex.wrapper import BYPASS_REASON, BYPASS_VARIABLE, DRIFT_FIXES, RELATIVE_RECORD_REASON, bypass_set, codex_path_entries, describe_drift, entry_drift, link_target_path, path_state, recorded_real_codex, wrapper_drift
-from xswap.providers.codex.openclaw_state import OpenClawStateError, default_sqlite_path, format_until, profile_id_for_home, read_cooldowns
+from xswap.core.doctor import (  # noqa: F401  re-exported under the names this module has always had
+    FAIL,
+    OK,
+    WARN,
+    check,
+    format_report,
+    print_report,
+)
 from xswap.core.path import RelativeEntryError, absolute_which
 from xswap.core.paths import auto_dir, cli_runs_dir
+from xswap.core.settings import read_settings
+from xswap.core.types import AccountRecord, CheckPayload
+from xswap.manager import (
+    ROOT_VARIABLE,
+    SwapError,
+    __version__,
+    check_file_store,
+    default_root,
+    identity,
+    resolve_openclaw_package_root,
+)
+from xswap.providers.codex.credentials import CredentialError, read_auth
+from xswap.providers.codex.live import LiveError, jwt_claims
+from xswap.providers.codex.openclaw_state import (
+    OpenClawStateError,
+    default_sqlite_path,
+    format_until,
+    profile_id_for_home,
+    read_cooldowns,
+)
 from xswap.providers.codex.relocate import codex_homes_inside_root, inside_root
+from xswap.providers.codex.runs import bridge_hints, describe_bridge_hint, status_data
+from xswap.providers.codex.wrapper import (
+    BYPASS_REASON,
+    BYPASS_VARIABLE,
+    DRIFT_FIXES,
+    RELATIVE_RECORD_REASON,
+    bypass_set,
+    codex_path_entries,
+    describe_drift,
+    entry_drift,
+    link_target_path,
+    path_state,
+    recorded_real_codex,
+    wrapper_drift,
+)
 
-from xswap.core.doctor import FAIL, OK, WARN, check, format_report, print_report  # noqa: F401  re-exported under the names this module has always had
+if TYPE_CHECKING:
+    from xswap.manager import Manager
+
 TOKEN_WARN_SECONDS = 24 * 3600
 # Everything codex_swap.identity() can return that is not an address: a local label with
 # nothing to compare against the login an app server reports.
@@ -40,7 +79,7 @@ IDENTITY_SENTINELS = ("not signed in", "unreadable auth cache", "API key", "Chat
 SECRET_ENV_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN")
 
 
-def _finish(label, status, detail, disabled):
+def _finish(label: str, status: str, detail: str, disabled: bool) -> CheckPayload:
     """Per-account checks never fail the run for an account that is out of selection."""
     if disabled:
         if status == FAIL:
@@ -50,7 +89,7 @@ def _finish(label, status, detail, disabled):
     return check(label, status, detail)
 
 
-def _safe_env():
+def _safe_env() -> dict[str, str]:
     env = os.environ.copy()
     for key in SECRET_ENV_KEYS:
         env.pop(key, None)
@@ -60,7 +99,7 @@ def _safe_env():
     return env
 
 
-def _human_delta(seconds):
+def _human_delta(seconds: float) -> str:
     seconds = abs(seconds)
     if seconds < 3600:
         return f"{int(seconds // 60)}m"
@@ -69,7 +108,7 @@ def _human_delta(seconds):
     return f"{seconds / 86400:.1f}d"
 
 
-def check_codex_binary():
+def check_codex_binary() -> CheckPayload:
     try:
         executable = absolute_which("codex")
     except RelativeEntryError as exc:
@@ -81,7 +120,7 @@ def check_codex_binary():
     if not executable:
         return check("codex binary", FAIL, "codex not found on PATH")
     try:
-        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10, env=_safe_env())
+        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10, env=_safe_env())  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
     except (OSError, subprocess.TimeoutExpired) as exc:
         return check("codex binary", FAIL, f"{executable}: {exc}")
     output = (result.stdout or result.stderr).strip()
@@ -90,11 +129,15 @@ def check_codex_binary():
     return check("codex binary", OK, f"{executable} ({output})" if output else executable)
 
 
-def _shown(entry):
+def _shown(entry: dict[str, Any]) -> str:
     return f"{entry['path']} -> {entry['target']}" if entry.get("target") else entry["path"]
 
 
-def check_wrapper(settings, accounts=(), env=None):
+def check_wrapper(
+    settings: dict[str, Any],
+    accounts: dict[str, AccountRecord] | tuple[()] = (),
+    env: dict[str, str] | None = None,
+) -> CheckPayload:
     """What a PATH lookup of `codex` runs, not only the entry recorded in auto.json.
 
     2026-09-10: a standalone install at ~/.local/bin/codex preceded the wrapped
@@ -116,7 +159,7 @@ def check_wrapper(settings, accounts=(), env=None):
     # relative=True walks every element, the relative ones included, and the absolute-only
     # list every repair sees is that same walk filtered: one stat of each candidate.
     entries = codex_path_entries(settings, env, relative=True)
-    absolute = [entry for entry in entries if os.path.isabs(entry["path"])]
+    absolute = [entry for entry in entries if Path(entry["path"]).is_absolute()]
     state, first = path_state(settings, absolute)
     drift = wrapper_drift(settings)
     row = _wrapper_row(wrapper, names, reconnect, state, first, absolute, drift)
@@ -128,7 +171,7 @@ def check_wrapper(settings, accounts=(), env=None):
     # happened to hold an xswap-codex (2026-09-13). Not said at all while the record is
     # unconfigured or unusable: nothing there claims plain `codex` goes through xswap, and
     # a relative record has no entry to be bypassed.
-    ahead = entries[0] if entries and not os.path.isabs(entries[0]["path"]) else None
+    ahead = entries[0] if entries and not Path(entries[0]["path"]).is_absolute() else None
     if ahead is None or state == "unconfigured" or drift["reason"] == RELATIVE_RECORD_REASON:
         return row
     status, sentence = _relative_caveat(ahead, Path(wrapper["path"]), alone=row["status"] == OK)
@@ -138,7 +181,7 @@ def check_wrapper(settings, accounts=(), env=None):
                  f"{row['detail']} {sentence}")
 
 
-def _relative_caveat(ahead, path, alone):
+def _relative_caveat(ahead: dict[str, Any], path: Path, alone: bool) -> tuple[str, str]:
     """(status, sentence) for the relative PATH element plain `codex` reaches first.
 
     `alone` when the absolute-PATH rows were OK: the element is then the whole finding and
@@ -167,7 +210,15 @@ def _relative_caveat(ahead, path, alone):
                   f"it and it bypasses the wrapped entry {path} here as well. {fix}")
 
 
-def _wrapper_row(wrapper, names, reconnect, state, first, entries, drift):
+def _wrapper_row(
+    wrapper: dict[str, Any],
+    names: list[str],
+    reconnect: str,
+    state: str,
+    first: dict[str, Any] | None,
+    entries: list[dict[str, Any]],
+    drift: dict[str, Any],
+) -> CheckPayload:
     """The wrapper row the absolute PATH entries produce; every branch reads one snapshot."""
     if state == "unconfigured":
         status = WARN if len(names) >= 2 else OK
@@ -197,6 +248,7 @@ def _wrapper_row(wrapper, names, reconnect, state, first, entries, drift):
         cause, fix = describe_drift(drift, reconnect)
         return check("wrapper", FAIL, f"no codex on PATH and the wrapped entry {path} no longer runs "
                      f"({drift['reason']}): {cause}. Fix: {fix}")
+    assert first is not None  # every state left ("connected", "drifted", "shadowed") has a first PATH entry  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
     shown = _shown(first)
     if state == "connected":
         shadowed = [entry for entry in entries[1:] if entry["kind"] == "foreign"]
@@ -235,7 +287,7 @@ def _wrapper_row(wrapper, names, reconnect, state, first, entries, drift):
                      "or use reconnects one). Nothing was repaired. Re-run: xswap doctor")
     return check("wrapper", FAIL, f"plain codex runs {shown}, not xswap-codex, and xswap cannot wrap it "
                  f"({shadow['reason']}): {cause}. The wrapped entry {path} is shadowed. Fix: {fix}")
-def check_bypass(settings, env=None):
+def check_bypass(settings: dict[str, Any], env: dict[str, str] | None = None) -> CheckPayload | None:
     """XSWAP_BYPASS=1 in this environment: `codex` passes through, whatever the wrapper says.
 
     A separate row because it is true of the shell doctor runs in, not of any entry: the
@@ -257,7 +309,7 @@ def check_bypass(settings, env=None):
                  f"wrapped entry {wrapper['path']} applies no selection in this shell. Fix: {fix}")
 
 
-def check_state_root(manager, env=None):
+def check_state_root(manager: Manager, env: dict[str, str] | None = None) -> CheckPayload | None:
     """Which auto.json this shell reads, when a variable rather than the default chose it.
 
     None when CODEX_SWAP_HOME is not set: every shell then reads the same root and the
@@ -277,7 +329,7 @@ def check_state_root(manager, env=None):
                  f"that root holds, or none. Fix: export {ROOT_VARIABLE}={manager.root} wherever codex runs")
 
 
-def check_credential_store(manager):
+def check_credential_store(manager: Manager) -> CheckPayload:
     try:
         check_file_store(manager.source)
     except SwapError as exc:
@@ -285,7 +337,7 @@ def check_credential_store(manager):
     return check("credential store", OK, f"file ({manager.source})")
 
 
-def check_home(name, home, disabled):
+def check_home(name: str, home: Path, disabled: bool) -> CheckPayload:
     label = f"{name}: home"
     if not home.exists():
         return _finish(label, FAIL, f"{home} does not exist", disabled)
@@ -294,7 +346,7 @@ def check_home(name, home, disabled):
     return check(label, OK, str(home))
 
 
-def check_credentials(name, home, disabled):
+def check_credentials(name: str, home: Path, disabled: bool) -> CheckPayload:
     label = f"{name}: credentials"
     try:
         value = identity(home)
@@ -306,7 +358,7 @@ def check_credentials(name, home, disabled):
     return check(label, OK, detail)
 
 
-def check_token_expiry(name, home, disabled):
+def check_token_expiry(name: str, home: Path, disabled: bool) -> CheckPayload:
     label = f"{name}: token expiry"
     try:
         data = read_auth(home)
@@ -333,7 +385,7 @@ def check_token_expiry(name, home, disabled):
     return check(label, OK, f"expires in {_human_delta(remaining)}")
 
 
-def check_sign_in(name, home, disabled, manager):
+def check_sign_in(name: str, home: Path, disabled: bool, manager: Manager) -> CheckPayload:
     """The usage service rejected this account's login on a recent quota read
     (auth-state.json) and nothing has cleared it: `xswap login NAME` or a later
     successful live fetch does. Only a record for the current login label counts
@@ -347,7 +399,7 @@ def check_sign_in(name, home, disabled, manager):
     return _finish(label, FAIL, f"sign-in required since {delta} ago · xswap login {name}", disabled)
 
 
-def check_plugins(name, home):
+def check_plugins(name: str, home: Path) -> CheckPayload:
     label = f"{name}: plugins"
     target = home / "plugins"
     if target.is_symlink():
@@ -357,7 +409,7 @@ def check_plugins(name, home):
     return check(label, OK, "no plugins")
 
 
-def check_auto_pool(settings, accounts):
+def check_auto_pool(settings: dict[str, Any], accounts: dict[str, AccountRecord]) -> CheckPayload:
     if not settings.get("enabled"):
         return check("auto pool", OK, "automatic switching not enabled")
     names = settings.get("accounts") or []
@@ -367,7 +419,7 @@ def check_auto_pool(settings, accounts):
     return check("auto pool", OK, f"pool: {', '.join(names)}")
 
 
-def check_auto_dir(manager):
+def check_auto_dir(manager: Manager) -> CheckPayload:
     """The manual-switch control directory must be 0700 or `xswap use` skips running sessions."""
     auto = auto_dir(manager.root)
     try:
@@ -383,7 +435,7 @@ def check_auto_dir(manager):
     return check("auto control dir", OK, str(auto))
 
 
-def check_auto_runs(manager):
+def check_auto_runs(manager: Manager) -> CheckPayload:
     """Count CLI run records and flag live bridges (CLI or desktop) that still run code
     other than the installed xswap, each with the command that reopens it.
 
@@ -428,7 +480,7 @@ def check_auto_runs(manager):
     return check("auto cli-runs", WARN, detail)
 
 
-def check_auto_sessions(manager, accounts):
+def check_auto_sessions(manager: Manager, accounts: dict[str, AccountRecord]) -> CheckPayload:
     """Running bridges: what their own app server confirmed after the last login (0.8.0).
 
     `account` in a status record is what the bridge believes it installed;
@@ -495,7 +547,7 @@ for (const name of process.env.XSWAP_DOCTOR_ENTRIES.split(',')) {
 """
 
 
-def check_openclaw():
+def check_openclaw() -> list[CheckPayload]:
     try:
         executable = absolute_which("openclaw")
         node = absolute_which("node")
@@ -513,7 +565,7 @@ def check_openclaw():
         return [check("openclaw", WARN, "cannot locate OpenClaw's installed package through its executable")]
     env = {**_safe_env(), "XSWAP_DOCTOR_PACKAGE_ROOT": str(package_root), "XSWAP_DOCTOR_ENTRIES": ",".join(OPENCLAW_ENTRY_POINTS)}
     try:
-        result = subprocess.run([node, "-e", _NODE_PROBE], capture_output=True, text=True, timeout=10, env=env)
+        result = subprocess.run([node, "-e", _NODE_PROBE], capture_output=True, text=True, timeout=10, env=env)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [check("openclaw", WARN, f"plugin-sdk probe failed: {exc}")]
     if result.returncode:
@@ -522,7 +574,7 @@ def check_openclaw():
     return [check("openclaw", OK, f"openclaw + node found; plugin-sdk resolvable ({package_root})")]
 
 
-def _codex_weekly_remaining_from_cache(cache_path, name, label):
+def _codex_weekly_remaining_from_cache(cache_path: str | Path, name: str, label: str) -> float | None:
     """The codex bucket's weekly-window remainingPercent from usage-cache.json, or
     None if there's no fresh cache entry for this exact identity. Never spawns a
     process or makes a network call -- doctor stays fully offline.
@@ -554,7 +606,9 @@ def _codex_weekly_remaining_from_cache(cache_path, name, label):
     return remaining if isinstance(remaining, (int, float)) and not isinstance(remaining, bool) else None
 
 
-def check_openclaw_cooldown(name, home, disabled, cooldowns, cache_path):
+def check_openclaw_cooldown(
+    name: str, home: Path, disabled: bool, cooldowns: dict[str, dict[str, Any]], cache_path: str | Path
+) -> CheckPayload | None:
     """One row for an xswap account that has a computable OpenClaw profile id; an
     account with no usable ChatGPT OAuth credential (API key, unreadable, disabled
     with no login) has nothing to check and is omitted entirely (returns None),
@@ -577,7 +631,7 @@ def check_openclaw_cooldown(name, home, disabled, cooldowns, cache_path):
     return _finish(label, WARN, detail, disabled)
 
 
-def check_openclaw_cooldowns(accounts, cache_path):
+def check_openclaw_cooldowns(accounts: dict[str, AccountRecord], cache_path: str | Path) -> list[CheckPayload]:
     """Skip entirely (no rows) when OpenClaw's state database is absent -- there is
     nothing stale to report yet, matching check_openclaw()'s own WARN-not-FAIL
     treatment of an optional integration that most installs never touch.
@@ -600,7 +654,9 @@ def check_openclaw_cooldowns(accounts, cache_path):
     return rows
 
 
-def check_real_codex(manager, settings, accounts):
+def check_real_codex(
+    manager: Manager, settings: dict[str, Any], accounts: dict[str, AccountRecord]
+) -> list[CheckPayload]:
     """Where each wrapped codex entry's real executable lives (INT-5186, item 2). Empty when
     the codex command is not connected. Paths are compared, never moved.
 
@@ -626,7 +682,9 @@ def check_real_codex(manager, settings, accounts):
     return rows
 
 
-def _real_codex_row(manager, label, record, reconnect, primary):
+def _real_codex_row(
+    manager: Manager, label: str, record: dict[str, Any], reconnect: str, primary: bool
+) -> CheckPayload:
     """One `real codex` row. A secondary record is not what plain `codex` runs today, but
     `auto-disable` puts its path back on PATH pointing at exactly this executable."""
     real = record["realCodex"]
@@ -652,7 +710,7 @@ def _real_codex_row(manager, label, record, reconnect, primary):
     return check(label, OK, real)
 
 
-def check_packages_links(manager, accounts):
+def check_packages_links(manager: Manager, accounts: dict[str, AccountRecord]) -> list[CheckPayload]:
     """One row per xswap-owned Codex home whose `packages` entry exists, plus every auto
     runtime home that exists at all: the entry must link to a home outside xswap's root
     so Codex's updater installs there (see xswap_relocate)."""
@@ -688,7 +746,7 @@ def check_packages_links(manager, accounts):
     return rows
 
 
-def check_storage(manager):
+def check_storage(manager: Manager) -> CheckPayload:
     try:
         info = manager.root.lstat()
     except OSError as exc:
@@ -699,7 +757,7 @@ def check_storage(manager):
     return check("storage", OK, str(manager.root))
 
 
-def run(manager):
+def run(manager: Manager) -> list[CheckPayload]:
     """Return a list of read-only check results. Never mutates state or touches the network."""
     results = [check_codex_binary()]
 

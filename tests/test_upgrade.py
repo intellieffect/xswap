@@ -215,7 +215,10 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(order, ["gather", "install", "version"])
 
     def test_running_session_hints_come_from_the_store_and_carry_no_secrets(self):
-        import fcntl, os, tempfile
+        import fcntl
+        import os
+        import tempfile
+
         from xswap.manager import atomic_json
         from xswap.upgrade import running_session_hints
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,6 +241,7 @@ class UpgradeTests(unittest.TestCase):
     def test_readme_install_snippets_pin_the_current_release(self):
         # README pinned v0.6.1 through four releases; keep the snippets on __version__ (INT-5085).
         import re
+
         from xswap.manager import __version__
         root = pathlib.Path(__file__).parent.parent
         for name in ("README.md", "README.ko.md"):

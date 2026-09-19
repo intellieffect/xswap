@@ -12,16 +12,26 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-from pathlib import Path  # noqa: F401  used by the annotations and Path-valued callers
 import shlex
 import shutil
 import time
 import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from xswap.providers.codex.live import BRIDGE_LOG_NAME
 from xswap.core.paths import auto_dir, cli_runs_dir
 from xswap.core.settings import read_settings
-from xswap.providers.codex.wrapper import BYPASS_REASON, RELATIVE_ENTRY_REASON, bypass_set, wrapper_drift, wrapper_state
+from xswap.providers.codex.live import BRIDGE_LOG_NAME
+from xswap.providers.codex.wrapper import (
+    BYPASS_REASON,
+    RELATIVE_ENTRY_REASON,
+    bypass_set,
+    wrapper_drift,
+    wrapper_state,
+)
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
 
 STALE_RUN_SECONDS = 7 * 24 * 3600
@@ -41,7 +51,7 @@ SESSION_KEYS = ('account', 'event', 'switches', 'bridgePid', 'serverPid', 'cliPi
     'verifiedAccount', 'verifiedIdentity', 'verifiedAt', 'verifyReason')
 
 
-def run_dir_empty(run_dir):
+def run_dir_empty(run_dir: Path) -> bool:
     """True when the record holds nothing but (optionally) its lock file.
 
     Such a record is invisible in every report: the TUI exited before its
@@ -55,12 +65,12 @@ def run_dir_empty(run_dir):
         return False
 
 
-def stopped_cleanly(state):
+def stopped_cleanly(state: dict[str, Any] | None) -> bool:
     """A `stopped` record without a failure reason: the bridge ended the normal way."""
     return isinstance(state, dict) and state.get('event') == 'stopped' and not state.get('reason')
 
 
-def prune_limit(state, empty):
+def prune_limit(state: dict[str, Any] | None, empty: bool) -> int:
     """Seconds a non-running record is kept before it is pruned without --prune.
 
     An empty record has nothing to show. A clean `stopped` record was already
@@ -77,7 +87,7 @@ def prune_limit(state, empty):
     return STALE_RUN_SECONDS
 
 
-def prune_rule(state, empty, age):
+def prune_rule(state: dict[str, Any] | None, empty: bool, age: float) -> str:
     """Short label for the schedule a removal fell under; 'forced' only with --prune."""
     if empty:
         return 'empty'
@@ -88,7 +98,9 @@ def prune_rule(state, empty, age):
     return 'forced'
 
 
-def scan_runs(manager, prune=False, cleanup=True):
+def scan_runs(
+    manager: Manager, prune: bool = False, cleanup: bool = True
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read every bridge record; with cleanup, remove the ones nobody will read again.
 
     Returns (sessions, pruned). A record whose lock is held is never removed,
@@ -164,7 +176,7 @@ def scan_runs(manager, prune=False, cleanup=True):
     return sessions, pruned
 
 
-def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
+def reported_sessions(sessions: list[dict[str, Any]], limit: int = SESSION_REPORT_LIMIT) -> list[dict[str, Any]]:
     """Every running record plus the `limit - running` newest stopped ones, in scan order.
 
     So the list can exceed `limit` when more than `limit` bridges run: the cap bounds
@@ -184,7 +196,7 @@ def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
         return list(sessions)
     room = max(0, limit - sum(1 for session in sessions if session.get('running')))
 
-    def when(index):
+    def when(index: int) -> float:
         # Whatever a status.json holds: scan_runs copies `updatedAt` by name without checking
         # it, so a record written by hand or by a newer bridge can carry a string, and mixing
         # those with numbers in one sort would raise out of every report that reads this list.
@@ -198,7 +210,7 @@ def reported_sessions(sessions, limit=SESSION_REPORT_LIMIT):
             if session.get('running') or index in keep]
 
 
-def status_data(manager, prune=False, cleanup=True):
+def status_data(manager: Manager, prune: bool = False, cleanup: bool = True) -> dict[str, Any]:
     settings = read_settings(manager)
     sessions, pruned = scan_runs(manager, prune=prune, cleanup=cleanup)
     drift = wrapper_drift(settings)
@@ -228,13 +240,13 @@ def status_data(manager, prune=False, cleanup=True):
 SURFACE_LABELS = {'cli': 'CLI', 'desktop': 'Desktop'}
 
 
-def bridge_label(session):
+def bridge_label(session: dict[str, Any]) -> str:
     """The version a status record reports; every bridge from 0.7.6 on writes it."""
     version = session.get('bridgeVersion')
     return version if isinstance(version, str) and version else 'unknown (older than 0.7.6)'
 
 
-def reopen_command(session, state, manager):
+def reopen_command(session: dict[str, Any], state: dict[str, Any], manager: Manager) -> str | None:
     """Shell-quoted command that reopens this CLI session's conversation on the
     installed code, or None when no saved conversation can be named.
 
@@ -265,7 +277,7 @@ def reopen_command(session, state, manager):
     return shlex.join(['xswap', 'run', '--auto', '--accounts', ','.join(names), '--', 'resume', thread])
 
 
-def bridge_hint(session, state, manager, target_version):
+def bridge_hint(session: dict[str, Any], state: dict[str, Any], manager: Manager, target_version: str) -> str:
     """One English line saying how to bring a running session onto target_version."""
     label = bridge_label(session)
     if session.get('surface') == 'desktop':
@@ -276,7 +288,7 @@ def bridge_hint(session, state, manager, target_version):
     return f'bridge {label} · exit and reopen it to load {target_version}'
 
 
-def bridge_hints(manager, state, target_version):
+def bridge_hints(manager: Manager, state: dict[str, Any], target_version: str) -> list[dict[str, Any]]:
     """Running sessions whose bridge is not target_version, each with its reopen hint.
 
     `state` is a status_data() result. A stopped record is never listed: only a live
@@ -294,12 +306,12 @@ def bridge_hints(manager, state, target_version):
     return hints
 
 
-def describe_bridge_hint(hint):
+def describe_bridge_hint(hint: dict[str, Any]) -> str:
     """`CLI · ai · bridge 0.7.2 · reopen with ... to load 0.8.0` for doctor and upgrade."""
     return f"{SURFACE_LABELS.get(hint['surface'], 'Unknown')} · {hint['account'] or 'unknown'} · {hint['hint']}"
 
 
-def show_status(manager, prune=False):
+def show_status(manager: Manager, prune: bool = False) -> None:
     # Looked up through `codex_cli` at call time, like `display` does: the suite
     # patches `xswap.providers.codex.codex_cli.status_data`, and `show_status` used to read that
     # global. Drop once the re-export goes away.

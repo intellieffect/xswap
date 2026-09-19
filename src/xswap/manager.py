@@ -29,46 +29,87 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
 import shutil  # noqa: F401  patch target: xswap.manager.shutil.which
 import subprocess  # noqa: F401  patch target: xswap.manager.subprocess.{run,call}
 import sys
 import time  # noqa: F401  patch target: xswap.manager.time
+from pathlib import Path
+from typing import Any
 
-from xswap.usage import AUTH_FAILED_STATUS, UsageError, is_ok, is_sign_in_failure, normalize_limits, normalize_reset_credits, read_limits, short_line, window_label  # noqa: F401
-from xswap.usage import warnings as usage_warnings  # noqa: F401  re-exported: xswap.cli.commands.usage reads it here
-from xswap.display import resolve_lang  # noqa: F401  re-exported
-from xswap.live import LiveError, buckets_available, jwt_claims  # noqa: F401
-from xswap.plugins import ensure_plugins  # noqa: F401
-from xswap.relocate import link_packages  # noqa: F401
-from xswap.credentials import CredentialError, read_auth  # noqa: F401
-from xswap.upgrade import UpgradeError, upgrade  # noqa: F401  re-exported: xswap.cli.commands.maintenance reads `upgrade` here
+from xswap import fsutil, locking, providers
+from xswap._version import (
+    __version__,  # noqa: F401  re-exported: the codex_swap shim and `xswap --version`
+)
 from xswap.alert import AlertError  # noqa: F401  re-exported
-from xswap.alert import install as alert_install, status as alert_status, uninstall as alert_uninstall  # noqa: F401  re-exported
-from xswap.path import absolute_which, relative_entry_message  # noqa: F401
-from xswap import fsutil, locking
-from xswap._version import __version__  # noqa: F401  re-exported: the codex_swap shim and `xswap --version`
-from xswap.errors import SwapError
-from xswap.fsutil import atomic_json  # noqa: F401  re-exported: tests and siblings import it from here
-from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, profile_dir, settings_path  # noqa: F401
+from xswap.alert import install as alert_install  # noqa: F401  re-exported
 
 # Re-exported so `doctor`, `init`, `tick`, the `codex_swap` shim and the tests keep
 # importing these from `xswap.manager`, which is where they have always lived.
-from xswap.auth_state import AuthState, is_auth_failed  # noqa: F401  re-exported: `tick` and the suite import it here
+from xswap.auth_state import (  # noqa: F401  re-exported: `tick` and the suite import it here
+    AuthState,
+    is_auth_failed,
+)
+from xswap.core.quota import quota_windows
+from xswap.core.types import (
+    AccountRecord,
+    AccountUsageRow,
+    AuthStateEntry,
+    RegistryData,
+    UsageBucket,
+)
+from xswap.credentials import CredentialError, read_auth  # noqa: F401
+from xswap.display import resolve_lang  # noqa: F401  re-exported
+from xswap.errors import SwapError
+from xswap.fsutil import (
+    atomic_json,  # noqa: F401  re-exported: tests and siblings import it from here
+)
 from xswap.identity import chatgpt_org_id, check_file_store, identity
 from xswap.launcher import Launcher
+from xswap.live import LiveError, buckets_available, jwt_claims  # noqa: F401
 from xswap.mappings import Mappings
 from xswap.openclaw_sync import OpenClawSync, parse_pool, resolve_openclaw_package_root
+from xswap.path import absolute_which, relative_entry_message  # noqa: F401
+from xswap.paths import (  # noqa: F401
+    ROOT_VARIABLE,
+    auto_dir,
+    cli_runs_dir,
+    default_root,
+    profile_dir,
+    settings_path,
+)
+from xswap.plugins import ensure_plugins  # noqa: F401
 from xswap.ranking import rank_candidates, window_percent  # noqa: F401
-from xswap.core.quota import quota_windows
-from xswap.usage import CODEX_QUOTA
-from xswap import providers
-from xswap.registry import UNSET as _UNSET, Registry, validate_name  # noqa: F401
-from xswap.reports import describe_login_report, describe_switch_report, failure_reasons_text  # noqa: F401
+from xswap.registry import UNSET as _UNSET
+from xswap.registry import Registry
+from xswap.relocate import link_packages  # noqa: F401
+from xswap.reports import (  # noqa: F401
+    describe_login_report,
+    describe_switch_report,
+    failure_reasons_text,
+)
+from xswap.upgrade import (  # noqa: F401  re-exported: xswap.cli.commands.maintenance reads `upgrade` here
+    UpgradeError,
+    upgrade,
+)
+from xswap.usage import (  # noqa: F401
+    AUTH_FAILED_STATUS,
+    CODEX_QUOTA,
+    UsageError,
+    is_ok,
+    is_sign_in_failure,
+    normalize_limits,
+    normalize_reset_credits,
+    read_limits,
+    short_line,
+    window_label,
+)
+from xswap.usage import (
+    warnings as usage_warnings,  # noqa: F401  re-exported: xswap.cli.commands.usage reads it here
+)
 from xswap.usage_cache import UsageCache
 
 
-def private_dir(path: Path):
+def private_dir(path: Path) -> None:
     """fsutil.private_dir reporting through SwapError, this surface's error class.
 
     Kept as a function defined here (rather than a re-exported name) so it stays
@@ -78,7 +119,7 @@ def private_dir(path: Path):
     return fsutil.private_dir(path, SwapError)
 
 
-def validate_warn_threshold(value):
+def validate_warn_threshold(value: Any) -> float:
     if isinstance(value, bool):
         raise SwapError("--warn must be a number from 1 to 100.")
     if not isinstance(value, (int, float)):
@@ -91,7 +132,7 @@ def validate_warn_threshold(value):
     return float(value)
 
 
-def parse_cache_seconds(value):
+def parse_cache_seconds(value: Any) -> float | None:
     if value is None:
         return None
     try:
@@ -103,12 +144,12 @@ def parse_cache_seconds(value):
     return seconds
 
 
-def codex_windows(buckets):
+def codex_windows(buckets: list[UsageBucket]) -> list[Any]:
     """The Codex quota bucket's windows, flattened; `quota_windows` with Codex's shape."""
     return quota_windows(buckets, CODEX_QUOTA)
 
 
-def plain_codex_notice(manager, selected_home):
+def plain_codex_notice(manager: Manager, selected_home: str | Path) -> str | None:
     """Explain when the ordinary `codex` command still bypasses the xswap selection.
 
     Checks what a PATH lookup of `codex` runs, not only the entry recorded in
@@ -120,8 +161,17 @@ def plain_codex_notice(manager, selected_home):
     runs is xswap-codex with automatic switching on, or when plain codex already
     uses the selected home. Only local labels and paths; never tokens.
     """
-    from xswap.codex_cli import (BYPASS_REASON, RELATIVE_ENTRY_REASON, bypass_set, describe_drift, entry_drift,
-                           read_settings, reconnect_wrapper, wrapper_drift, wrapper_state)
+    from xswap.codex_cli import (
+        BYPASS_REASON,
+        RELATIVE_ENTRY_REASON,
+        bypass_set,
+        describe_drift,
+        entry_drift,
+        read_settings,
+        reconnect_wrapper,
+        wrapper_drift,
+        wrapper_state,
+    )
     try:
         reconnect_wrapper(manager)
         settings = read_settings(manager)
@@ -149,6 +199,7 @@ def plain_codex_notice(manager, selected_home):
         return (f"Note: plain `codex` does not go through xswap here ({BYPASS_REASON}): {cause}, so it keeps using "
                 f"{manager.source} ({label}); this selection applies only to xswap and xswap app. Fix: {fix}")
     if state in ("drifted", "shadowed", "relative"):
+        assert first is not None  # these states are only reported with a first PATH entry  # noqa: S101 -- narrows an invariant the checker can't see across the call; not user input
         shown = f"{first['path']} -> {first['target']}" if first.get("target") else first["path"]
         # A relative entry is a skip by construction -- nothing may re-point one -- so it carries
         # entry_drift's shape with the reason whose cause and fix name the PATH element and the
@@ -192,38 +243,38 @@ class _Hooks:
     """
 
     @staticmethod
-    def identity(home):
+    def identity(home: Path) -> str:
         return identity(home)
 
     @staticmethod
-    def check_file_store(home):
+    def check_file_store(home: Path) -> None:
         return check_file_store(home)
 
     @staticmethod
-    def private_dir(path):
+    def private_dir(path: Path) -> None:
         return private_dir(path)
 
     @staticmethod
-    def read_limits(*args, **kwargs):
+    def read_limits(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return read_limits(*args, **kwargs)
 
     @staticmethod
-    def chatgpt_org_id(home, name):
+    def chatgpt_org_id(home: Path, name: str) -> str:
         return chatgpt_org_id(home, name)
 
     @staticmethod
-    def parse_pool(value):
+    def parse_pool(value: str | list[str]) -> list[str]:
         return parse_pool(value)
 
     @staticmethod
-    def resolve_openclaw_package_root(executable):
+    def resolve_openclaw_package_root(executable: str) -> Path | None:
         return resolve_openclaw_package_root(executable)
 
 
 class Manager:
     """Facade over the collaborators; every method here delegates and adds nothing."""
 
-    def __init__(self, root=None, source=None, create=True):
+    def __init__(self, root: str | Path | None = None, source: str | Path | None = None, create: bool = True) -> None:
         self.root = Path(root or os.environ.get(ROOT_VARIABLE, default_root())).expanduser().resolve()
         self.source = Path(source or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
         # `create=False` for a caller that only reads state and must not invent it: the
@@ -252,10 +303,10 @@ class Manager:
     # never open a second descriptor on the same file: flock from the same process
     # would either self-deadlock or split a sequence that must stay atomic.
 
-    def locked(self):
+    def locked(self) -> Any:
         return locking.locked(self.root / ".lock")
 
-    def try_locked(self):
+    def try_locked(self) -> Any:
         """locked(), but yields False instead of waiting when someone else holds the lock.
 
         This lock is held across whole OpenClaw subprocesses (`sync-openclaw` waits up to
@@ -270,25 +321,25 @@ class Manager:
 
     # -- registry and selection ------------------------------------------------
 
-    def read(self):
+    def read(self) -> RegistryData:
         return self._registry.read()
 
-    def switch_target(self, target):
+    def switch_target(self, target: str) -> str:
         return self._registry.switch_target(target)
 
-    def account(self, name=None, mapped=True):
+    def account(self, name: str | None = None, mapped: bool = True) -> tuple[str, Path]:
         return self._registry.account(name, mapped)
 
-    def register(self, name, home=None):
+    def register(self, name: str, home: str | Path | None = None) -> Path:
         return self._registry.register(name, home)
 
-    def prepare(self, name):
+    def prepare(self, name: str) -> Path:
         return self._registry.prepare(name)
 
-    def use(self, name):
+    def use(self, name: str) -> Path | bool:
         return self._use(name)
 
-    def use_if_active(self, expected, name):
+    def use_if_active(self, expected: str, name: str) -> Path | bool:
         """use(name), but only while `expected` is still the selected account; else False.
 
         `auto-tick` reads quota over the network (seconds), then switched if the selection
@@ -300,134 +351,168 @@ class Manager:
         """
         return self._use(name, expected=expected)
 
-    def _use(self, name, expected=_UNSET):
+    def _use(self, name: str, expected: Any = _UNSET) -> Path | bool:
         return self._registry.use(name, expected=expected)
 
-    def select_if_unset(self, name):
+    def select_if_unset(self, name: str) -> bool:
         return self._registry.select_if_unset(name)
 
-    def require_enabled(self, name):
+    def require_enabled(self, name: str) -> None:
         return self._registry.require_enabled(name)
 
-    def enabled_accounts(self):
+    def enabled_accounts(self) -> list[tuple[str, Path]]:
         return self._registry.enabled_accounts()
 
-    def set_disabled(self, name, disabled):
+    def set_disabled(self, name: str, disabled: bool) -> None:
         return self._registry.set_disabled(name, disabled)
 
-    def _auto_session_running(self, name):
+    def _auto_session_running(self, name: str) -> bool:
         return self._registry.auto_session_running(name)
 
-    def purge_target(self, name, entry):
+    def purge_target(self, name: str, entry: AccountRecord) -> Path:
         return self._registry.purge_target(name, entry)
 
-    def remove(self, name, purge=False):
+    def remove(self, name: str, purge: bool = False) -> dict[str, Any]:
         return self._registry.remove(name, purge)
 
     # -- directory mappings ----------------------------------------------------
 
-    def _best_mapping(self, data, cwd=None):
+    def _best_mapping(self, data: RegistryData, cwd: str | Path | None = None) -> tuple[int, str, str] | None:
         return self._mappings.best_mapping(data, cwd)
 
-    def resolve_default(self, cwd=None):
+    def resolve_default(self, cwd: str | Path | None = None) -> tuple[str | None, str | None]:
         return self._mappings.resolve_default(cwd)
 
-    def default_account(self, cwd=None):
+    def default_account(self, cwd: str | Path | None = None) -> str | None:
         return self._mappings.default_account(cwd)
 
-    def mapped_source(self, cwd=None):
+    def mapped_source(self, cwd: str | Path | None = None) -> str | None:
         return self._mappings.mapped_source(cwd)
 
-    def map_dir(self, name, path=None):
+    def map_dir(self, name: str, path: str | Path | None = None) -> tuple[str, str]:
         return self._mappings.map_dir(name, path)
 
-    def unmap_dir(self, path=None):
+    def unmap_dir(self, path: str | Path | None = None) -> str:
         return self._mappings.unmap_dir(path)
 
-    def list_mappings(self):
+    def list_mappings(self) -> dict[str, str]:
         return self._mappings.list_mappings()
 
     # -- usage cache and quota rows -------------------------------------------
 
-    def usage_cache_path(self):
+    def usage_cache_path(self) -> Path:
         return self._usage.path()
 
-    def cached_usage(self, name, label, max_age):
+    def cached_usage(self, name: str, label: str, max_age: float | None) -> dict[str, Any] | None:
         return self._usage.cached(name, label, max_age)
 
-    def _forget_usage(self, name):
+    def _forget_usage(self, name: str) -> None:
         """Caller holds the lock (see `remove` and `after_login`)."""
         return self._usage.forget(name)
 
-    def _still_registered(self, name):
+    def _still_registered(self, name: str) -> bool:
         """Caller holds the lock."""
         return self._usage.still_registered(name)
 
-    def remember_usage(self, name, buckets, fetched_at, label, reset_credits=None):
+    def remember_usage(
+        self, name: str, buckets: list[UsageBucket], fetched_at: float, label: str, reset_credits: Any = None
+    ) -> None:
         return self._usage.remember(name, buckets, fetched_at, label, reset_credits)
 
-    def account_usage(self, name, home, offline=False, disabled=False, max_age=None):
+    def account_usage(
+        self, name: str, home: Path, offline: bool = False, disabled: bool = False, max_age: float | None = None
+    ) -> AccountUsageRow:
         return self._usage.account_usage(name, home, offline=offline, disabled=disabled, max_age=max_age)
 
-    def account_rows(self, name=None, offline=False, max_age=None):
+    def account_rows(
+        self, name: str | None = None, offline: bool = False, max_age: float | None = None
+    ) -> list[AccountUsageRow]:
         return self._usage.account_rows(name, offline, max_age)
 
-    def show_accounts(self, name=None, offline=False, json_output=False, include_spark=False, details=False, short=False, max_age=None, lang="en"):
+    def show_accounts(
+        self,
+        name: str | None = None,
+        offline: bool = False,
+        json_output: bool = False,
+        include_spark: bool = False,
+        details: bool = False,
+        short: bool = False,
+        max_age: float | None = None,
+        lang: str = "en",
+    ) -> list[AccountUsageRow]:
         return self._usage.show_accounts(name, offline, json_output, include_spark, details, short, max_age, lang)
 
-    def best_account(self, model=None, exclude=(), max_age=None):
+    def best_account(
+        self, model: str | None = None, exclude: tuple[str, ...] = (), max_age: float | None = None
+    ) -> tuple[str | None, dict[str, Any]]:
         return self._usage.best_account(model, exclude, max_age)
 
     # -- auth-failure record ---------------------------------------------------
 
-    def auth_state_path(self):
+    def auth_state_path(self) -> Path:
         return self._auth.path()
 
-    def _read_auth_state(self):
+    def _read_auth_state(self) -> dict[str, Any]:
         return self._auth.read()
 
-    def auth_failure(self, name, label):
+    def auth_failure(self, name: str, label: str) -> AuthStateEntry | None:
         return self._auth.failure(name, label)
 
-    def remember_auth_failure(self, name, label, reason=AUTH_FAILED_STATUS, failed_at=None):
+    def remember_auth_failure(
+        self, name: str, label: str, reason: str = AUTH_FAILED_STATUS, failed_at: float | None = None
+    ) -> None:
         return self._auth.remember(name, label, reason, failed_at)
 
-    def _forget_auth_failure(self, name):
+    def _forget_auth_failure(self, name: str) -> None:
         """Caller holds the lock (see `remove` and `after_login`)."""
         return self._auth.forget(name)
 
-    def clear_auth_failure(self, name):
+    def clear_auth_failure(self, name: str) -> None:
         return self._auth.clear(name)
 
     # -- OpenClaw --------------------------------------------------------------
 
-    def sync_openclaw(self, names=None, agents=None, dry=False, backup_dir=None, select=False, allow_mixed=False):
+    def sync_openclaw(
+        self,
+        names: str | list[str] | None = None,
+        agents: list[str] | None = None,
+        dry: bool = False,
+        backup_dir: str | Path | None = None,
+        select: bool = False,
+        allow_mixed: bool = False,
+    ) -> dict[str, Any]:
         return self._openclaw.sync(names, agents, dry, backup_dir, select, allow_mixed)
 
-    def clear_openclaw_cooldown(self, names=None, dry=False, yes=False, backup_dir=None):
+    def clear_openclaw_cooldown(
+        self,
+        names: str | list[str] | None = None,
+        dry: bool = False,
+        yes: bool = False,
+        backup_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
         return self._openclaw.clear_cooldown(names, dry, yes, backup_dir)
 
     # -- launching -------------------------------------------------------------
 
-    def env(self, home):
+    def env(self, home: Path) -> dict[str, str]:
         return self._launcher.env(home)
 
-    def codex(self):
+    def codex(self) -> str:
         return self._launcher.codex()
 
-    def login(self, name, device_auth=False, lang="en"):
+    def login(self, name: str | None, device_auth: bool = False, lang: str = "en") -> int:
         return self._launcher.login(name, device_auth, lang)
 
-    def after_login(self, name, home, lang="en"):
+    def after_login(self, name: str, home: Path, lang: str = "en") -> None:
         return self._launcher.after_login(name, home, lang)
 
-    def launch_cli(self, name, args, dry=False):
+    def launch_cli(self, name: str | None, args: list[str], dry: bool = False) -> int:
         return self._launcher.launch_cli(name, args, dry)
 
-    def launch_auto_app(self, accounts, app=None, dry=False):
+    def launch_auto_app(self, accounts: str | None, app: str | None = None, dry: bool = False) -> int:
         return self._launcher.launch_auto_app(accounts, app, dry)
 
-    def launch_app(self, name, app=None, dry=False):
+    def launch_app(self, name: str | None, app: str | None = None, dry: bool = False) -> int:
         return self._launcher.launch_app(name, app, dry)
 
 
@@ -439,13 +524,13 @@ class Manager:
 # `patch("xswap.manager.Manager")` keeps biting), so importing it back at module
 # level would be a cycle.
 
-def parser():
+def parser() -> Any:
     """`xswap.cli.build_parser()`, under the name this module has always exported."""
     from xswap.cli import build_parser
     return build_parser()
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     """`xswap.cli.main()`, under the name this module has always exported."""
     from xswap.cli import main as cli_main
     return cli_main(argv)

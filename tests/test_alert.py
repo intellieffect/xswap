@@ -13,11 +13,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import xswap.alert as xswap_alert
-from xswap.manager import ROOT_VARIABLE, SwapError, parse_cache_seconds
 from xswap.alert import (
     AUTO_SWITCH_MARKER,
-    AlertError,
     LABEL,
+    AlertError,
     alert_dir,
     build_plist,
     has_auto_switch,
@@ -33,6 +32,7 @@ from xswap.alert import (
     validate_every,
     validate_warn,
 )
+from xswap.manager import ROOT_VARIABLE, SwapError, parse_cache_seconds
 
 
 def completed(returncode=0, stdout="", stderr=""):

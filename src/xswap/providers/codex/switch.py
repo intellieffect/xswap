@@ -7,12 +7,17 @@ import os
 import stat
 import time
 import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from xswap.core.fsutil import atomic_json
 from xswap.core.paths import auto_dir, cli_runs_dir
 
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
-def read_private_json(path):
+
+def read_private_json(path: Path) -> dict[str, Any]:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
@@ -28,13 +33,13 @@ def read_private_json(path):
         os.close(fd)
 
 
-def private_directory(path):
+def private_directory(path: Path) -> bool:
     info = path.lstat()
     return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and
             stat.S_IMODE(info.st_mode) == 0o700)
 
 
-def switch_running(manager, name, timeout=2, only_current=False):
+def switch_running(manager: Manager, name: str, timeout: float = 2, only_current: bool = False) -> dict[str, Any]:
     """Broadcast once; a request is bound to one live bridge instance.
 
     No source credentials are copied. Acknowledgements distinguish acceptance
@@ -43,7 +48,7 @@ def switch_running(manager, name, timeout=2, only_current=False):
     alone (a re-login re-authenticates the sessions already on that account;
     the others re-read the home when they next consider it).
     """
-    report = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
+    report: dict[str, Any] = dict(applied=0, pending=0, unsupported=0, failed=0, unconfirmed=0)
     auto = auto_dir(manager.root)
     if not auto.exists():
         return report

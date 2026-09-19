@@ -5,10 +5,10 @@ script that still does `import codex_swap`, keeps working. Remove after the
 next release.
 """
 
-from xswap.manager import *  # noqa: F401,F403
+from xswap.manager import *  # noqa: F403
 from xswap.manager import (  # noqa: F401
+    Manager,
     __version__,
     main,
     parser,
-    Manager,
 )

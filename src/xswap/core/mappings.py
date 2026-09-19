@@ -5,29 +5,33 @@ read-modify-write inside one `Manager.locked()` acquisition, as before.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from xswap.core.errors import SwapError
 from xswap.core.fsutil import atomic_json
+from xswap.core.types import RegistryData
+
+if TYPE_CHECKING:
+    from xswap.manager import Manager, _Hooks
 
 
 class Mappings:
-    def __init__(self, manager, hooks):
+    def __init__(self, manager: Manager, hooks: _Hooks) -> None:
         self.manager = manager
         self.hooks = hooks
 
-    def best_mapping(self, data, cwd=None):
-        target_parts = Path(cwd or os.getcwd()).resolve().parts
+    def best_mapping(self, data: RegistryData, cwd: str | Path | None = None) -> tuple[int, str, str] | None:
+        target_parts = Path(cwd or Path.cwd()).resolve().parts
         best = None  # (depth, path, name)
         for raw_path, name in data.get("mappings", {}).items():
             parts = Path(raw_path).parts
-            if len(parts) <= len(target_parts) and tuple(parts) == target_parts[:len(parts)]:
-                if best is None or len(parts) > best[0]:
-                    best = (len(parts), raw_path, name)
+            if (len(parts) <= len(target_parts) and tuple(parts) == target_parts[:len(parts)]
+                    and (best is None or len(parts) > best[0])):
+                best = (len(parts), raw_path, name)
         return best
 
-    def resolve_default(self, cwd=None):
+    def resolve_default(self, cwd: str | Path | None = None) -> tuple[str | None, str | None]:
         """Return (name, mapping_path) for the implicit-selection account, computing the
         directory-mapping lookup exactly once. mapping_path is None when the active
         account (not a mapping) decided the result."""
@@ -37,15 +41,15 @@ class Mappings:
             return best[2], best[1]
         return data["active"], None
 
-    def default_account(self, cwd=None):
+    def default_account(self, cwd: str | Path | None = None) -> str | None:
         return self.manager.resolve_default(cwd)[0]
 
-    def mapped_source(self, cwd=None):
+    def mapped_source(self, cwd: str | Path | None = None) -> str | None:
         """Return the mapping path that decided default_account(cwd), or None."""
         return self.manager.resolve_default(cwd)[1]
 
-    def map_dir(self, name, path=None):
-        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+    def map_dir(self, name: str, path: str | Path | None = None) -> tuple[str, str]:
+        resolved = str(Path(path or Path.cwd()).expanduser().resolve())
         with self.manager.locked():
             name, _ = self.manager.account(name)
             data = self.manager.read()
@@ -53,8 +57,8 @@ class Mappings:
             atomic_json(self.manager.registry, data)
         return resolved, name
 
-    def unmap_dir(self, path=None):
-        resolved = str(Path(path or os.getcwd()).expanduser().resolve())
+    def unmap_dir(self, path: str | Path | None = None) -> str:
+        resolved = str(Path(path or Path.cwd()).expanduser().resolve())
         with self.manager.locked():
             data = self.manager.read()
             mappings = data.get("mappings", {})
@@ -65,5 +69,5 @@ class Mappings:
             atomic_json(self.manager.registry, data)
         return resolved
 
-    def list_mappings(self):
+    def list_mappings(self) -> dict[str, str]:
         return dict(self.manager.read().get("mappings", {}))

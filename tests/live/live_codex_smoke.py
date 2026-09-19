@@ -1,13 +1,24 @@
 """Opt-in integration test using a real Codex binary and fake local HTTP/auth only.
 Run: python3 tests/live_codex_smoke.py (optionally XSWAP_SMOKE_CODEX=/path/to/codex).
 """
-from xswap.usage import UsageError
-import asyncio,base64,contextlib,json,os,sys,tempfile,time,threading
+import asyncio
+import base64
+import contextlib
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+
+from xswap.usage import UsageError
+
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from xswap.live import Bridge
 from test_live import limits
+
+from xswap.live import Bridge
 
 calls=[]
 def token(name):
@@ -57,7 +68,7 @@ async def main():
   home.joinpath('config.toml').write_text('model="mock-model"\nmodel_provider="fixture"\nchatgpt_base_url='+json.dumps(url)+'\n[model_providers.fixture]\nname="fixture"\nbase_url='+json.dumps(url+'/v1')+'\nwire_api="responses"\nrequires_openai_auth=true\nsupports_websockets=false\n[analytics]\nenabled=false\n')
   browser_fixture=None
   if os.environ.get('XSWAP_TEST_BROWSER')=='1':
-   from plugin_runtime_smoke import plugin_fixture,assert_browser_setup
+   from plugin_runtime_smoke import assert_browser_setup, plugin_fixture
    browser_fixture=plugin_fixture(home)
    await assert_browser_setup(home,browser_fixture)
   env={k:v for k,v in os.environ.items() if not k.startswith(('CODEX_','OPENAI_','XSWAP_'))};env['CODEX_HOME']=str(home)

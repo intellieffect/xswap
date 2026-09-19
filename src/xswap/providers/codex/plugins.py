@@ -1,18 +1,23 @@
 """Keep plugin code inside each runtime's existing trusted CODEX_HOME boundary."""
 from __future__ import annotations
+
 import ctypes
 import errno
 import fcntl
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from xswap.core.paths import auto_dir
 
+if TYPE_CHECKING:
+    from xswap.manager import Manager
 
-def exchange_paths(left, right):
+
+def exchange_paths(left: Path, right: Path) -> None:
     """Atomically exchange a legacy symlink and a complete directory (no path gap)."""
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == 'darwin':
@@ -30,7 +35,7 @@ def exchange_paths(left, right):
         raise OSError(code, os.strerror(code))
 
 
-def validate_cache(cache):
+def validate_cache(cache: Path) -> None:
     """Do not import code through links escaping the plugin cache boundary."""
     root = cache.resolve()
     for path in cache.rglob('*'):
@@ -44,14 +49,14 @@ def validate_cache(cache):
                 raise ValueError('plugin cache contains an external or broken symlink') from None
 
 
-def copy_cache(source, target):
+def copy_cache(source: Path, target: Path) -> None:
     # Copy actual bytes, never hardlink code across independent runtime homes.
     # Internal aliases such as chrome/latest are materialized too.
     validate_cache(source)
     shutil.copytree(source, target, symlinks=False)
 
 
-def _ensure_plugins(home, source, dry=False):
+def _ensure_plugins(home: str | Path, source: str | Path, dry: bool = False) -> str:
     """Migrate only the legacy shared link; preserve runtime-owned plugin folders.
 
     Each home owns its cache after migration. Subsequent plugin updates are the
@@ -67,9 +72,8 @@ def _ensure_plugins(home, source, dry=False):
         return 'source-home'
     if target.exists() and not target.is_symlink():
         return 'already-local'
-    if target.is_symlink():
-        if target.lstat().st_uid != os.getuid() or target.resolve() != origin.resolve():
-            raise SwapError('Refusing to replace an unrelated plugins symlink')
+    if target.is_symlink() and (target.lstat().st_uid != os.getuid() or target.resolve() != origin.resolve()):
+        raise SwapError('Refusing to replace an unrelated plugins symlink')
     if not origin.is_dir():
         return 'no-source-plugins'
     if dry:
@@ -97,7 +101,7 @@ def _ensure_plugins(home, source, dry=False):
             exchange_paths(stage, target)
             stage.unlink()  # The old link, not its target.
         else:
-            os.rename(stage, target)
+            Path(stage).rename(target)
         return 'materialized'
     except ValueError as exc:
         raise SwapError(str(exc)) from None
@@ -108,7 +112,7 @@ def _ensure_plugins(home, source, dry=False):
             shutil.rmtree(stage)
 
 
-def ensure_plugins(home, source, dry=False):
+def ensure_plugins(home: str | Path, source: str | Path, dry: bool = False) -> str:
     # Through manager, not xswap.core.fsutil: tests patch xswap.manager.private_dir.
     from xswap.manager import private_dir
     home, source = Path(home), Path(source)
@@ -123,8 +127,9 @@ def ensure_plugins(home, source, dry=False):
         os.close(fd)
 
 
-def repair(manager, dry=False):
+def repair(manager: Manager, dry: bool = False) -> None:
     import json
+
     from xswap.manager import SwapError
     homes = [auto_dir(manager.root) / 'codex', auto_dir(manager.root) / 'cli-codex']
     homes += [Path(value['home']) for value in manager.read()['accounts'].values()]
