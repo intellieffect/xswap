@@ -23,9 +23,9 @@ xswap repair-plugins
 헬퍼 두 개는 로컬에 보존합니다. 이전 링크 경로는 `.xswap-plugins-migration.json`에 기록합니다.
 외부/손상/순환 캐시 링크는 복사하지 않고 오류로 중단합니다.
 
-회귀 검사: `uv run python tests/plugin_runtime_smoke.py`는 앱에 포함된 실제 런타임에서
+회귀 검사: `uv run python tests/live/plugin_runtime_smoke.py`는 앱에 포함된 실제 런타임에서
 기존 링크 오류, 실패 캐시로 인한 재시도 실패, `js_reset` 후 같은 도구 서버에서의 복구를 검증합니다. `XSWAP_TEST_BROWSER=1`을
-`tests/live_cli_smoke.py` / `tests/live_codex_smoke.py` 실행에 지정하면 모의 계정 전환
+`tests/live/live_cli_smoke.py` / `tests/live/live_codex_smoke.py` 실행에 지정하면 모의 계정 전환
 전후 실제 브라우저 서비스 초기화도 검사합니다. 이 검사는 브라우저 탭 탐색이나
 aside/iab 호스트 연결 상태를 검증하지 않습니다.
 

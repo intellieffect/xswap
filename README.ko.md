@@ -327,7 +327,7 @@ git clone https://github.com/intellieffect/xswap.git
 cd xswap
 python3 -m unittest discover -v
 node --test tests/*.test.mjs
-python3 tests/live_codex_smoke.py  # 실제 Codex + 가짜 계정/로컬 서버 검증
+python3 tests/live/live_codex_smoke.py  # 실제 Codex + 가짜 계정/로컬 서버 검증
 uv tool install .
 ```
 
