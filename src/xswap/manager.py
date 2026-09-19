@@ -191,6 +191,12 @@ class _Hooks:
     `patch("xswap.manager.read_limits")` -- which the suite uses 63 times -- would
     then patch a name nothing reads. Each method below resolves the name in *this*
     module's namespace at call time instead, so the patch still bites.
+
+    Only the names the suite replaces today are routed here. Collaborators bind
+    `rank_candidates`, `short_line`, `normalize_limits`, `is_sign_in_failure`,
+    `describe_login_report` and `__version__` directly, so a future
+    `patch("xswap.manager.rank_candidates")` would NOT reach them -- patch the
+    collaborator's module, or add the name here first.
     """
 
     @staticmethod

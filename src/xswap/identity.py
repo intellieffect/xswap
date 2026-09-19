@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import Path
 import tomllib
 
 from xswap.credentials import CredentialError, read_auth
@@ -52,7 +51,7 @@ def chatgpt_org_id(home, name):
 
 
 def identity(home):
-    path = Path(home) / "auth.json"
+    path = home / "auth.json"
     if not path.exists():
         return "not signed in"
     try:
