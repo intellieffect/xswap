@@ -1,0 +1,102 @@
+"""The contract a platform has to satisfy to be switchable by xswap.
+
+`Provider` is a `typing.Protocol`, deliberately: an implementation satisfies it
+by having the members, not by inheriting anything, so a provider module never
+has to import this one and a test double is a plain object. Nothing here does
+I/O and nothing here imports a provider.
+
+Two rules keep the boundary honest:
+
+* **Capabilities, never names.** Core asks `"live_switch" in provider.capabilities`,
+  never `provider.name == "codex"`. A platform that gains or loses a surface
+  changes one frozenset; every caller follows without being edited.
+* **Neutral types only.** Everything crossing back into core is one of
+  `xswap.core.types` (`Identity`, `CredentialState`, `UsageSnapshot`, `Check`,
+  `QuotaShape`) or a plain string/int. Platform-specific detail rides in
+  `UsageSnapshot.extras`, which core carries but never interprets.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Protocol, runtime_checkable
+
+from xswap.core.types import Check, CredentialState, Identity, QuotaShape, UsageSnapshot  # noqa: F401  re-exported
+
+# The surfaces a provider may implement. A capability is present only when the
+# provider can actually do it on this machine's install.
+LIVE_SWITCH = "live_switch"          # can move a *running* session to another account
+DESKTOP_APP = "desktop_app"          # has a desktop application xswap can launch per account
+PATH_WRAPPER = "path_wrapper"        # owns a command on PATH that xswap can wrap
+PER_ACCOUNT_HOME = "per_account_home"  # each account is a directory xswap creates and owns
+OPENCLAW_SYNC = "openclaw_sync"      # its logins can be pushed into a local OpenClaw install
+
+CAPABILITIES = frozenset({LIVE_SWITCH, DESKTOP_APP, PATH_WRAPPER, PER_ACCOUNT_HOME, OPENCLAW_SYNC})
+
+
+@runtime_checkable
+class Provider(Protocol):
+    """One AI coding platform, as far as account switching is concerned."""
+
+    #: Registry key and the value stored in each account record's `"provider"`.
+    name: str
+    #: What this platform's user-visible home is called, for messages core composes.
+    home_label: str
+    #: Which surfaces this provider implements; see the constants above.
+    capabilities: frozenset
+    #: Where this platform's subscription quota sits in a normalized snapshot.
+    quota_shape: QuotaShape
+
+    # -- accounts --------------------------------------------------------------
+
+    def identity(self, home) -> Identity:
+        """The local, unverified label for the login in HOME."""
+
+    def credential_state(self, home) -> CredentialState:
+        """Whether HOME's credentials can be used right now, and why not when they cannot."""
+
+    def account_home(self, root, name):
+        """The directory a managed account for NAME lives in under the state ROOT."""
+
+    def prepare_home(self, manager, home, source, accounts) -> None:
+        """Make a freshly created managed HOME usable (shared tooling, never credentials)."""
+
+    # -- quota -----------------------------------------------------------------
+
+    def read_usage(self, manager, home, env=None, timeout=None) -> UsageSnapshot:
+        """Read HOME's quota windows. Raises this platform's usage error on failure."""
+
+    # -- selection and launching ----------------------------------------------
+
+    def activate(self, manager, name) -> None:
+        """Make NAME the account new sessions get: registry selection plus any signalling."""
+
+    def login(self, manager, name, **options):
+        """Run this platform's interactive sign-in for NAME."""
+
+    def launch(self, manager, name, argv, *, auto_pool=None) -> int:
+        """Run the platform's CLI as NAME (or across AUTO_POOL); returns an exit code."""
+
+    def switch_running(self, manager, name):
+        """Move already-running sessions to NAME. Only with the `live_switch` capability."""
+
+    # -- presentation ----------------------------------------------------------
+    # What the neutral list/dashboard/upgrade views need but cannot know: which
+    # sessions this platform has running, and the extra lines its `--details` view
+    # shows. Core calls these; it never looks at what is inside them.
+
+    def status_data(self, manager, cleanup=True):
+        """This platform's running-session state, as the list view and doctor read it."""
+
+    def bridge_hints(self, manager, state, version):
+        """One hint per running session that is still on older code than VERSION."""
+
+    def session_hints(self, manager, target_version):
+        """`bridge_hints`, already rendered to lines, for the upgrade notice."""
+
+    def credit_lines(self, reset_credits):
+        """Extra `--details` lines for this platform's reset credits; [] when it has none."""
+
+    # -- diagnostics -----------------------------------------------------------
+
+    def doctor_checks(self, manager) -> Iterable[Check]:
+        """Read-only diagnostics for `xswap doctor`. Never mutates, never fetches."""

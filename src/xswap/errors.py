@@ -1,48 +1,13 @@
-"""Every exception xswap raises, rooted in one class.
+"""Compatibility alias: `xswap.errors` is now `xswap.core.errors` (it is platform-neutral).
 
-Leaf module: it imports nothing from `xswap`, so any module -- including the
-other leaf modules -- can raise from here without creating an import cycle.
-
-`XswapError` is the common parent so an embedder can catch "xswap failed" in
-one clause. The subclasses keep their original names, messages and existing
-relations (`BusyThreadError` is still a `LiveError`): each one is still
-imported from, and re-raised by, the module that owned it, and each module
-re-exports its own so `from xswap.<module> import <Error>` keeps working.
+This is not a re-export. The module object below *is* `xswap.core.errors`, installed under
+the old name, so the two are the same object: whatever the suite or an embedder
+imports, patches or monkey-patches through either path reaches the other. That
+is what keeps `patch("xswap.errors.<anything>")` biting after the move. Kept
+for one release (INT-5614).
 """
-from __future__ import annotations
+import sys
 
+from xswap.core import errors as _module
 
-class XswapError(Exception):
-    """Base class for every error xswap raises on purpose."""
-
-
-class SwapError(XswapError):
-    pass
-
-
-class AlertError(XswapError):
-    pass
-
-
-class CredentialError(XswapError):
-    pass
-
-
-class OpenClawStateError(XswapError):
-    pass
-
-
-class UsageError(XswapError):
-    pass
-
-
-class UpgradeError(XswapError):
-    pass
-
-
-class LiveError(XswapError):
-    pass
-
-
-class BusyThreadError(LiveError):
-    pass
+sys.modules[__name__] = _module

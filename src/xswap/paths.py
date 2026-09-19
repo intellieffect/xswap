@@ -1,40 +1,13 @@
-"""Well-known locations under the xswap state root.
+"""Compatibility alias: `xswap.paths` is now `xswap.core.paths` (it is platform-neutral).
 
-Leaf module: stdlib only. Every path here is the one the rest of xswap already
-built inline; nothing is renamed or moved on disk. Only locations with more
-than one caller get a helper -- `accounts.json`, `usage-cache.json` and
-`auth-state.json` have exactly one each and stay on Manager.
+This is not a re-export. The module object below *is* `xswap.core.paths`, installed under
+the old name, so the two are the same object: whatever the suite or an embedder
+imports, patches or monkey-patches through either path reaches the other. That
+is what keeps `patch("xswap.paths.<anything>")` biting after the move. Kept
+for one release (INT-5614).
 """
-from __future__ import annotations
+import sys
 
-from pathlib import Path
+from xswap.core import paths as _module
 
-# The state root every shell reads unless it exports ROOT_VARIABLE: which accounts exist,
-# which one is selected, and the record that connects the `codex` command all live under it,
-# so the variable silently decides what plain `codex` does in that shell (2026-09-13).
-ROOT_VARIABLE = "CODEX_SWAP_HOME"
-
-
-def default_root():
-    """The state root a shell without CODEX_SWAP_HOME uses; a path, never a read of it."""
-    return (Path.home() / ".local/share/codex-swap").expanduser().resolve()
-
-
-def auto_dir(root):
-    """`<root>/auto`: the automatic-switching runtime (bridge state, runtime homes)."""
-    return Path(root) / "auto"
-
-
-def cli_runs_dir(root):
-    """`<root>/auto/cli-runs`: one directory per `xswap-codex` run."""
-    return auto_dir(root) / "cli-runs"
-
-
-def settings_path(root):
-    """`<root>/auto.json`: the wrapper/auto-switch record."""
-    return Path(root) / "auto.json"
-
-
-def profile_dir(root, name):
-    """`<root>/profiles/<name>`: one account's Codex and desktop homes."""
-    return Path(root) / "profiles" / name
+sys.modules[__name__] = _module

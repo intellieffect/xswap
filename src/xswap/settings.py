@@ -1,30 +1,13 @@
-"""The one reader of `auto.json`, the automatic-switching settings file.
+"""Compatibility alias: `xswap.settings` is now `xswap.core.settings` (it is platform-neutral).
 
-A leaf by design: every surface that decides anything from these settings
-(`wrapper`, `runs`, `codex_cli`, `doctor`, `tick`, `init`, `relocate`, the
-`Manager` collaborators) reads them through here, and this module imports
-nothing from `xswap` but `live`'s error class and `paths`. There is no
-matching writer function -- each writer owns the read-modify-write under the
-root lock and commits with `atomic_json(settings_path(manager.root), ...)`
-itself, which is what keeps a concurrent `reconnect_wrapper` from being
-discarded (see `wrapper.enable`).
+This is not a re-export. The module object below *is* `xswap.core.settings`, installed under
+the old name, so the two are the same object: whatever the suite or an embedder
+imports, patches or monkey-patches through either path reaches the other. That
+is what keeps `patch("xswap.settings.<anything>")` biting after the move. Kept
+for one release (INT-5614).
 """
-from __future__ import annotations
+import sys
 
-import json
+from xswap.core import settings as _module
 
-from xswap.live import LiveError
-from xswap.paths import settings_path
-
-
-def read_settings(manager):
-    path = settings_path(manager.root)
-    if not path.exists():
-        return {}
-    try:
-        value = json.loads(path.read_text())
-        if not isinstance(value, dict):
-            raise ValueError()
-        return value
-    except (OSError, ValueError):
-        raise LiveError('invalid auto-mode settings; refusing to overwrite') from None
+sys.modules[__name__] = _module

@@ -54,12 +54,15 @@ from xswap.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir, default_root, pro
 
 # Re-exported so `doctor`, `init`, `tick`, the `codex_swap` shim and the tests keep
 # importing these from `xswap.manager`, which is where they have always lived.
-from xswap.auth_state import AuthState
+from xswap.auth_state import AuthState, is_auth_failed  # noqa: F401  re-exported: `tick` and the suite import it here
 from xswap.identity import chatgpt_org_id, check_file_store, identity
 from xswap.launcher import Launcher
 from xswap.mappings import Mappings
 from xswap.openclaw_sync import OpenClawSync, parse_pool, resolve_openclaw_package_root
-from xswap.ranking import codex_windows, rank_candidates, window_percent  # noqa: F401
+from xswap.ranking import rank_candidates, window_percent  # noqa: F401
+from xswap.core.quota import quota_windows
+from xswap.usage import CODEX_QUOTA
+from xswap import providers
 from xswap.registry import UNSET as _UNSET, Registry, validate_name  # noqa: F401
 from xswap.reports import describe_login_report, describe_switch_report, failure_reasons_text  # noqa: F401
 from xswap.usage_cache import UsageCache
@@ -100,17 +103,9 @@ def parse_cache_seconds(value):
     return seconds
 
 
-def is_auth_failed(manager, name):
-    """True while the usage service's rejection of NAME's current login still stands.
-
-    Module-level so callers and tests can reach it without a Manager method lookup;
-    the state itself lives in Manager.auth_failure (auth-state.json).
-    """
-    try:
-        _, home = manager.account(name)
-        return manager.auth_failure(name, identity(home)) is not None
-    except SwapError:
-        return False
+def codex_windows(buckets):
+    """The Codex quota bucket's windows, flattened; `quota_windows` with Codex's shape."""
+    return quota_windows(buckets, CODEX_QUOTA)
 
 
 def plain_codex_notice(manager, selected_home):
@@ -240,6 +235,11 @@ class Manager:
             private_dir(self.root)
         self.registry = self.root / "accounts.json"
         hooks = _Hooks()
+        self._hooks = hooks
+        # One provider per Manager today: Codex. `providers.get()` is the only way any
+        # of this reaches a platform, and the account records name it (`"provider"`),
+        # so a second platform is a new entry in `xswap.providers`, not a branch here.
+        self.provider = providers.get(providers.DEFAULT)
         self._registry = Registry(self, hooks)
         self._mappings = Mappings(self, hooks)
         self._usage = UsageCache(self, hooks)

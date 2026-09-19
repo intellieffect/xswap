@@ -333,6 +333,8 @@ uv tool install .
 
 CI는 macOS/Linux, Python 3.11/3.14, Node 22에서 테스트와 설치를 확인합니다. 자동 테스트는 가짜 인증만 사용합니다. 실제 계정·토큰·개인 검증 로그는 저장소와 배포 파일에 포함하지 않습니다.
 
+코드 구조(중립 core · provider 경계 · 새 플랫폼 추가 방법)는 [docs/architecture.md](docs/architecture.md)에 있습니다.
+
 `--json` 출력을 스크립트로 다룬다면 [docs/json-schema.md](docs/json-schema.md)(영문, 필드별 타입·의미)와 [docs/exit-codes.md](docs/exit-codes.md)(종료 코드)를 참고하십시오.
 
 <details>
