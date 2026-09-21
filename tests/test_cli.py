@@ -945,7 +945,7 @@ class DocPromiseTests(TestCase):
 class DisconnectNoticeTests(TestCase):
  """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
  setUp=test_codex_swap.AccountTests.setUp
- def serve(self,run,sweep=False,deadline=10,pool=None,exit_code=0,stdout_relay=None,tui_output=b'',spawn_calls=None,relay_out=None):
+ def serve(self,run,sweep=False,deadline=10,pool=None,exit_code=0,stdout_relay=None,tui_output=b'',spawn_calls=None,relay_out=None,processes=None):
   # Drives serve_cli's real handler and exit path with a fake listener, CLI process, and bridge class.
   # sweep=True removes the run record the way a concurrent prune does, after the listener is
   # up and before the TUI connects: the window between new_run_dir and the bridge's lock.
@@ -954,6 +954,7 @@ class DisconnectNoticeTests(TestCase):
   # stdout_relay/tui_output/spawn_calls/relay_out: force the stdout relay on or off, have the
   # fake TUI write `tui_output` to whatever stdout it was given, record the spawn kwargs, and
   # send the relay's output to the `relay_out` fd instead of the suite's own stdout.
+  # processes: collects the fake TUI processes so a test can see whether they were terminated.
   run_dir=self.manager.root/'auto'/'cli-runs'/'notice';run_dir.mkdir(parents=True)
   socket_path=self.base/'rpc.sock';socket_path.touch()
   finished=None
@@ -989,13 +990,19 @@ class DisconnectNoticeTests(TestCase):
     finally:
      finished.set()
   class FakeProcess:
-   pid=4242;returncode=exit_code
+   pid=4242;returncode=exit_code;terminated=False;waited=False
    async def wait(self):
-    await finished.wait();return exit_code
+    self.waited=True;await finished.wait();return self.returncode
+   def terminate(self):
+    # The real TUI dies on SIGTERM; the fake records it and lets wait() return the way
+    # the real one would report the signal.
+    self.terminated=True;self.returncode=-15;finished.set()
   async def spawn(*args,**kwargs):
    if spawn_calls is not None:spawn_calls.append((args,kwargs))
    if kwargs.get('stdout') is not None and tui_output:os.write(kwargs['stdout'],tui_output)
-   return FakeProcess()
+   process=FakeProcess()
+   if processes is not None:processes.append(process)
+   return process
   from xswap.providers.codex.exit_relay import StdoutRelay
   class RelayToFd(StdoutRelay):
    def __init__(self,filter_,out_fd=1,write=None):super().__init__(filter_,out_fd=relay_out if relay_out is not None else out_fd,write=write)
@@ -1188,6 +1195,26 @@ class DisconnectNoticeTests(TestCase):
   self.assertEqual(len(relays),1)
   self.assertIsNone(relays[0].master);self.assertIsNone(relays[0].slave)
   self.assertFalse(relays[0]._reading)
+
+ def test_relay_start_failure_terminates_the_tui_and_releases_the_relay(self):
+  # add_reader can refuse the master (a loop without fd support, a closed loop); the TUI
+  # has already been spawned by then and must not be left running on an open PTY.
+  r,w=os.pipe();calls=[];relays=[];processes=[]
+  from xswap.providers.codex.exit_relay import StdoutRelay
+  original_open=StdoutRelay.open
+  def spy_open(self):relays.append(self);return original_open(self)
+  def failing_start(self,loop):raise RuntimeError('fixture: add_reader refused')
+  async def run(bridge):await asyncio.sleep(3600)
+  try:
+   with patch.object(StdoutRelay,'open',spy_open),patch.object(StdoutRelay,'start',failing_start),self.assertRaisesRegex(RuntimeError,'add_reader refused'):
+    self.serve(run,deadline=2,exit_code=None,stdout_relay=True,spawn_calls=calls,relay_out=w,processes=processes)  # exit_code=None: still running
+  finally:
+   os.close(w);os.close(r)
+  self.assertEqual(len(processes),1)
+  self.assertTrue(processes[0].terminated);self.assertTrue(processes[0].waited)
+  self.assertEqual(len(relays),1)
+  self.assertIsNone(relays[0].master);self.assertIsNone(relays[0].slave)
+  with self.assertRaises(OSError):os.fstat(calls[0][1]['stdout'])  # the slave handed to the TUI is closed
 
 class ResumeHomeTests(TestCase):
  session_id='00000000-0000-4000-8000-000000000001'

@@ -413,19 +413,23 @@ async def serve_cli(
             raise
         client_ready.set()
         loop = asyncio.get_running_loop()
-        if relay:
-            relay.start(loop)
-        # The foreground terminal delivers SIGINT to the real TUI as usual. Keep
-        # the bridge alive so Ctrl-C can cancel a turn instead of losing auth.
         installed_signals = []
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, (lambda: None) if sig == signal.SIGINT else
-                    (lambda: cli.terminate() if cli.returncode is None else None))
-                installed_signals.append(sig)
-            except (NotImplementedError, RuntimeError):
-                pass
         try:
+            # From here on the child is running: whatever fails below (the relay's reader,
+            # a signal handler) ends in the same cleanup as a normal exit -- the TUI is
+            # terminated and waited for and the relay's fds are released -- instead of
+            # leaving a live TUI on an open PTY behind the exception.
+            if relay:
+                relay.start(loop)
+            # The foreground terminal delivers SIGINT to the real TUI as usual. Keep
+            # the bridge alive so Ctrl-C can cancel a turn instead of losing auth.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, (lambda: None) if sig == signal.SIGINT else
+                        (lambda: cli.terminate() if cli.returncode is None else None))
+                    installed_signals.append(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
             return await cli.wait()
         finally:
             for sig in installed_signals:

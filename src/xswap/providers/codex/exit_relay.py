@@ -49,6 +49,9 @@ _MESSAGES = (
 MARKER = b'Disconnected from this task. '
 _COLOR_ON, _COLOR_OFF = b'\x1b[36m', b'\x1b[39m'
 _STOP_HINT = b'press ctrl + x'
+#: How the Stop line starts. A block whose third line starts like this but is not the exact
+#: known Stop line (or is cut off by the end of the stream) is not dropped at all.
+_STOP_PREFIX = b'Stop the current turn:'
 #: Placeholder for the thread id in a template: a v4/v7 UUID as Codex prints it.
 _UUID = object()
 
@@ -115,6 +118,10 @@ class FooterFilter:
     back at end of stream. Hold-back is bounded by the longest template (a few hundred bytes):
     outside a candidate block at most `len(MARKER) - 1` bytes wait for the next chunk, so
     unterminated output of any size flows through as it arrives.
+
+    Fail-open: a block is dropped only when it is exactly one of the known templates. A Stop
+    line with another wording, or one cut off by the end of the stream, keeps the whole block
+    (Disconnected and Reconnect lines included) on the terminal byte for byte.
     """
 
     def __init__(self, socket_path: str) -> None:
@@ -125,7 +132,11 @@ class FooterFilter:
     def _classify(self, candidate: bytes) -> tuple[str, int]:
         """A partial match outranks a complete one: the block without the Stop line is a
         prefix of the block with it, so the scanner waits for the next chunk (or the end of
-        the stream, where `flush` settles it) rather than dropping half a footer."""
+        the stream, where `flush` settles it) rather than dropping half a footer.
+
+        A Stop-less match followed by a Stop line that is not the exact known one is 'no':
+        the whole block is passed through rather than the first two lines dropped, which
+        would leave a Stop line with no Reconnect line above it to make sense of."""
         complete = ('no', 0)
         for template in self.templates:
             kind, length = _match(template, candidate)
@@ -133,6 +144,9 @@ class FooterFilter:
                 return kind, 0
             if kind == 'complete' and length > complete[1]:
                 complete = (kind, length)
+        if complete[1] and not candidate[:complete[1]].endswith(_STOP_HINT + b'.\n') \
+                and candidate[complete[1]:].startswith(_STOP_PREFIX):
+            return 'no', 0
         return complete
 
     def feed(self, data: bytes) -> bytes:
@@ -160,14 +174,14 @@ class FooterFilter:
             buf = candidate[len(MARKER):]
 
     def flush(self) -> bytes:
-        """End of stream: a held candidate that is a complete block (the Stop-less variant) is
-        dropped, anything else held is given back unchanged."""
+        """End of stream: a held candidate that is exactly a complete block (the Stop-less
+        variant, nothing after it) is dropped; anything else held -- a block cut off inside
+        the Reconnect line, or inside a Stop line that never completed -- is given back
+        unchanged."""
         out, self.pending = self.pending, b''
-        if out.startswith(MARKER):
-            kind, length = max((_match(t, out) for t in self.templates), key=lambda r: (r[0] == 'complete', r[1]))
-            if kind == 'complete':
-                self.dropped += 1
-                return out[length:]
+        if out.startswith(MARKER) and any(_match(t, out) == ('complete', len(out)) for t in self.templates):
+            self.dropped += 1
+            return b''
         return out
 
 
@@ -217,12 +231,21 @@ class StdoutRelay:
         self._reading = False
 
     def open(self) -> int:
-        master, slave = pty.openpty()
-        tty.setraw(slave, termios.TCSANOW)
-        self.master, self.slave = master, slave
-        os.set_blocking(master, False)
+        """Open the PTY and return the slave fd for the child's stdout.
+
+        The pair is owned from the moment `openpty` returns: if anything after it fails
+        (raw mode, non-blocking mode) both fds are closed again and the relay is left as it
+        was before the call, so the caller has nothing to release.
+        """
+        self.master, self.slave = pty.openpty()
+        try:
+            tty.setraw(self.slave, termios.TCSANOW)
+            os.set_blocking(self.master, False)
+        except BaseException:
+            self._release()
+            raise
         self.sync_winsize()
-        return slave
+        return self.slave
 
     def sync_winsize(self) -> None:
         """Copy the real terminal's window size onto the PTY (initially and on SIGWINCH)."""
