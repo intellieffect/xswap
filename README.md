@@ -254,6 +254,8 @@ xswap auto-disable                       # Restore the original codex symlink an
 
 Disabling defaults does not terminate running sessions. Fixed-account commands (`xswap run --account main -- ...`, `xswap app main`) remain available.
 
+When an auto-mode CLI session ends normally with a saved conversation (`/exit`, Ctrl-D), xswap prints `xswap: Session ended. Resume this conversation:` followed by the one `env … xswap run --auto … -- resume ID` command that works; a non-zero Codex exit is reported as `xswap: Codex exited with status N.` and that status is preserved as xswap's own. Codex's own `--remote` footer (`Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID`), which points at a socket that no longer exists, is dropped; Codex's token-usage line and everything else are shown unchanged. To hand the TUI the raw terminal again, set `XSWAP_RAW_EXIT=1` — see [docs/session-switching-details.md](docs/session-switching-details.md).
+
 <details>
 <summary>Run-record pruning and bridge.log</summary>
 

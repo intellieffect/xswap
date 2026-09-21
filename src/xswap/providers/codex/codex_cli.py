@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from xswap.core.errors import BusyThreadError
 from xswap.core.paths import ROOT_VARIABLE, auto_dir, cli_runs_dir
+from xswap.providers.codex.exit_relay import FooterFilter, StdoutRelay, relay_wanted
 from xswap.providers.codex.live import BRIDGE_LOG_NAME, AccountPool, Bridge, LiveError
 
 if TYPE_CHECKING:
@@ -335,8 +336,14 @@ async def serve_cli(
     status_path: Path,
     socket_path: Path,
     bridge_class: type[WebSocketBridge] = WebSocketBridge,
+    stdout_relay: bool | None = None,
 ) -> int:
-    """One TUI and one child server. No TCP listener and no TUI restart."""
+    """One TUI and one child server. No TCP listener and no TUI restart.
+
+    `stdout_relay`: None decides from the real stdout (`relay_wanted`); True/False force it.
+    With the relay the TUI's stdout is a PTY copied to the real stdout minus Codex's dead
+    `--remote` exit footer (`exit_relay`); stdin/stderr are always the inherited terminal.
+    """
     from websockets.asyncio.server import unix_serve
     from websockets.exceptions import ConnectionClosed
 
@@ -393,21 +400,36 @@ async def serve_cli(
         # Explicit cwd preserves normal local CLI working-directory semantics.
         cwd_args = [] if any(a in ('-C', '--cd') or a.startswith('--cd=') or
                             (a.startswith('-C') and len(a)>2) for a in args) else ['--cd', str(Path.cwd())]
-        cli = await asyncio.create_subprocess_exec(real, '--remote', 'unix://' + str(socket_path),
-                *cwd_args, *args, env=env)
+        relay: StdoutRelay | None = None
+        if stdout_relay if stdout_relay is not None else relay_wanted():
+            relay = StdoutRelay(FooterFilter(str(socket_path)))
+        try:
+            # stdout=None inherits, as before; only the relay case hands the TUI a PTY slave.
+            cli = await asyncio.create_subprocess_exec(real, '--remote', 'unix://' + str(socket_path),
+                    *cwd_args, *args, env=env, stdout=relay.open() if relay else None)
+        except BaseException:
+            if relay:
+                relay.abort()
+            raise
         client_ready.set()
         loop = asyncio.get_running_loop()
-        # The foreground terminal delivers SIGINT to the real TUI as usual. Keep
-        # the bridge alive so Ctrl-C can cancel a turn instead of losing auth.
         installed_signals = []
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, (lambda: None) if sig == signal.SIGINT else
-                    (lambda: cli.terminate() if cli.returncode is None else None))
-                installed_signals.append(sig)
-            except (NotImplementedError, RuntimeError):
-                pass
         try:
+            # From here on the child is running: whatever fails below (the relay's reader,
+            # a signal handler) ends in the same cleanup as a normal exit -- the TUI is
+            # terminated and waited for and the relay's fds are released -- instead of
+            # leaving a live TUI on an open PTY behind the exception.
+            if relay:
+                relay.start(loop)
+            # The foreground terminal delivers SIGINT to the real TUI as usual. Keep
+            # the bridge alive so Ctrl-C can cancel a turn instead of losing auth.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, (lambda: None) if sig == signal.SIGINT else
+                        (lambda: cli.terminate() if cli.returncode is None else None))
+                    installed_signals.append(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
             return await cli.wait()
         finally:
             for sig in installed_signals:
@@ -416,6 +438,10 @@ async def serve_cli(
                 with contextlib.suppress(ProcessLookupError):
                     cli.terminate()
                 await cli.wait()
+            if relay:
+                # Everything Codex printed (token usage included) reaches the terminal before
+                # xswap's own lines.
+                relay.close()
             listener.close()
             await listener.wait_closed()
             log_path = status_path.parent / BRIDGE_LOG_NAME
@@ -428,11 +454,29 @@ async def serve_cli(
                 failure = active_bridge.last_failure
                 print(f'xswap auto: last failure in this session: {failure["event"]} ({failure["reason"]}); '
                       f'see {log_path}.', file=sys.stderr)
-            command = reconnect_command(pool, env, active_bridge)
-            if command:
-                print('xswap: the temporary connection above is closed. '
-                      'Resume this conversation with a new bridge:', file=sys.stderr)
-                print(command, file=sys.stderr)
+            for line in exit_notice(cli.returncode, getattr(active_bridge, 'resume_thread', None),
+                                    reconnect_command(pool, env, active_bridge)):
+                print(line, file=sys.stderr)
+
+
+def exit_notice(status: int | None, thread: str | None, command: str | None) -> list[str]:
+    """The lines xswap adds after the TUI's last output.
+
+    A `--remote` TUI (Codex 0.155) ends by printing "Disconnected from this task. …", a
+    `Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID` line, a `Stop the current
+    turn: …` line, and the token usage -- on stdout, with no switch to turn it off. By then the
+    socket directory is deleted and the bridge has SIGTERMed its app-server, so the
+    Reconnect/Stop lines are dead; `exit_relay` drops that exact block on its way to the
+    terminal when stdout is one (and leaves it alone otherwise, or under XSWAP_RAW_EXIT=1). What
+    xswap adds is one short line and the one command that works, and nothing for a session
+    that never had a conversation, where Codex prints no footer either.
+    """
+    if not thread:
+        return []
+    head = 'Session ended' if status == 0 else f'Codex exited with status {status}'
+    if not command:
+        return [f'xswap: {head}; this conversation was not saved, so there is nothing to resume.']
+    return [f'xswap: {head}. Resume this conversation:', command]
 
 
 def reconnect_command(pool: AccountPool, env: dict[str, str], bridge: Bridge | None) -> str | None:

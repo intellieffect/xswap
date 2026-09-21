@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A bridged CLI session now ends with a resumable xswap summary instead of Codex's dead `--remote` footer. The TUI's stdout is a pseudo-terminal (`xswap.providers.codex.exit_relay`) whose bytes reach the real terminal unchanged, except the exact Disconnected/Reconnect/Stop block for this run's socket; anything else passes through. stdin/stderr stay inherited and the exit status is preserved. With a saved conversation xswap then prints `xswap: Session ended. Resume this conversation:` and the one `xswap run --auto … -- resume ID` command that works; a non-zero exit is named instead. Interactive stdout only; `XSWAP_RAW_EXIT=1` disables the relay.
+
 ## 0.9.0 — 2026-09-19
 
 Structural release: no user-visible behavior change beyond `schemaVersion` on the object-shaped `--json` payloads and one message losing the words "or codex". The old flat module names (`codex_swap`, `xswap_cli`, `xswap.usage`, ...) still import for this release and are removed in the next.

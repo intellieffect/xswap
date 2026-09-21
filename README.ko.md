@@ -198,6 +198,8 @@ xswap auto-disable          # 기본 실행 및 codex 심볼릭 링크 원복
 
 자동 모드 앱과 CLI는 각각 **실행 중인 한 개의 Codex 서버와 대화 저장소를 유지**합니다. CLI는 원본 TUI 프로세스도 그대로 유지하며 사용자 전용 Unix WebSocket으로 서버와 연결합니다. TCP 포트를 열지 않습니다. 앱과 CLI 저장소는 분리되어 있습니다. 새 턴 전에 현재 사용량을 확인하고, 적용되는 한도가 소진되면 잔여량이 확인된 다음 계정으로 인증을 바꿉니다. 한도 정보는 최대 30초 동안 재사용하며, Codex의 한도 알림으로 갱신합니다. 모델별 한도를 확인할 수 없는 후보는 선택하지 않습니다.
 
+자동 모드 CLI 세션이 저장된 대화와 함께 정상 종료되면(`/exit`, Ctrl-D) xswap이 `xswap: Session ended. Resume this conversation:` 한 줄과 실제로 동작하는 `env … xswap run --auto … -- resume ID` 명령 하나를 출력합니다. Codex가 0이 아닌 상태로 끝나면 `xswap: Codex exited with status N.`으로 알리고 그 종료 코드를 그대로 xswap의 종료 코드로 씁니다. 이미 사라진 소켓을 가리키는 Codex 자체의 `--remote` 꼬리말(`Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID`)은 제거하고, Codex의 토큰 사용량 줄과 나머지 출력은 그대로입니다. TUI에 실제 터미널을 그대로 주려면 `XSWAP_RAW_EXIT=1`을 설정하십시오 — [docs/session-switching-details.ko.md](docs/session-switching-details.ko.md) 참고.
+
 진행 중인 턴이 `usageLimitExceeded`로 종료되면 기존 실패 알림을 보존하고 같은 대화에 이어가기 턴을 추가합니다. 원래 사용자 요청을 다시 전송하거나 도구 호출을 재생하지 않습니다. 기존 도구 결과를 확인하며 계속하도록 지시하지만, 모델이 수행하는 외부 작업 자체의 exactly-once 실행을 보장하는 것은 아닙니다. 관측된 다른 턴이 실행 중이면 모두 종료될 때까지 인증 전환을 미룹니다. 사용자가 중단하거나 새 요청을 보내면 대기 중인 자동 이어가기를 취소합니다.
 
 사용 가능한 후보가 없으면 원래 한도 오류를 남기고 멈춥니다. 같은 이어가기 체인에서 동일 계정을 반복 사용하지 않으며, 일반 429/연결 오류/권한 오류/컨텍스트 초과를 한도 소진으로 간주하지 않습니다. 다음 사용자 요청에서는 사용량을 다시 확인할 수 있습니다.

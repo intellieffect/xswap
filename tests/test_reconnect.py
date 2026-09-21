@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from test_live import Pool
 
-from xswap.codex_cli import WebSocketBridge, reconnect_command
+from xswap.codex_cli import WebSocketBridge, exit_notice, reconnect_command
 
 
 class ReconnectTests(unittest.IsolatedAsyncioTestCase):
@@ -104,3 +104,28 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
             self.bridge.remember_thread(other)
             self.assertFalse(self.bridge.status_path.exists())
         self.assertEqual(self.bridge.resume_thread, other)
+
+
+class ExitNoticeTests(unittest.TestCase):
+    command = 'env CODEX_SWAP_HOME=/s CODEX_HOME=/h xswap run --auto --accounts a,b -- resume t'
+
+    def test_no_conversation_means_no_lines(self):
+        self.assertEqual(exit_notice(0, None, None), [])
+        self.assertEqual(exit_notice(0, None, self.command), [])
+
+    def test_clean_exit_is_one_short_line_and_one_command(self):
+        lines = exit_notice(0, 't', self.command)
+        self.assertEqual(lines, ['xswap: Session ended. Resume this conversation:', self.command])
+        self.assertNotIn('--remote', '\n'.join(lines))
+        self.assertLess(len(lines[0]), 60)
+
+    def test_unsaved_conversation_claims_no_success_and_gives_no_command(self):
+        self.assertEqual(exit_notice(0, 't', None),
+                         ['xswap: Session ended; this conversation was not saved, so there is nothing to resume.'])
+        self.assertEqual(exit_notice(3, 't', None),
+                         ['xswap: Codex exited with status 3; this conversation was not saved, so there is nothing to resume.'])
+
+    def test_nonzero_status_is_named_not_hidden(self):
+        self.assertEqual(exit_notice(2, 't', self.command),
+                         ['xswap: Codex exited with status 2. Resume this conversation:', self.command])
+        self.assertTrue(exit_notice(None, 't', None)[0].startswith('xswap: Codex exited with status None;'))
