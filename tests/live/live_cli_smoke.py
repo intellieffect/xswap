@@ -1,10 +1,12 @@
 """Actual Codex TUI + server, fixture-only auth/HTTP, PTY integration."""
 import asyncio
+import contextlib
 import fcntl
 import json
 import os
 import pty
 import select
+import shlex
 import signal
 import struct
 import subprocess
@@ -14,10 +16,11 @@ import termios
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from live_codex_smoke import HTTP, Pool, ThreadingHTTPServer, calls, limits
 
-from xswap.codex_cli import WebSocketBridge, serve_cli
+from xswap.codex_cli import WebSocketBridge, saved_thread, serve_cli
 
 
 class ObservedBridge(WebSocketBridge):
@@ -38,8 +41,14 @@ class ObservedBridge(WebSocketBridge):
 
 def runner(home,real):
  env={k:v for k,v in os.environ.items() if not k.startswith(('CODEX_','OPENAI_','XSWAP_'))};env.update(CODEX_HOME=home,TERM='xterm-256color')
+ # Make the harness PTY this session's controlling terminal, as a user's terminal is: Codex
+ # reads its size from /dev/tty and SIGWINCH is delivered to the foreground process group.
+ with contextlib.suppress(OSError):fcntl.ioctl(0,termios.TIOCSCTTY,0)
  root=Path(home)
- return asyncio.run(serve_cli(Pool(),real,['--no-alt-screen','-C',home,'-m','mock-model','-a','never','-s','read-only'],env,root/'status.json',root/'rpc.sock',ObservedBridge))
+ pool=Pool()
+ # A manager root is what reconnect_command needs to print the resume command after /exit.
+ if os.environ.get('XSWAP_TEST_EXIT')=='1':pool.manager=SimpleNamespace(root=root/'swap-home')
+ return asyncio.run(serve_cli(pool,real,['--no-alt-screen','-C',home,'-m','mock-model','-a','never','-s','read-only'],env,root/'status.json',root/'rpc.sock',ObservedBridge))
 
 def main():
  server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -54,7 +63,7 @@ def main():
   master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
   real=os.environ.get('XSWAP_SMOKE_CODEX',os.path.expanduser('~/.codex/packages/standalone/current/bin/codex'))
   process=subprocess.Popen([sys.executable,__file__,'--runner',tmp,real],stdin=slave,stdout=slave,stderr=slave,start_new_session=True);os.close(slave)
-  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None;picker_done=False;picker_opened_at=0;manual_done=False
+  output=b'';stage=0;sent_at=0;started=time.monotonic();pids=set();cli_pids=set();tids=set();completed=0;main_tid=None;picker_done=False;picker_opened_at=0;manual_done=False;resized_at=None;second_turn_at=None
   try:
    while time.monotonic()-started<60:
     if select.select([master],[],[],.1)[0]:
@@ -93,6 +102,16 @@ def main():
      os.write(master,b'\r');stage=11;picker_opened_at=time.monotonic()
     elif stage==11 and time.monotonic()-picker_opened_at>3:
      picker_done=True;stage=1
+    elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_RESIZE')=='1' and resized_at is None:
+     # A user's terminal shrinks: SIGWINCH goes to the foreground process group, the relay
+     # copies the new size onto its PTY, and the TUI must redraw at the new width.
+     time.sleep(1);fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',30,80,0,0));resized_at=len(output);sent_at=time.monotonic()
+    elif stage==1 and completed>=1 and resized_at is not None and second_turn_at is None:
+     if time.monotonic()-sent_at>3:
+      second_turn_at=len(output);os.write(master,b'\x1b[200~second turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=2
+    elif stage==1 and completed>=1 and os.environ.get('XSWAP_TEST_EXIT')=='1':
+     # The user's /exit, not Ctrl-C: the path that prints Codex's --remote footer and xswap's trailer.
+     time.sleep(2);os.write(master,b'/exit');time.sleep(.5);os.write(master,b'\r');stage=5
     elif stage==1 and completed>=1:
      time.sleep(2);os.write(master,b'\x1b[200~second turn\x1b[201~');time.sleep(1);os.write(master,b'\r');stage=2
     elif stage==2 and completed>=2:
@@ -109,9 +128,47 @@ def main():
      assert first_second == (os.environ.get('XSWAP_TEST_RESERVE')!='1' and os.environ.get('XSWAP_TEST_MANUAL')!='1')
      assert any(c['account']=='second' and 'second turn' in json.dumps(c['body'].get('input',[])) for c in calls)
      assert not home.joinpath('auth.json').exists()
-     os.write(master,b'\x03');time.sleep(.3);os.write(master,b'\x03');stage=4
+     # Ctrl-C, and a second one only if the TUI is still up: with the PTY as controlling
+     # terminal, a Ctrl-C after Codex has restored cooked mode is a SIGINT to the whole
+     # foreground group, which is the operator's own doing, not what this test measures.
+     os.write(master,b'\x03')
+     for _ in range(20):
+      time.sleep(.1)
+      if select.select([master],[],[],0)[0]:
+       try:output+=os.read(master,65536)
+       except OSError:break
+      if process.poll() is not None or b'Shutting down' in output:break
+     else:os.write(master,b'\x03')
+     stage=4
      break
     if process.poll() is not None:break
+   if os.environ.get('XSWAP_SMOKE_CAPTURE'):
+    Path(os.environ['XSWAP_SMOKE_CAPTURE']).write_bytes(output)
+    Path(os.environ['XSWAP_SMOKE_CAPTURE']+'.json').write_text(json.dumps({'resized_at':resized_at,'second_turn_at':second_turn_at}))
+   if os.environ.get('XSWAP_TEST_EXIT')=='1':
+    assert stage==5,f'/exit never sent: stage={stage}, completed={completed}'
+    assert process.wait(timeout=10)==0,f'runner exit {process.returncode}'
+    text=output.decode(errors='replace');lines=[l.rstrip('\r') for l in text.splitlines()]
+    assert b'xswap auto:' not in output,'a bridge failure line in a clean /exit'
+    assert 'Token usage so far:' in text,'Codex token usage line lost'
+    # Codex 0.155.1's own dead --remote footer is dropped by the stdout relay (exit_relay.py);
+    # everything else Codex printed must still be there.
+    for stale in ('Disconnected from this task','Reconnect: codex --remote','Stop the current turn'):
+     assert stale not in text,f'stale footer line survived: {stale!r}'
+    assert '\x1b[6n' in text,'the TUI cursor-position query never came through the relay'
+    assert 'first turn' in text
+    commands=[l for l in lines if 'xswap run --auto' in l]
+    assert len(commands)==1,commands
+    assert lines[lines.index(commands[0])-1]=='xswap: Session ended. Resume this conversation:',lines[-6:]
+    argv=shlex.split(commands[0])
+    assert argv[:1]==['env'] and argv[1]=='CODEX_SWAP_HOME='+str(home/'swap-home') and argv[2]=='CODEX_HOME='+str(home),argv
+    assert argv[3:9]==['xswap','run','--auto','--accounts','first,second','--'] and argv[9]=='resume',argv
+    assert saved_thread(home,argv[10]),f'resume id {argv[10]} has no rollout under {home}'
+    assert '--remote' not in commands[0]
+    assert text.count('xswap: ')==1,'more than one xswap trailer line'
+    assert not home.joinpath('auth.json').exists()
+    print('PASS: /exit drops Codex\'s dead Disconnected/Reconnect/Stop footer, keeps the token usage line, and ends with one usable xswap resume command')
+    server.shutdown();return
    if stage!=4:
     print(output.decode(errors='replace')[-2500:]);raise AssertionError(f'TUI failed: stage={stage}, calls={len(calls)}, completed={completed}')
    try:process.wait(timeout=10)
@@ -122,6 +179,19 @@ def main():
    if os.environ.get('XSWAP_TEST_PICKER')=='1':
     assert picker_done
     print('PASS: /resume picker opens, resumes the saved session, and subsequent turns complete')
+   if os.environ.get('XSWAP_TEST_RESIZE')=='1':
+    import re
+    # Inline mode keeps the composer where it started until the terminal changes; a 40->30
+    # row shrink makes the TUI clamp and redraw against the new bottom (after one transitional
+    # frame that also happens without the relay). So, from the second turn on -- 3 s after the
+    # resize -- the rows of the cursor moves (`ESC[row;colH`) must reach the last rows of a
+    # 30-row screen and never pass 30.
+    rows=lambda blob:[int(m.group(1)) for m in re.finditer(rb'\x1b\[(\d+);(\d+)H',blob)]
+    settled=rows(output[second_turn_at:])
+    assert settled,'no redraw after the resize'
+    assert max(settled)<=30,f'the TUI kept drawing past row 30 after the resize: max row {max(settled)}'
+    assert max(settled)>=26,f'the TUI never redrew against the new 30-row bottom: max row {max(settled)}'
+    print(f'PASS: SIGWINCH reaches the TUI through the relay; after shrinking 40x120 -> 30x80 the cursor rows settle at <= 30 (max {max(settled)})')
    if os.environ.get('XSWAP_TEST_RESERVE')=='1':print('PASS: proactive weekly reserve switch; no first-account second-turn request')
    if os.environ.get('XSWAP_TEST_OUTAGE')=='1':print('PASS: session opened while the usage service was unreachable at startup; quota re-read before the first turn')
    print('PASS: real TUI remains alive, same TUI/server PIDs and thread through account switch and next user turn, Ctrl-C exits cleanly, no auth.json')

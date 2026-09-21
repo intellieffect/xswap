@@ -5,6 +5,7 @@ import fcntl
 import io
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -944,10 +945,15 @@ class DocPromiseTests(TestCase):
 class DisconnectNoticeTests(TestCase):
  """After the TUI exits, serve_cli names bridge.log when the bridge failed or recorded a failure."""
  setUp=test_codex_swap.AccountTests.setUp
- def serve(self,run,sweep=False,deadline=10):
+ def serve(self,run,sweep=False,deadline=10,pool=None,exit_code=0,stdout_relay=None,tui_output=b'',spawn_calls=None,relay_out=None):
   # Drives serve_cli's real handler and exit path with a fake listener, CLI process, and bridge class.
   # sweep=True removes the run record the way a concurrent prune does, after the listener is
   # up and before the TUI connects: the window between new_run_dir and the bridge's lock.
+  # pool/exit_code: a pool with a manager lets reconnect_command produce a resume line; exit_code
+  # is what the fake TUI returns from wait(), the way the real one returns Codex's status.
+  # stdout_relay/tui_output/spawn_calls/relay_out: force the stdout relay on or off, have the
+  # fake TUI write `tui_output` to whatever stdout it was given, record the spawn kwargs, and
+  # send the relay's output to the `relay_out` fd instead of the suite's own stdout.
   run_dir=self.manager.root/'auto'/'cli-runs'/'notice';run_dir.mkdir(parents=True)
   socket_path=self.base/'rpc.sock';socket_path.touch()
   finished=None
@@ -976,24 +982,30 @@ class DisconnectNoticeTests(TestCase):
    async def wait_closed(self):pass
   class FakeBridge:
    def __init__(self,pool,argv,env,socket=None,status_path=None):
-    self.current='first';self.failure=None;self.last_failure=None;self.resume_thread=None
+    self.current='first';self.failure=None;self.last_failure=None;self.resume_thread=None;self.resume_candidates=[]
    async def run(self):
     try:
      await run(self)
     finally:
      finished.set()
   class FakeProcess:
-   pid=4242;returncode=0
+   pid=4242;returncode=exit_code
    async def wait(self):
-    await finished.wait();return 0
-  async def spawn(*args,**kwargs):return FakeProcess()
+    await finished.wait();return exit_code
+  async def spawn(*args,**kwargs):
+   if spawn_calls is not None:spawn_calls.append((args,kwargs))
+   if kwargs.get('stdout') is not None and tui_output:os.write(kwargs['stdout'],tui_output)
+   return FakeProcess()
+  from xswap.providers.codex.exit_relay import StdoutRelay
+  class RelayToFd(StdoutRelay):
+   def __init__(self,filter_,out_fd=1,write=None):super().__init__(filter_,out_fd=relay_out if relay_out is not None else out_fd,write=write)
   async def main():
    nonlocal finished
    finished=asyncio.Event()
    # Bounded: a handler that dies before the bridge runs never sets `finished`, so without
    # a deadline the fake TUI's wait() would hang the suite instead of failing the test.
-   return await asyncio.wait_for(serve_cli(test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge),deadline)
-  with patch('websockets.asyncio.server.unix_serve',FakeServe),patch('xswap.codex_cli.asyncio.create_subprocess_exec',spawn),contextlib.redirect_stderr(io.StringIO()) as err:
+   return await asyncio.wait_for(serve_cli(pool or test_live.Pool(),'/fixture/codex',[],{'CODEX_HOME':str(self.base/'home')},run_dir/'status.json',socket_path,bridge_class=FakeBridge,stdout_relay=stdout_relay),deadline)
+  with patch('websockets.asyncio.server.unix_serve',FakeServe),patch('xswap.codex_cli.asyncio.create_subprocess_exec',spawn),patch('xswap.codex_cli.StdoutRelay',RelayToFd),contextlib.redirect_stderr(io.StringIO()) as err:
    code=asyncio.run(main())
   return code,err.getvalue(),run_dir
  def test_a_record_swept_before_the_bridge_connects_is_recreated(self):
@@ -1067,6 +1079,115 @@ class DisconnectNoticeTests(TestCase):
   async def run(bridge):pass
   code,err,_=self.serve(run)
   self.assertEqual((code,err),(0,''))
+ thread='00000000-0000-4000-8000-000000000001'
+ def saved_pool(self):
+  from types import SimpleNamespace
+  pool=test_live.Pool();pool.manager=SimpleNamespace(root=self.manager.root);return pool
+ def test_exit_with_a_saved_conversation_prints_one_xswap_resume_command(self):
+  # Codex 0.155 ends a `--remote` TUI with its own stdout footer ("Disconnected from this task.
+  # Any running work continues." / "Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID" /
+  # "Stop the current turn: run codex --remote … agents, …" / "Token usage so far: …"); the
+  # source has no switch for it and the TUI refuses a non-tty stdout, so it stays. xswap's own
+  # trailer is one short line plus the one command that works, nothing else.
+  async def run(bridge):
+   bridge.resume_thread=self.thread;bridge.resume_candidates=[self.thread]
+  with patch('xswap.codex_cli.saved_thread',return_value=True):
+   code,err,_=self.serve(run,pool=self.saved_pool())
+  self.assertEqual(code,0)
+  lines=err.splitlines()
+  self.assertEqual(lines[0],'xswap: Session ended. Resume this conversation:')
+  commands=[l for l in lines if 'xswap run --auto' in l]
+  self.assertEqual(len(commands),1)
+  self.assertEqual(shlex.split(commands[0]),['env','CODEX_SWAP_HOME='+str(self.manager.root),'CODEX_HOME='+str(self.base/'home'),'xswap','run','--auto','--accounts','first,second','--','resume',self.thread])
+  self.assertNotIn('--remote',err);self.assertNotIn('temporary connection above',err)
+  self.assertEqual(len(lines),2)
+ def test_unsaved_conversation_still_explains_the_dead_footer_without_a_command(self):
+  # Codex prints its Reconnect/Stop footer for any thread it knows, saved or not; without a
+  # rollout on disk there is nothing to resume, so say so and claim no success.
+  async def run(bridge):
+   bridge.resume_thread=self.thread;bridge.resume_candidates=[self.thread]
+  with patch('xswap.codex_cli.saved_thread',return_value=False):
+   code,err,_=self.serve(run,pool=self.saved_pool())
+  self.assertEqual(code,0)
+  self.assertEqual(err.splitlines(),['xswap: Session ended; this conversation was not saved, so there is nothing to resume.'])
+ def test_nonzero_codex_exit_is_returned_and_named_before_the_resume_command(self):
+  async def run(bridge):
+   bridge.resume_thread=self.thread;bridge.resume_candidates=[self.thread]
+  with patch('xswap.codex_cli.saved_thread',return_value=True):
+   code,err,_=self.serve(run,pool=self.saved_pool(),exit_code=1)
+  self.assertEqual(code,1)
+  lines=err.splitlines()
+  self.assertEqual(lines[0],'xswap: Codex exited with status 1. Resume this conversation:')
+  self.assertEqual(sum('xswap run --auto' in l for l in lines),1)
+ def test_bridge_failure_and_resume_command_are_both_kept(self):
+  async def run(bridge):
+   bridge.resume_thread=self.thread;bridge.resume_candidates=[self.thread]
+   bridge.failure='app-server exited';raise LiveError('app-server exited')
+  with patch('xswap.codex_cli.saved_thread',return_value=True):
+   code,err,run_dir=self.serve(run,pool=self.saved_pool())
+  lines=err.splitlines()
+  self.assertEqual(lines[0],f'xswap auto: CLI bridge disconnected (app-server exited); see {run_dir/"bridge.log"} or xswap auto-status.')
+  self.assertEqual(lines[1],'xswap: Session ended. Resume this conversation:')
+  self.assertEqual(sum('xswap run --auto' in l for l in lines),1)
+ def test_without_the_relay_the_tui_inherits_stdout(self):
+  async def run(bridge):pass
+  calls=[]
+  code,err,_=self.serve(run,stdout_relay=False,spawn_calls=calls)
+  self.assertEqual(code,0)
+  self.assertEqual(len(calls),1);self.assertIsNone(calls[0][1].get('stdout'));self.assertNotIn('stderr',calls[0][1]);self.assertNotIn('stdin',calls[0][1])
+ def test_relay_drops_codex_footer_keeps_token_usage_and_prints_the_trailer_after_it(self):
+  # The fake TUI writes what Codex 0.155.1 prints on /exit into the PTY slave it was given;
+  # the relay must hand the real stdout everything but the dead Reconnect/Stop block, and
+  # drain it before xswap's own stderr lines so the token line is above the resume command.
+  socket_path=self.base/'rpc.sock'
+  footer=(f'Disconnected from this task. Any running work continues.\nReconnect: codex --remote unix://{socket_path} resume {self.thread}\n'
+          f'Stop the current turn: run codex --remote unix://{socket_path} agents, select this task, and press ctrl + x.\n').encode()
+  tui=b'\x1b[?25h\x1b[0 q'+footer+b'Token usage so far: total=2 input=1 output=1\n'
+  r,w=os.pipe();calls=[]
+  async def run(bridge):
+   bridge.resume_thread=self.thread;bridge.resume_candidates=[self.thread]
+  try:
+   with patch('xswap.codex_cli.saved_thread',return_value=True):
+    code,err,_=self.serve(run,pool=self.saved_pool(),stdout_relay=True,tui_output=tui,spawn_calls=calls,relay_out=w)
+  finally:
+   os.close(w)
+  relayed=b'';
+  while True:
+   chunk=os.read(r,65536)
+   if not chunk:break
+   relayed+=chunk
+  os.close(r)
+  self.assertEqual(code,0)
+  self.assertEqual(relayed,b'\x1b[?25h\x1b[0 q'+b'Token usage so far: total=2 input=1 output=1\n')
+  self.assertIsInstance(calls[0][1].get('stdout'),int);self.assertNotIn('stdin',calls[0][1]);self.assertNotIn('stderr',calls[0][1])
+  with self.assertRaises(OSError):os.fstat(calls[0][1]['stdout'])  # the parent's slave copy is closed with the relay
+  lines=err.splitlines()
+  self.assertEqual(lines[0],'xswap: Session ended. Resume this conversation:')
+  self.assertEqual(sum('xswap run --auto' in l for l in lines),1)
+ def test_relay_passes_an_unknown_footer_through_unchanged(self):
+  # Another socket's footer, or a wording Codex changes later, is not this run's block.
+  tui=b'Disconnected from this task. Any running work continues.\nReconnect: codex --remote unix:///tmp/xs-other/rpc.sock resume '+self.thread.encode()+b'\nToken usage so far: total=1 input=1 output=0\n'
+  r,w=os.pipe()
+  async def run(bridge):pass
+  try:
+   code,err,_=self.serve(run,stdout_relay=True,tui_output=tui,relay_out=w)
+  finally:
+   os.close(w)
+  relayed=os.read(r,65536);os.close(r)
+  self.assertEqual((code,relayed),(0,tui))
+ def test_relay_is_released_when_serve_cli_is_cancelled(self):
+  # A TUI that never exits and a caller that gives up: the relay's fds and reader go too.
+  r,w=os.pipe();calls=[];relays=[]
+  from xswap.providers.codex.exit_relay import StdoutRelay
+  original_open=StdoutRelay.open
+  def spy_open(self):relays.append(self);return original_open(self)
+  async def run(bridge):await asyncio.sleep(3600)
+  with patch.object(StdoutRelay,'open',spy_open),self.assertRaises(asyncio.TimeoutError):
+   self.serve(run,deadline=0.5,stdout_relay=True,spawn_calls=calls,relay_out=w)
+  os.close(w);os.close(r)
+  self.assertEqual(len(relays),1)
+  self.assertIsNone(relays[0].master);self.assertIsNone(relays[0].slave)
+  self.assertFalse(relays[0]._reading)
 
 class ResumeHomeTests(TestCase):
  session_id='00000000-0000-4000-8000-000000000001'

@@ -18,7 +18,7 @@ xswap switch work --default-only      # 새 실행의 기본값만 변경
 
 자동 모드의 `codex resume UUID` / `fork UUID`는 자동 런타임·기존 Codex 홈·등록 계정 홈에서 해당 대화를 찾고, 대화를 복사하지 않고 원래 홈에서 인증 브리지와 함께 재개합니다. 선택 화면·대화 이름·`--last`는 자동 런타임 범위를 유지합니다. 자동 런타임 밖 여러 홈에 같은 UUID가 있으면 원래 홈을 명시해야 합니다.
 
-자동 모드 CLI 종료 후에는 Codex의 임시 원격 주소 아래에 마지막으로 표시되는 xswap 재개 명령을 사용하십시오. 종료된 소켓 대신 새 브리지를 열며 계정 풀·현재 계정·원래 세션 홈을 유지합니다.
+자동 모드 CLI가 저장된 대화와 함께 종료되면 화면은 Codex의 토큰 사용량 줄, 그 다음 `xswap: Session ended. Resume this conversation:` 한 줄과 실제로 동작하는 명령 하나 `env CODEX_SWAP_HOME=… CODEX_HOME=… xswap run --auto --accounts … -- resume ID`로 끝납니다. 새 브리지를 열며 계정 풀·현재 계정·원래 세션 홈을 유지합니다. Codex가 0이 아닌 상태로 끝나면 `xswap: Codex exited with status N. …`로 표시하고, 디스크에 롤아웃이 없는 대화는 `… this conversation was not saved, so there is nothing to resume.`만 출력하며 명령을 주지 않고, 대화가 없던 세션에는 xswap 줄이 없습니다. Codex 0.155 자체는 모든 `--remote` 종료 시 끄는 옵션이 없는 꼬리말("Disconnected from this task. Any running work continues.", `Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID`, `Stop the current turn: …`)을 출력하는데, TUI가 종료되면 소켓 디렉터리는 삭제되고 브리지는 app-server를 중지하므로 xswap 아래서는 전부 틀린 내용입니다. xswap은 TUI의 stdout 에 의사 터미널(pseudo-terminal)을 주고 모든 바이트를 실제 터미널로 그대로 복사하되, 정확히 그 블록(이 실행의 소켓·올바른 형식의 resume id·알려진 문구)만 제거합니다. stdin·stderr 는 그대로 상속된 터미널이므로 입력·Ctrl-C·잡 컨트롤·창 크기 변경은 달라지지 않습니다. 한계: 릴레이는 stdout 이 대화형 터미널일 때만 쓰이며, 정확히 알려진 블록이 아닌 것(새 Codex 의 다른 문구, 다른 소켓)은 그대로 통과시키므로 Codex 가 바뀌어도 최악은 꼬리말이 다시 보이는 것이지 출력이 사라지는 일은 없습니다. `XSWAP_RAW_EXIT=1` 이면 릴레이를 끕니다. Codex의 토큰 사용량 줄과 `xswap auto:` 실패 줄은 그대로 남습니다.
 
 `--details`에서 리셋권은 `codex reset credits: N available`로 별도 표시하며, 서버가 제공한 사용 가능한 리셋권의 만료일도 보여줍니다. 정보를 제공하지 않으면 `unknown`으로 표시합니다(0개와 구분). `usage --json`에는 `resetCredits`가 포함됩니다. 조회는 리셋권을 사용하지 않습니다.
 

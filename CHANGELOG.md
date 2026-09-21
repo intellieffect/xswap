@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A bridged CLI session now ends with a resumable xswap summary instead of Codex's `--remote` footer. Codex 0.155 prints "Disconnected from this task. Any running work continues.", `Reconnect: codex --remote unix:///tmp/xs-…/rpc.sock resume ID` and `Stop the current turn: …` on every `--remote` exit with no way to turn it off, and none of it holds under xswap (the socket directory and the bridge are gone by then). xswap gives the TUI a pseudo-terminal as its stdout (`xswap.providers.codex.exit_relay`), copies every byte to the real stdout, and drops only that exact three-line block for this run's socket and a well-formed resume id; anything else -- another socket, a changed wording -- is passed through unchanged, so a Codex change can at worst bring the footer back, never lose output. stdin and stderr stay the inherited terminal (keys, Ctrl-C, job control and resizes are unchanged; SIGWINCH is mirrored onto the PTY) and the TUI's exit status is preserved. xswap then prints `xswap: Session ended. Resume this conversation:` and the one `env … xswap run --auto … -- resume ID` command that works (`xswap: Codex exited with status N. …` on a non-zero exit; `… this conversation was not saved, so there is nothing to resume.` with no command when there is no rollout on disk; nothing for a session that never had a conversation), replacing "the temporary connection above is closed. Resume this conversation with a new bridge:". The relay is used only when stdout is an interactive terminal; `XSWAP_RAW_EXIT=1` disables it and hands the TUI the real stdout again.
+
 ## 0.9.0 — 2026-09-19
 
 Structural release: no user-visible behavior change beyond `schemaVersion` on the object-shaped `--json` payloads and one message losing the words "or codex". The old flat module names (`codex_swap`, `xswap_cli`, `xswap.usage`, ...) still import for this release and are removed in the next.
