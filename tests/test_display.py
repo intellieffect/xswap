@@ -358,26 +358,26 @@ class MenuBarSwiftLocalizationTests(unittest.TestCase):
         self.assertIn('process.arguments = ["dashboard", "--lang", menuLang]', self.text)
 
 
-class ResetOrderTests(unittest.TestCase):
-    """`xswap list` shows the soonest weekly reset first, slot numbers unchanged."""
+class SlotOrderTests(unittest.TestCase):
+    """`xswap list` reads top to bottom as 1, 2, 3 whatever the reset times or selection."""
 
-    def _row(self, name, slot, resets_at, weekly=True):
+    def _row(self, name, slot, resets_at, weekly=True, active=False):
         item = row(name=name, left=0, weekly=weekly)
-        item['active'] = False
+        item['active'] = active
         item['slot'] = slot
         if weekly:
             item['buckets'][0]['windows'][0]['resetsAt'] = resets_at
         return item
 
-    def test_rows_are_ordered_by_soonest_reset(self):
+    def test_rows_stay_in_slot_order_regardless_of_reset(self):
         rows = [self._row('main', 1, 300), self._row('second', 2, 100), self._row('third', 3, 200)]
         text = render(rows, {'enabled': False}, now=0)
+        self.assertLess(text.index('1. main'), text.index('2. second'))
         self.assertLess(text.index('2. second'), text.index('3. third'))
-        self.assertLess(text.index('3. third'), text.index('1. main'))
 
-    def test_rows_without_a_weekly_reset_go_last_in_registration_order(self):
-        rows = [self._row('main', 1, None, weekly=False), self._row('second', 2, 100),
-                self._row('third', 3, None, weekly=False)]
+    def test_rows_given_out_of_order_are_listed_by_slot(self):
+        rows = [self._row('third', 3, 100, active=True), self._row('main', 1, None, weekly=False),
+                self._row('second', 2, 200)]
         text = render(rows, {'enabled': False}, now=0)
-        self.assertLess(text.index('2. second'), text.index('1. main'))
-        self.assertLess(text.index('1. main'), text.index('3. third'))
+        self.assertLess(text.index('1. main'), text.index('2. second'))
+        self.assertLess(text.index('2. second'), text.index('3. third'))
