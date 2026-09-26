@@ -192,21 +192,17 @@ def summary(
             'exhausted': left == 0, 'cached': row.get('cached', False), 'fetchedAt': row.get('fetchedAt')}
 
 
-def reset_order(
-    rows: list[AccountUsageRow], now: float | None = None, shape: QuotaShape | None = None
-) -> list[AccountUsageRow]:
-    """List order: the account whose weekly window resets soonest first.
+def slot_order(rows: list[AccountUsageRow]) -> list[AccountUsageRow]:
+    """List order: by slot number, so the list always reads 1, 2, 3 top to bottom.
 
-    Slot numbers travel with the row (`row['slot']`), so reordering the list never
-    moves the number `xswap switch <number>` takes. Rows without a readable weekly
-    reset keep their registration order at the end.
+    Reset times and the selection move with the data, not the layout; ordering by
+    them made the numbers read out of sequence and reshuffled the list after every
+    weekly reset. Rows without a slot keep their given order after the numbered ones.
     """
-    now = time.time() if now is None else now
-    def key(item: tuple[int, AccountUsageRow]) -> tuple[bool, float, int]:
+    def key(item: tuple[int, AccountUsageRow]) -> tuple[bool, int, int]:
         index, row = item
-        window = weekly(row, shape)
-        at = window['resetsAt'] if window else None
-        return (at is None, at if at is not None else 0.0, index)
+        slot = row.get('slot')
+        return (slot is None, slot if slot is not None else 0, index)
     return [row for _, row in sorted(enumerate(rows), key=key)]
 
 
@@ -237,7 +233,7 @@ def render(
     if color is None:
         color = sys.stdout.isatty() and 'NO_COLOR' not in os.environ and os.environ.get('TERM') != 'dumb'
     now = time.time() if now is None else now
-    rows = reset_order(rows, now, shape)
+    rows = slot_order(rows)
     lines = [_t(lang, 'header'), _t(lang, 'legend'), '']
     for index, row in enumerate(rows, 1):
         item = summary(row, now, lang, shape)

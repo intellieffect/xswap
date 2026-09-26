@@ -1,8 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.9.2 — 2026-09-26
 
+- `xswap list` orders accounts by slot number again, so the list always reads 1, 2, 3 top to bottom. The 0.8.2 soonest-reset order made the numbers read out of sequence and reshuffled the list after every weekly reset; the reset time stays on each row. Slot numbers and `xswap switch <number>` are unchanged.
 - A bridged CLI session now ends with a resumable xswap summary instead of Codex's dead `--remote` footer. The TUI's stdout is a pseudo-terminal (`xswap.providers.codex.exit_relay`) whose bytes reach the real terminal unchanged, except the exact Disconnected/Reconnect/Stop block for this run's socket; anything else passes through. stdin/stderr stay inherited and the exit status is preserved. With a saved conversation xswap then prints `xswap: Session ended. Resume this conversation:` and the one `xswap run --auto … -- resume ID` command that works; a non-zero exit is named instead. Interactive stdout only; `XSWAP_RAW_EXIT=1` disables the relay.
+
+## 0.9.1 — tag only
+
+The `v0.9.1` tag was pushed by mistake onto `8db398f` (0.9.0 plus the exit-summary fix, still reporting version 0.9.0) and release tags are immutable. Use 0.9.2.
 
 ## 0.9.0 — 2026-09-19
 
