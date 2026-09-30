@@ -19,6 +19,10 @@ from xswap.core.path import absolute_which
 if TYPE_CHECKING:
     from xswap.manager import Manager, _Hooks
 
+# The bridge ships at xswap/bridge/, not beside this module: resolving it from
+# providers/codex/ raised MODULE_NOT_FOUND in node, surfacing only as "SDK bridge failed".
+OPENCLAW_BRIDGE = Path(__file__).resolve().parents[2] / "bridge" / "openclaw.mjs"
+
 
 def parse_pool(value: str | list[str]) -> list[str]:
     """Split "a, b,a" (or dedupe an already-split list) into >=2 distinct, ordered names."""
@@ -91,7 +95,7 @@ class OpenClawSync:
         package_root = self.hooks.resolve_openclaw_package_root(executable)
         if package_root is None:
             raise SwapError("Cannot locate OpenClaw's installed package through its executable. Use the standard npm installation.")
-        helper = Path(__file__).resolve().parent / "bridge" / "openclaw.mjs"
+        helper = OPENCLAW_BRIDGE
         # Keep the single-account "account"/"codexHome" keys byte-compatible; "accounts" carries the full pool.
         request = {"account": name, "codexHome": str(home),
                    "accounts": [{"name": entry_name, "codexHome": str(entry_home)} for entry_name, entry_home in resolved],
