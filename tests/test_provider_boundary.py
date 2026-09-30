@@ -243,3 +243,10 @@ def test_tick_does_not_ask_a_provider_without_live_switch_to_move_sessions(capsy
     assert code == tick.EXIT_SWITCHED
     assert manager.moved == ("a", "b")
     assert "switched:" in capsys.readouterr().out
+
+
+class OpenClawBridgePathTest(unittest.TestCase):
+    def test_bridge_path_points_at_the_shipped_helper(self):
+        # Every sync test mocks subprocess.run, so a wrong helper path stayed green.
+        from xswap.providers.codex.openclaw_sync import OPENCLAW_BRIDGE
+        self.assertTrue(OPENCLAW_BRIDGE.is_file(), OPENCLAW_BRIDGE)
