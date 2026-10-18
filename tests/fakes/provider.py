@@ -81,6 +81,9 @@ class FakeProvider:
     def prepare_home(self, manager, home, source, accounts):
         self.prepared.append(str(home))
 
+    def refresh_home(self, manager, home, accounts):
+        pass
+
     # -- quota -----------------------------------------------------------------
 
     def read_usage(self, manager, home, env=None, timeout=None):

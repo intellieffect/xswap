@@ -118,7 +118,9 @@ class Registry:
         with self.manager.locked():
             data = self.manager.read()
             if name in data["accounts"]:
-                return Path(data["accounts"][name]["home"])
+                home = Path(data["accounts"][name]["home"])
+                self.manager.provider.refresh_home(self.manager, home, data["accounts"])
+                return home
             home = self.manager.provider.account_home(self.manager.root, name)
             self.hooks.private_dir(home.parent)
             self.hooks.private_dir(home)

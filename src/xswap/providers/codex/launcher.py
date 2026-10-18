@@ -28,6 +28,7 @@ from xswap.core.reports import describe_login_report
 from xswap.providers.codex.live import LiveError
 from xswap.providers.codex.plugins import ensure_plugins
 from xswap.providers.codex.relocate import link_packages
+from xswap.providers.codex.tooling import refresh_managed, supply_runtime
 
 if TYPE_CHECKING:
     from xswap.manager import Manager, _Hooks
@@ -167,6 +168,7 @@ class Launcher:
         if dry:
             print(json.dumps({"account": name, "CODEX_HOME": str(home), "argv": command}, indent=2))
             return 0
+        refresh_managed(self.manager, home)
         ensure_plugins(home, self.manager.source)
         link_packages(self.manager, home)  # no-op for a registered external home
         try:
@@ -216,19 +218,7 @@ class Launcher:
             return 0
         for path in (root, home, desktop):
             self.hooks.private_dir(path)
-        _, source = self.manager.account(names[0])
-        # Shared tooling; the auto window owns its own conversation store. Auth stays in source homes.
-        for entry in ("config.toml", "AGENTS.md", "skills", "rules"):
-            src, dst = source / entry, home / entry
-            if src.exists() and not dst.exists() and not dst.is_symlink():
-                # Two launches share this runtime home and neither holds the registry lock here,
-                # so the other one can create the same link between the test and the call. The
-                # link it created is the link this one was about to create, so the loser has
-                # nothing to do -- but the FileExistsError reached codex_main, which reports
-                # every OSError as "could not start automatic Codex CLI" and advises
-                # `xswap auto-disable`, i.e. tearing the wrapper down over a won race.
-                with contextlib.suppress(FileExistsError):
-                    dst.symlink_to(src, target_is_directory=src.is_dir())
+        source = supply_runtime(self.manager, names[0], home)
         ensure_plugins(home, source)
         link_packages(self.manager, home)
         result = subprocess.run(command, env=self.manager.env(home), capture_output=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
@@ -254,6 +244,7 @@ class Launcher:
             return 0
         self.hooks.private_dir(desktop.parent)
         self.hooks.private_dir(desktop)
+        refresh_managed(self.manager, home)
         ensure_plugins(home, self.manager.source)
         link_packages(self.manager, home)  # no-op for a registered external home
         result = subprocess.run(command, env=self.manager.env(home), capture_output=True)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings

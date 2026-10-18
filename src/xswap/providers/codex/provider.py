@@ -74,8 +74,14 @@ class CodexProvider:
     def prepare_home(self, manager: Manager, home: Path, source: Path, accounts: dict[str, AccountRecord]) -> None:
         from xswap.providers.codex.plugins import ensure_plugins
         from xswap.providers.codex.relocate import link_packages
+        from xswap.providers.codex.tooling import supply_definitions
+        supply_definitions(source, home)
         ensure_plugins(home, source)
         link_packages(manager, home, accounts)
+
+    def refresh_home(self, manager: Manager, home: Path, accounts: dict[str, AccountRecord]) -> None:
+        from xswap.providers.codex.tooling import refresh_managed
+        refresh_managed(manager, home, accounts)
 
     # -- quota -----------------------------------------------------------------
 
