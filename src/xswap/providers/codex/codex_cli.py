@@ -591,18 +591,8 @@ def launch_cli(manager: Manager, accounts: str, args: list[str], dry: bool = Fal
     if home == runtime:
         private_dir(home.parent)
         private_dir(home)
-        _, source = manager.account(names[0])
-        for entry in ('config.toml', 'AGENTS.md', 'skills', 'rules'):
-            src, dst = source / entry, home / entry
-            if src.exists() and not dst.exists() and not dst.is_symlink():
-                # Concurrent auto launches share this runtime home and neither holds the
-                # registry lock here, so the other one can create the same link between the
-                # test and the call (70 of 150 probe launches). The link it created is the one
-                # this launch wanted, so the loser has nothing to do -- but the FileExistsError
-                # reached codex_main, whose OSError branch tells the user to run
-                # `xswap auto-disable`: tearing the wrapper down over a race that was won.
-                with contextlib.suppress(FileExistsError):
-                    dst.symlink_to(src, target_is_directory=src.is_dir())
+        from xswap.providers.codex.tooling import supply_runtime
+        source = supply_runtime(manager, names[0], home)
         from xswap.providers.codex.plugins import ensure_plugins
         ensure_plugins(home, source)
         # An in-session Codex update installs under $CODEX_HOME/packages; point that at
@@ -610,6 +600,8 @@ def launch_cli(manager: Manager, accounts: str, args: list[str], dry: bool = Fal
         from xswap.providers.codex.relocate import link_packages
         link_packages(manager, home)
     else:
+        from xswap.providers.codex.tooling import refresh_managed
+        refresh_managed(manager, home)
         print('xswap auto: resuming from the original session home', file=sys.stderr)
     run_dir = new_run_dir(manager)
     env = manager.env(home)

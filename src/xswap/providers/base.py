@@ -72,6 +72,10 @@ class Provider(Protocol):
         """Make a freshly created managed HOME usable (shared tooling, never credentials)."""
         ...
 
+    def refresh_home(self, manager: Manager, home: Path, accounts: dict[str, AccountRecord]) -> None:
+        """Supply missing definitions to an existing managed home; preserve external homes."""
+        ...
+
     # -- quota -----------------------------------------------------------------
 
     def read_usage(
