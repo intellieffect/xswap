@@ -38,10 +38,12 @@ def parse_pool(value: str | list[str]) -> list[str]:
 
 
 def parse_bridge_output(stdout: str) -> dict[str, Any] | None:
-    """The bridge's one-line JSON result: the last line that parses to an object.
+    """The bridge's one-line JSON result: the last line that parses to a bridge-shaped object.
 
-    The OpenClaw SDK (2026.10.4 and later) logs plain lines to stdout around the bridge's own
-    output, so neither the last line nor the whole stream is the result.
+    The OpenClaw SDK (2026.10.4 and later) logs lines to stdout around the bridge's own output, so
+    neither the last line nor the whole stream is the result. With `logging.consoleStyle: "json"`
+    those log lines are JSON objects too, so only an object shaped like a bridge result counts: an
+    `error`, or a finished run carrying both `completed` and `dryRun`.
     """
     for line in reversed(stdout.splitlines()):
         line = line.strip()
@@ -51,7 +53,7 @@ def parse_bridge_output(stdout: str) -> dict[str, Any] | None:
             value = json.loads(line)
         except ValueError:
             continue
-        if isinstance(value, dict):
+        if isinstance(value, dict) and ("error" in value or ("completed" in value and "dryRun" in value)):
             return value
     return None
 
@@ -126,7 +128,7 @@ class OpenClawSync:
                                     capture_output=True, env=self.manager.env(home), timeout=90)
             output = parse_bridge_output(result.stdout)
             if output is None:
-                raise SwapError("OpenClaw SDK bridge failed. Check the installed OpenClaw version (tested: 2026.8.1).")
+                raise SwapError("OpenClaw SDK bridge failed. Check the installed OpenClaw version (tested: 2026.8.1 and 2026.10.4).")
             if result.returncode or output.get("error"):
                 raise SwapError(output.get("error", "OpenClaw credential update failed."))
             if dry:
