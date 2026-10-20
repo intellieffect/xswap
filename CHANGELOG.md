@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3 — 2026-10-20
+
+- `xswap openclaw` (and `use --openclaw`) works with OpenClaw 2026.10.4 again. That release removed the `plugin-sdk/config-runtime` export the bridge read its config through, so every sync failed with "OpenClaw SDK bridge failed". The bridge now reads the config through `plugin-sdk/runtime-config-snapshot` (`getRuntimeConfig()`, the same config `loadConfig()` returned) and falls back to `config-runtime` (`loadConfig()`) on an older install; with neither it reports `Installed OpenClaw SDK exposes neither runtime-config-snapshot nor config-runtime. Update OpenClaw.` The loader is the exported `loadOpenClawConfig` in `xswap/bridge/openclaw.mjs`.
+- The sync reads the bridge result as the last stdout line that is a JSON object, instead of the last line. The 2026.10.4 SDK prints agent-db log lines to stdout after the bridge's one-line JSON, which made the old last-line parse fail even when the sync had succeeded. The bridge output itself is unchanged. With OpenClaw `logging.consoleStyle: "json"` those log lines are JSON objects too, so only an object shaped like a bridge result counts: one with an `error` key, or one with both `completed` and `dryRun`. The "bridge failed" message now names both tested versions (2026.8.1 and 2026.10.4).
+- `xswap doctor`'s `openclaw` row needs `provider-auth` and `agent-runtime` plus either `runtime-config-snapshot` or `config-runtime` to resolve, instead of requiring `config-runtime` (a WARN on every 2026.10.x install).
+
 ## 0.9.2 — 2026-09-26
 
 - `xswap list` orders accounts by slot number again, so the list always reads 1, 2, 3 top to bottom. The 0.8.2 soonest-reset order made the numbers read out of sequence and reshuffled the list after every weekly reset; the reset time stays on each row. Slot numbers and `xswap switch <number>` are unchanged.

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -789,6 +790,58 @@ class DoctorTests(unittest.TestCase):
                 patch("subprocess.run", side_effect=fake_run):
             doctor.check_openclaw()
         self.assertNotIn("CODEX_API_KEY", captured)
+
+    def openclaw_install(self, entries):
+        """A fake OpenClaw package whose exports map exposes only these plugin-sdk entries."""
+        package_root = self.base / "openclaw-pkg"
+        (package_root / "bin").mkdir(parents=True)
+        (package_root / "sdk").mkdir()
+        exports = {}
+        for entry in entries:
+            (package_root / "sdk" / f"{entry}.js").write_text("module.exports = {};\n")
+            exports[f"./plugin-sdk/{entry}"] = f"./sdk/{entry}.js"
+        (package_root / "package.json").write_text(json.dumps({"name": "openclaw", "exports": exports}))
+        (package_root / "bin" / "openclaw").write_text("fixture")
+        return package_root
+
+    def check_openclaw_with(self, entries):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required to run the plugin-sdk probe")
+        package_root = self.openclaw_install(entries)
+        with patch("shutil.which", side_effect=lambda n: str(package_root / "bin" / "openclaw") if n == "openclaw" else node):
+            rows = doctor.check_openclaw()
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_openclaw_probe_accepts_the_new_runtime_config_snapshot_entry(self):
+        row = self.check_openclaw_with(["provider-auth", "agent-runtime", "runtime-config-snapshot"])
+        self.assertEqual(row["status"], "OK")
+
+    def test_openclaw_probe_accepts_the_old_config_runtime_entry(self):
+        row = self.check_openclaw_with(["provider-auth", "agent-runtime", "config-runtime"])
+        self.assertEqual(row["status"], "OK")
+
+    def test_openclaw_probe_accepts_both_config_entries(self):
+        row = self.check_openclaw_with(["provider-auth", "agent-runtime", "runtime-config-snapshot", "config-runtime"])
+        self.assertEqual(row["status"], "OK")
+
+    def test_openclaw_probe_warns_when_neither_config_entry_resolves(self):
+        row = self.check_openclaw_with(["provider-auth", "agent-runtime"])
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("neither runtime-config-snapshot nor config-runtime resolves", row["detail"])
+
+    def test_openclaw_probe_still_requires_provider_auth_and_agent_runtime(self):
+        for missing in ("provider-auth", "agent-runtime"):
+            entries = [e for e in ("provider-auth", "agent-runtime") if e != missing] + ["runtime-config-snapshot"]
+            with self.subTest(missing=missing):
+                self.tearDownOpenclawInstall()
+                row = self.check_openclaw_with(entries)
+                self.assertEqual(row["status"], "WARN")
+                self.assertIn("plugin-sdk entry points not resolvable", row["detail"])
+
+    def tearDownOpenclawInstall(self):
+        shutil.rmtree(self.base / "openclaw-pkg", ignore_errors=True)
 
     def test_never_prints_raw_token(self):
         token = fake_jwt(exp=time.time() + 100000)

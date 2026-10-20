@@ -180,7 +180,7 @@ class AccountTests(unittest.TestCase):
         second = self.manager.prepare("second")
         atomic_json(second / "auth.json", self.auth)
         executable = self.bridge_installation()
-        result = {"account": "second", "completed": ["main"], "backup": "/example/backup"}
+        result = {"account": "second", "completed": ["main"], "dryRun": False, "backup": "/example/backup"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 1, "", "secret-should-not-print")]
         with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses):
             with self.assertRaisesRegex(SwapError, "saved.*reload failed"):
@@ -190,7 +190,7 @@ class AccountTests(unittest.TestCase):
     def test_openclaw_dry_run_does_not_reload_or_select(self):
         self.manager.register("main")
         executable = self.bridge_installation()
-        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 0, '{"dryRun":true}', "")) as run, contextlib.redirect_stdout(io.StringIO()):
+        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 0, '{"completed":[],"dryRun":true}', "")) as run, contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw("main", agents=["worker"], dry=True)
         self.assertEqual(run.call_count, 1)
         request = json.loads(run.call_args.kwargs["input"])
@@ -203,11 +203,75 @@ class AccountTests(unittest.TestCase):
         second = self.manager.prepare("second")
         atomic_json(second / "auth.json", self.auth)
         executable = self.bridge_installation()
-        result = {"completed": ["main", "worker"], "backup": "/example/backup"}
+        result = {"completed": ["main", "worker"], "dryRun": False, "backup": "/example/backup"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw("second", select=True)
         self.assertEqual(self.manager.account()[0], "second")
+
+    def test_openclaw_result_is_found_among_sdk_stdout_noise(self):
+        # OpenClaw 2026.10.4's SDK logs plain lines to stdout after the bridge's own JSON line, so the
+        # last line is not the result; a JSON-looking array or broken object line is skipped as well.
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        result = {"account": "main", "completed": ["main", "worker"], "dryRun": False, "backup": "/example/backup"}
+        for stdout in (
+            "[agent-db] opened /example/state.sqlite\n" + json.dumps(result) + "\n[agent-db] closed\n",
+            json.dumps(result) + "\n{not json}\n[1, 2]\n",
+            "[agent-db] warming up\n" + json.dumps(result),
+        ):
+            responses = [subprocess.CompletedProcess([], 0, stdout, ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+            with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.manager.sync_openclaw("main"), result)
+
+    def test_openclaw_error_result_is_reported_among_sdk_stdout_noise(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        stdout = '[agent-db] opened\n{"error": "Installed OpenClaw SDK exposes neither runtime-config-snapshot nor config-runtime. Update OpenClaw."}\n[agent-db] closed\n'
+        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stdout, "")):
+            with self.assertRaisesRegex(SwapError, "exposes neither runtime-config-snapshot nor config-runtime"):
+                self.manager.sync_openclaw("main")
+
+    def test_openclaw_result_is_picked_among_json_log_lines(self):
+        # With logging.consoleStyle "json" the SDK's log lines are JSON objects too, before and after
+        # the bridge's result; only the object shaped like a bridge result is taken.
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        result = {"account": "main", "completed": ["main", "worker"], "dryRun": False, "backup": "/example/backup"}
+        log_before = json.dumps({"level": "info", "msg": "agent-db opened"})
+        log_after = json.dumps({"level": "info", "msg": "agent-db closed", "completed": True})
+        for stdout in (
+            log_before + "\n" + json.dumps(result) + "\n" + log_after + "\n",
+            json.dumps(result) + "\n" + log_after + "\n",
+            log_before + "\n" + json.dumps(result) + "\n",
+        ):
+            responses = [subprocess.CompletedProcess([], 0, stdout, ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+            with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.manager.sync_openclaw("main"), result)
+
+    def test_openclaw_error_result_is_picked_among_json_log_lines(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        stdout = '{"level":"info","msg":"opened"}\n{"error": "Installed OpenClaw SDK lacks provider-auth."}\n{"level":"info","msg":"closed"}\n'
+        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stdout, "")):
+            with self.assertRaisesRegex(SwapError, "lacks provider-auth"):
+                self.manager.sync_openclaw("main")
+
+    def test_openclaw_stdout_with_only_json_log_lines_fails_as_a_bridge_failure(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        stdout = '{"level":"info","msg":"agent-db opened"}\n{"level":"info","msg":"closed","completed":true}\n{"dryRun":false}\n'
+        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, "")):
+            with self.assertRaisesRegex(SwapError, r"OpenClaw SDK bridge failed.*tested: 2026\.8\.1 and 2026\.10\.4"):
+                self.manager.sync_openclaw("main")
+
+    def test_openclaw_stdout_without_a_json_object_line_still_fails_as_a_bridge_failure(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        for stdout in ("", "[agent-db] opened\n", "[1, 2]\n{not json}\n"):
+            with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, "")):
+                with self.assertRaisesRegex(SwapError, "OpenClaw SDK bridge failed"):
+                    self.manager.sync_openclaw("main")
 
     def test_openclaw_sync_refuses_node_and_openclaw_found_through_a_relative_path_entry(self):
         # Started from a repository whose PATH begins with `bin`, shutil.which handed back
@@ -627,7 +691,7 @@ class AccountTests(unittest.TestCase):
         second = self.manager.prepare("second")
         atomic_json(second / "auth.json", self.auth)
         executable = self.bridge_installation()
-        result = {"completed": ["main", "worker"], "backup": "/example/backup", "profileIds": ["p-main", "p-second"], "profileId": "p-main"}
+        result = {"completed": ["main", "worker"], "dryRun": False, "backup": "/example/backup", "profileIds": ["p-main", "p-second"], "profileId": "p-main"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         # This fixture's tokens are opaque (not JWT-shaped), so the organization is genuinely
         # undeterminable; --allow-mixed sidesteps that guard since this test is about request shape.
@@ -1288,7 +1352,7 @@ class SameOrgGuardTests(unittest.TestCase):
         package = self.base / "openclaw"; package.mkdir()
         (package / "package.json").write_text('{"name":"openclaw"}')
         executable = package / "openclaw.mjs"; executable.touch()
-        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        result = {"completed": ["main"], "dryRun": False, "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         with patch("xswap.manager.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw(["main", "second"])
@@ -1299,7 +1363,7 @@ class SameOrgGuardTests(unittest.TestCase):
         package = self.base / "openclaw"; package.mkdir()
         (package / "package.json").write_text('{"name":"openclaw"}')
         executable = package / "openclaw.mjs"; executable.touch()
-        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        result = {"completed": ["main"], "dryRun": False, "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         with patch("xswap.manager.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses) as run, contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw(["main", "second"], allow_mixed=True)
@@ -1327,7 +1391,7 @@ class SameOrgGuardTests(unittest.TestCase):
         package = self.base / "openclaw"; package.mkdir()
         (package / "package.json").write_text('{"name":"openclaw"}')
         executable = package / "openclaw.mjs"; executable.touch()
-        result = {"completed": ["main"], "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
+        result = {"completed": ["main"], "dryRun": False, "backup": "/example/backup", "profileIds": ["p1", "p2"], "profileId": "p1"}
         responses = [subprocess.CompletedProcess([], 0, json.dumps(result), ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
         with patch("xswap.manager.shutil.which", side_effect=lambda name: str(executable) if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
             self.manager.sync_openclaw(["main", "second"], allow_mixed=True)

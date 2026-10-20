@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sync } from '../src/xswap/bridge/openclaw.mjs';
+import { sync, loadOpenClawConfig } from '../src/xswap/bridge/openclaw.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xswap-test-'));
@@ -199,4 +199,57 @@ test('a failed sync marks its backup directory FAILED instead of deleting it or 
   const backupDir = match[1];
   assert.ok(fs.existsSync(path.join(backupDir, 'manifest.json')), 'backup is preserved, not deleted');
   assert.ok(fs.existsSync(path.join(backupDir, 'FAILED')), 'a FAILED marker distinguishes it from a completed sync');
+});
+
+// A require whose resolve() knows only the listed SDK entries and throws Node's own error codes otherwise.
+function fakeRequire(entries, code = 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
+  return {
+    resolve(specifier) {
+      const entry = specifier.replace('openclaw/plugin-sdk/', '');
+      if (!entries.includes(entry)) throw Object.assign(new Error(`cannot resolve ${entry}`), { code });
+      return `/fake/openclaw/dist/plugin-sdk/${entry}.js`;
+    },
+  };
+}
+
+test('config loader prefers runtime-config-snapshot getRuntimeConfig when the new SDK entry resolves', async () => {
+  const loaded = [];
+  const load = async specifier => {
+    loaded.push(specifier.href);
+    return { getRuntimeConfig: () => ({ from: 'runtime-config-snapshot' }) };
+  };
+  assert.deepEqual(await loadOpenClawConfig(fakeRequire(['runtime-config-snapshot']), load), { from: 'runtime-config-snapshot' });
+  assert.deepEqual(loaded, ['file:///fake/openclaw/dist/plugin-sdk/runtime-config-snapshot.js']);
+});
+
+test('config loader prefers the new entry even when the old one still resolves', async () => {
+  const load = async specifier => specifier.href.includes('runtime-config-snapshot')
+    ? { getRuntimeConfig: () => ({ from: 'new' }), loadConfig: () => ({ from: 'old' }) }
+    : { loadConfig: () => ({ from: 'old' }) };
+  assert.deepEqual(await loadOpenClawConfig(fakeRequire(['runtime-config-snapshot', 'config-runtime']), load), { from: 'new' });
+});
+
+test('config loader falls back to config-runtime loadConfig on an older OpenClaw', async () => {
+  for (const code of ['ERR_PACKAGE_PATH_NOT_EXPORTED', 'MODULE_NOT_FOUND']) {
+    const load = async specifier => {
+      assert.match(specifier.href, /config-runtime\.js$/);
+      return { loadConfig: () => ({ from: 'config-runtime' }) };
+    };
+    assert.deepEqual(await loadOpenClawConfig(fakeRequire(['config-runtime'], code), load), { from: 'config-runtime' });
+  }
+});
+
+test('config loader fails with an update hint when neither SDK entry exists', async () => {
+  const load = async () => assert.fail('nothing should be imported');
+  await assert.rejects(loadOpenClawConfig(fakeRequire([]), load),
+    /Installed OpenClaw SDK exposes neither runtime-config-snapshot nor config-runtime\. Update OpenClaw\./);
+});
+
+test('config loader asserts the exported function exists and does not mask other resolve errors', async () => {
+  await assert.rejects(loadOpenClawConfig(fakeRequire(['runtime-config-snapshot']), async () => ({})),
+    /Installed OpenClaw SDK lacks getRuntimeConfig\. Update OpenClaw\./);
+  await assert.rejects(loadOpenClawConfig(fakeRequire(['config-runtime']), async () => ({ loadConfig: 'nope' })),
+    /Installed OpenClaw SDK lacks loadConfig\. Update OpenClaw\./);
+  const broken = { resolve() { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); } };
+  await assert.rejects(loadOpenClawConfig(broken, async () => ({})), /EACCES/);
 });
