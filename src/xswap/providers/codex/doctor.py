@@ -536,7 +536,10 @@ def check_auto_sessions(manager: Manager, accounts: dict[str, AccountRecord]) ->
     return check("auto sessions", OK, detail)
 
 
-OPENCLAW_ENTRY_POINTS = ("provider-auth", "agent-runtime", "config-runtime")
+# OpenClaw 2026.10 replaced plugin-sdk/config-runtime with runtime-config-snapshot: either one
+# serves the bridge's config read, so only one of the pair has to resolve.
+OPENCLAW_ENTRY_POINTS = ("provider-auth", "agent-runtime")
+OPENCLAW_CONFIG_ENTRY_POINTS = ("runtime-config-snapshot", "config-runtime")
 _NODE_PROBE = """
 const {createRequire} = require('module');
 const path = require('path');
@@ -544,6 +547,14 @@ const req = createRequire(path.join(process.env.XSWAP_DOCTOR_PACKAGE_ROOT, 'pack
 for (const name of process.env.XSWAP_DOCTOR_ENTRIES.split(',')) {
   req.resolve('openclaw/plugin-sdk/' + name);
 }
+const configEntries = process.env.XSWAP_DOCTOR_CONFIG_ENTRIES.split(',');
+const failures = [];
+for (const name of configEntries) {
+  try { req.resolve('openclaw/plugin-sdk/' + name); process.exit(0); }
+  catch (error) { failures.push(error.message.split('\\n')[0]); }
+}
+console.error('neither ' + configEntries.join(' nor ') + ' resolves: ' + failures.join('; '));
+process.exit(1);
 """
 
 
@@ -563,7 +574,8 @@ def check_openclaw() -> list[CheckPayload]:
     package_root = resolve_openclaw_package_root(executable)
     if package_root is None:
         return [check("openclaw", WARN, "cannot locate OpenClaw's installed package through its executable")]
-    env = {**_safe_env(), "XSWAP_DOCTOR_PACKAGE_ROOT": str(package_root), "XSWAP_DOCTOR_ENTRIES": ",".join(OPENCLAW_ENTRY_POINTS)}
+    env = {**_safe_env(), "XSWAP_DOCTOR_PACKAGE_ROOT": str(package_root), "XSWAP_DOCTOR_ENTRIES": ",".join(OPENCLAW_ENTRY_POINTS),
+           "XSWAP_DOCTOR_CONFIG_ENTRIES": ",".join(OPENCLAW_CONFIG_ENTRY_POINTS)}
     try:
         result = subprocess.run([node, "-e", _NODE_PROBE], capture_output=True, text=True, timeout=10, env=env)  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
     except (OSError, subprocess.TimeoutExpired) as exc:

@@ -37,6 +37,25 @@ def parse_pool(value: str | list[str]) -> list[str]:
     return seen
 
 
+def parse_bridge_output(stdout: str) -> dict[str, Any] | None:
+    """The bridge's one-line JSON result: the last line that parses to an object.
+
+    The OpenClaw SDK (2026.10.4 and later) logs plain lines to stdout around the bridge's own
+    output, so neither the last line nor the whole stream is the result.
+    """
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 def resolve_openclaw_package_root(executable: str) -> Path | None:
     """Walk up from the openclaw executable to its package.json (name: "openclaw")."""
     for directory in Path(executable).resolve().parents:
@@ -105,10 +124,9 @@ class OpenClawSync:
         with self.manager.locked():
             result = subprocess.run([node, str(helper)], input=json.dumps(request), text=True,  # noqa: S603 -- argv list, no shell=True; command/args are program-constructed, not user strings
                                     capture_output=True, env=self.manager.env(home), timeout=90)
-            try:
-                output = json.loads(result.stdout.strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                raise SwapError("OpenClaw SDK bridge failed. Check the installed OpenClaw version (tested: 2026.8.1).") from None
+            output = parse_bridge_output(result.stdout)
+            if output is None:
+                raise SwapError("OpenClaw SDK bridge failed. Check the installed OpenClaw version (tested: 2026.8.1).")
             if result.returncode or output.get("error"):
                 raise SwapError(output.get("error", "OpenClaw credential update failed."))
             if dry:

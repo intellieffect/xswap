@@ -209,6 +209,37 @@ class AccountTests(unittest.TestCase):
             self.manager.sync_openclaw("second", select=True)
         self.assertEqual(self.manager.account()[0], "second")
 
+    def test_openclaw_result_is_found_among_sdk_stdout_noise(self):
+        # OpenClaw 2026.10.4's SDK logs plain lines to stdout after the bridge's own JSON line, so the
+        # last line is not the result; a JSON-looking array or broken object line is skipped as well.
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        result = {"account": "main", "completed": ["main", "worker"], "backup": "/example/backup"}
+        for stdout in (
+            "[agent-db] opened /example/state.sqlite\n" + json.dumps(result) + "\n[agent-db] closed\n",
+            json.dumps(result) + "\n{not json}\n[1, 2]\n",
+            "[agent-db] warming up\n" + json.dumps(result),
+        ):
+            responses = [subprocess.CompletedProcess([], 0, stdout, ""), subprocess.CompletedProcess([], 0, '{"ok":true,"warningCount":0}', "")]
+            with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", side_effect=responses), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.manager.sync_openclaw("main"), result)
+
+    def test_openclaw_error_result_is_reported_among_sdk_stdout_noise(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        stdout = '[agent-db] opened\n{"error": "Installed OpenClaw SDK exposes neither runtime-config-snapshot nor config-runtime. Update OpenClaw."}\n[agent-db] closed\n'
+        with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stdout, "")):
+            with self.assertRaisesRegex(SwapError, "exposes neither runtime-config-snapshot nor config-runtime"):
+                self.manager.sync_openclaw("main")
+
+    def test_openclaw_stdout_without_a_json_object_line_still_fails_as_a_bridge_failure(self):
+        self.manager.register("main")
+        executable = self.bridge_installation()
+        for stdout in ("", "[agent-db] opened\n", "[1, 2]\n{not json}\n"):
+            with patch("xswap.manager.shutil.which", side_effect=lambda name: executable if name == "openclaw" else "/usr/bin/node"), patch("xswap.manager.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout, "")):
+                with self.assertRaisesRegex(SwapError, "OpenClaw SDK bridge failed"):
+                    self.manager.sync_openclaw("main")
+
     def test_openclaw_sync_refuses_node_and_openclaw_found_through_a_relative_path_entry(self):
         # Started from a repository whose PATH begins with `bin`, shutil.which handed back
         # `bin/node`: the bridge subprocess then ran that project's own file with the

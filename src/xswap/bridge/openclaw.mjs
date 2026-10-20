@@ -170,17 +170,41 @@ export async function sync(request, sdk, agentSdk, config) {
   }
 }
 
+// OpenClaw 2026.10 removed plugin-sdk/config-runtime; getRuntimeConfig() on runtime-config-snapshot
+// returns the same config loadConfig() did. Older installs keep resolving through config-runtime.
+const MISSING_SDK_ENTRY = new Set(['ERR_PACKAGE_PATH_NOT_EXPORTED', 'MODULE_NOT_FOUND']);
+const CONFIG_ENTRIES = [
+  { entry: 'runtime-config-snapshot', name: 'getRuntimeConfig' },
+  { entry: 'config-runtime', name: 'loadConfig' },
+];
+
+export async function loadOpenClawConfig(require, load = specifier => import(specifier)) {
+  for (const { entry, name } of CONFIG_ENTRIES) {
+    let file;
+    try { file = require.resolve(`openclaw/plugin-sdk/${entry}`); }
+    catch (error) {
+      if (MISSING_SDK_ENTRY.has(error?.code)) continue;
+      throw error;
+    }
+    const configSdk = await load(pathToFileURL(file));
+    assert(typeof configSdk[name] === 'function', `Installed OpenClaw SDK lacks ${name}. Update OpenClaw.`);
+    return await configSdk[name]();
+  }
+  throw new BridgeError('Installed OpenClaw SDK exposes neither runtime-config-snapshot nor config-runtime. Update OpenClaw.');
+}
+
 async function main() {
   const request = JSON.parse(fs.readFileSync(0, 'utf8'));
   const require = createRequire(path.join(request.packageRoot, 'package.json'));
   const sdk = await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/provider-auth')));
   const agentSdk = await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/agent-runtime')));
-  const configSdk = await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/config-runtime')));
   for (const name of ['updateAuthProfileStoreWithLock', 'resolveOpenAICodexAuthIdentity', 'decodeOpenAICodexJwtPayload', 'resolveOpenAICodexAccessTokenExpiry'])
     assert(typeof sdk[name] === 'function', `Installed OpenClaw SDK lacks ${name}. Use OpenClaw 2026.8.1 or a compatible release.`);
   for (const name of ['listAgentIds', 'resolveAgentDir', 'loadAuthProfileStoreWithoutExternalProfiles'])
     assert(typeof agentSdk[name] === 'function', `Installed OpenClaw SDK lacks ${name}. Update OpenClaw.`);
-  const result = await sync(request, sdk, agentSdk, configSdk.loadConfig());
+  const config = await loadOpenClawConfig(require);
+  const result = await sync(request, sdk, agentSdk, config);
+  // The SDK may log to stdout around this line; the Python side takes the last JSON object line.
   console.log(JSON.stringify(result));
 }
 
